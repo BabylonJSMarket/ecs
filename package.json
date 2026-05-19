@@ -1,6 +1,6 @@
 {
   "name": "@babylonjsmarket/ecs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "license": "MIT",
   "description": "Entity-Component-System framework with Babylon and Three renderer adapters",
@@ -31,7 +31,10 @@
       "import": "./dist/Renderer/types.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -49,10 +52,18 @@
     "three": "^0.184.0"
   },
   "peerDependenciesMeta": {
-    "@babylonjs/core": { "optional": true },
-    "@babylonjs/loaders": { "optional": true },
-    "@babylonjs/havok": { "optional": true },
-    "three": { "optional": true }
+    "@babylonjs/core": {
+      "optional": true
+    },
+    "@babylonjs/loaders": {
+      "optional": true
+    },
+    "@babylonjs/havok": {
+      "optional": true
+    },
+    "three": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@babylonjs/core": "^9.3.4",
