@@ -1,0 +1,7 @@
+{
+  "name": "ecs-framework",
+  "description": "API reference and authoring skills for @babylonjsmarket/ecs (World, System, Component, Entity, EventBus, SceneLoader)",
+  "version": "0.2.0",
+  "author": "BabylonJS Market",
+  "homepage": "https://babylonjsmarket.com"
+}

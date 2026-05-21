@@ -1,6 +1,6 @@
 {
   "name": "@babylonjsmarket/ecs",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "type": "module",
   "license": "MIT",
   "description": "Entity-Component-System framework with Babylon and Three renderer adapters",
@@ -29,10 +29,19 @@
     "./renderer-types": {
       "types": "./dist/Renderer/types.d.ts",
       "import": "./dist/Renderer/types.js"
+    },
+    "./viz": {
+      "types": "./src/Viz/index.ts",
+      "import": "./src/Viz/index.ts"
     }
   },
   "files": [
     "dist",
+    "src/Viz",
+    "src/ECS/EventBus/EventBus.viz.tsx",
+    "src/ECS/EventBus/EventBus.panel.tsx",
+    ".claude-plugin",
+    "skills",
     "README.md"
   ],
   "publishConfig": {
@@ -49,7 +58,8 @@
     "@babylonjs/core": "*",
     "@babylonjs/loaders": "*",
     "@babylonjs/havok": "*",
-    "three": "*"
+    "three": "*",
+    "solid-js": "^1.8.0"
   },
   "peerDependenciesMeta": {
     "@babylonjs/core": {
@@ -63,16 +73,22 @@
     },
     "three": {
       "optional": true
+    },
+    "solid-js": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@babylonjs/core": "^9.3.4",
     "@babylonjs/loaders": "^9.3.4",
     "@babylonjs/havok": "^1.3.12",
+    "@solidjs/testing-library": "^0.8.10",
     "@types/three": "^0.184.0",
     "jsdom": "^27.3.0",
+    "solid-js": "^1.9.3",
     "three": "^0.184.0",
     "typescript": "^5.3.0",
+    "vite-plugin-solid": "^2.11.0",
     "vitest": "^2.0.0"
   }
 }
