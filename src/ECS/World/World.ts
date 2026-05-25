@@ -10,6 +10,16 @@ import { RaceDetector } from '../Race/RaceDetector';
 import { withRaceTracking } from '../../Renderer/raceTrackingAdapter';
 
 /**
+ * Canonical lifecycle event names emitted by the World. Listeners (viz panels,
+ * debuggers, spawners) should import these constants rather than hardcoding the
+ * strings, so a rename can't silently desync emitter and listener.
+ */
+export const WorldEvents = {
+  ENTITY_CREATED: 'world.entity.created',
+  ENTITY_REMOVED: 'world.entity.removed',
+} as const;
+
+/**
  * Configuration options for creating a World.
  */
 export interface IWorldOptions {
@@ -28,6 +38,39 @@ export interface IWorldOptions {
    * builds (`import.meta.env.DEV` / `NODE_ENV !== 'production'`).
    */
   detectRaces?: boolean;
+}
+
+/**
+ * Options for an entity pool registered via {@link World.registerPool}.
+ *
+ * Pooling turns per-spawn `createEntity` / per-death `removeEntity` churn into
+ * a fixed, pre-allocated set of entities reused via the `active` flag: a pooled
+ * entity is "removed from play" (parked, `active = false`) instead of destroyed,
+ * keeping the entity and its renderer resources alive for the next spawn.
+ */
+export interface EntityPoolOptions {
+  /** Number of entities to pre-allocate. Caps the concurrent live count. */
+  size: number;
+  /**
+   * Build one pooled entity's components. Runs once per slot at registration,
+   * while the entity is active (so resource-owning systems create their
+   * meshes/handles), before it's parked.
+   */
+  build: (entity: Entity) => void;
+  /**
+   * Reset a recycled entity to spawn state. Runs on each `acquire`, just before
+   * the entity re-enters play. Receives the `data` passed to `acquire`. Use it
+   * to set position, HP, etc. — never to add/remove components.
+   */
+  reset?: (entity: Entity, data?: unknown) => void;
+}
+
+interface EntityPoolRuntime {
+  reset?: (entity: Entity, data?: unknown) => void;
+  /** Parked entities available to acquire. */
+  free: Entity[];
+  /** Live entities in acquisition order (oldest first) — for recycling. */
+  active: Entity[];
 }
 
 function isDev(): boolean {
@@ -120,6 +163,12 @@ export class World {
    * Optional SceneLoader for loading scene definitions.
    */
   private _sceneLoader?: SceneLoader;
+
+  /** Registered entity pools, keyed by name. */
+  private pools: Map<string, EntityPoolRuntime> = new Map();
+
+  /** Reverse lookup: entity id -> pool name (for release-on-removeEntity). */
+  private entityPoolName: Map<EntityId, string> = new Map();
 
   /**
    * Active renderer adapter. Systems read this to create meshes, lights, and
@@ -351,7 +400,7 @@ export class World {
     }
 
     this.entities.set(entity.id, entity);
-    this.eventBus.emit('world.entity.created', { world: this, entity });
+    this.eventBus.emit(WorldEvents.ENTITY_CREATED, { world: this, entity });
 
     // Add to matching systems
     this.systems.forEach(system => {
@@ -468,6 +517,32 @@ export class World {
       return false;
     }
 
+    // Pool-owned entities are returned to the pool (removed from play but kept
+    // alive for reuse), not destroyed. This lets existing "on death,
+    // removeEntity" code transparently recycle a pooled entity.
+    if (this.entityPoolName.has(entityToRemove.id)) {
+      return this.release(entityToRemove);
+    }
+
+    return this.destroyEntity(entityToRemove);
+  }
+
+  /** Truly destroy an entity (the non-pooled removeEntity path). */
+  private destroyEntity(entityToRemove: Entity): boolean {
+    // Drop any pool bookkeeping (used when a pooled entity is force-destroyed,
+    // e.g. removeAllEntities on teardown).
+    const poolName = this.entityPoolName.get(entityToRemove.id);
+    if (poolName !== undefined) {
+      this.entityPoolName.delete(entityToRemove.id);
+      const runtime = this.pools.get(poolName);
+      if (runtime) {
+        const fi = runtime.free.indexOf(entityToRemove);
+        if (fi >= 0) runtime.free.splice(fi, 1);
+        const ai = runtime.active.indexOf(entityToRemove);
+        if (ai >= 0) runtime.active.splice(ai, 1);
+      }
+    }
+
     // Remove from all systems first
     this.systems.forEach(system => {
       system.removeEntity(entityToRemove);
@@ -477,7 +552,7 @@ export class World {
     entityToRemove.destroy();
     this.entities.delete(entityToRemove.id);
 
-    this.eventBus.emit('world.entity.removed', {
+    this.eventBus.emit(WorldEvents.ENTITY_REMOVED, {
       world: this,
       entity: entityToRemove,
     });
@@ -486,12 +561,81 @@ export class World {
   }
 
   /**
-   * Remove all entities from this world.
+   * Remove all entities from this world. Pooled entities are force-destroyed
+   * (their renderer resources are reclaimed by the adapter's teardown, e.g.
+   * `renderer.dispose()`), not parked.
    */
   removeAllEntities(): void {
+    this.pools.clear();
+    this.entityPoolName.clear();
     // Convert to array to avoid mutation during iteration
     const entitiesToRemove = Array.from(this.entities.values());
-    entitiesToRemove.forEach(entity => this.removeEntity(entity));
+    entitiesToRemove.forEach(entity => this.destroyEntity(entity));
+  }
+
+  /**
+   * Register a reusable entity pool. Pre-allocates `size` entities (each built
+   * once by `options.build`) and parks them (`active = false`, so they leave
+   * every system's query set while staying alive). Spawn with {@link acquire};
+   * despawn by calling {@link removeEntity} on a pooled entity (it's released
+   * back to the pool, not destroyed) or {@link release} directly.
+   *
+   * Idempotent per name — a second call with the same name is ignored.
+   */
+  registerPool(name: string, options: EntityPoolOptions): void {
+    if (this.pools.has(name)) return;
+    const runtime: EntityPoolRuntime = { reset: options.reset, free: [], active: [] };
+    this.pools.set(name, runtime);
+    for (let i = 0; i < options.size; i++) {
+      // Name pooled entities after their pool (`enemy-0`, `enemy-1`, …) so they
+      // read clearly in entity inspectors / debuggers instead of `entity-N`.
+      const entity = this.createEntity(`${name}-${i}`);
+      this.entityPoolName.set(entity.id, name);
+      options.build(entity);
+      entity.active = false; // park: leaves all systems, resources kept
+      runtime.free.push(entity);
+    }
+  }
+
+  /**
+   * Acquire a parked entity from the named pool and bring it into play: runs
+   * the pool's `reset(entity, data)`, then re-activates it (re-adding it to
+   * matching systems). When the pool is exhausted, the oldest live entity is
+   * recycled. Returns null only if no pool is registered under `name`.
+   */
+  acquire(name: string, data?: unknown): Entity | null {
+    const runtime = this.pools.get(name);
+    if (!runtime) return null;
+    let entity = runtime.free.pop();
+    if (!entity) {
+      // Exhausted — recycle the oldest live one.
+      entity = runtime.active.shift();
+      if (!entity) return null; // size 0
+      entity.active = false; // park before reset so re-activate is a clean cycle
+    }
+    runtime.reset?.(entity, data);
+    entity.active = true; // unpark: re-added to matching systems
+    runtime.active.push(entity);
+    return entity;
+  }
+
+  /**
+   * Return a pool-owned entity to its pool — removed from play (`active =
+   * false`) but kept alive for reuse. No-op (returns false) for entities that
+   * aren't pool-owned.
+   */
+  release(entity: Entity): boolean {
+    const name = this.entityPoolName.get(entity.id);
+    if (name === undefined) return false;
+    const runtime = this.pools.get(name);
+    if (!runtime) return false;
+    const i = runtime.active.indexOf(entity);
+    if (i >= 0) runtime.active.splice(i, 1);
+    if (!runtime.free.includes(entity)) {
+      entity.active = false;
+      runtime.free.push(entity);
+    }
+    return true;
   }
 
   /**

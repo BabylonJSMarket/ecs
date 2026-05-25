@@ -324,6 +324,32 @@ export function runRendererAdapterContract(
           adapter.stopAnimation('ghost', 'walk');
         }).not.toThrow();
       });
+
+      it('playAnimationOnce returns a number and no-ops on an unknown mesh id', () => {
+        // One-shot driver for hit/death reactions. Unknown id → 0, no throw.
+        let dur: number | undefined;
+        expect(() => {
+          dur = adapter.playAnimationOnce('ghost', 'hit');
+        }).not.toThrow();
+        expect(typeof dur).toBe('number');
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Instanced models (smoke only — instantiating needs a real loaded asset,
+    // which the headless test environment can't fetch). We only assert the
+    // park/dispose surface is safe on ids/handles the adapter doesn't know.
+    // ---------------------------------------------------------------------
+    describe('instanced models', () => {
+      it('setModelVisible / setModelAlpha / disposeModel are smoke-safe on unknown handles/ids', () => {
+        const bogus = adapter.createMesh('decoy', { kind: 'box' });
+        expect(() => {
+          adapter.setModelVisible(bogus, false);
+          adapter.setModelVisible(bogus, true);
+          adapter.setModelAlpha('never-instantiated', 0.5);
+          adapter.disposeModel('never-instantiated', bogus);
+        }).not.toThrow();
+      });
     });
 
     // ---------------------------------------------------------------------

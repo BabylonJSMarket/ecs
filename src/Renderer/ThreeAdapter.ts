@@ -12,25 +12,38 @@
 import type * as THREE from 'three';
 import type {
   ArcCameraSpec,
+  BillboardMode,
   CameraHandle,
   DirectionalLightSpec,
   HemisphericLightSpec,
   IPhysicsInstance,
   LabelHandle,
   LabelSpec,
+  LineHandle,
   LightHandle,
   MaterialSpec,
+  MeshGeometry,
   MeshHandle,
   MeshLoadResult,
   MeshLoadSpec,
+  LoadModelTemplateOptions,
+  ModelInstantiateSpec,
   PhysicsBodyOpts,
+  PhysicsBodySnapshot,
   PhysicsFactory,
+  PickOptions,
+  PickResult,
   PrimitiveSpec,
   RendererAdapter,
   RendererInitOptions,
   ShadowCasterHandle,
+  SkyboxHandle,
+  SkyboxSpec,
+  EnvironmentTextureOpts,
+  PbrMaterialSpec,
   Vec3,
 } from './types';
+import type { Color } from './types';
 
 export interface ThreeAdapterOptions {
   /**
@@ -65,6 +78,8 @@ export class ThreeAdapter implements RendererAdapter {
   scene?: THREE.Scene;
 
   private meshes = new Map<MeshHandle, THREE.Mesh>();
+  // Debug line systems (ray-cast helpers etc.) — polylines flattened to segments.
+  private lines = new Map<LineHandle, THREE.LineSegments>();
   /** Parallel meshId → mesh lookup used by the physics adapter methods. */
   private meshesByMeshId = new Map<string, THREE.Mesh>();
   private lights = new Map<LightHandle, THREE.Light>();
@@ -90,6 +105,7 @@ export class ThreeAdapter implements RendererAdapter {
    */
   private physicsCore: IPhysicsInstance | null = null;
   private physicsFactory?: PhysicsFactory;
+  private physicsPaused = false;
 
   constructor(options: ThreeAdapterOptions = {}) {
     this.physicsFactory = options.physicsFactory;
@@ -103,6 +119,15 @@ export class ThreeAdapter implements RendererAdapter {
    */
   private animationMixers = new Map<string, THREE.AnimationMixer>();
   private animationActions = new Map<string, THREE.AnimationAction>();
+  /**
+   * Instanced-model templates loaded once per url by `loadModelTemplate`, then
+   * cloned per entity by `instantiateModel`. Babylon is the shipping renderer
+   * for the pooled-character path; this Three implementation is functional but
+   * uses a plain `clone()` (correct for static rigs; skinned characters would
+   * want SkeletonUtils — fine until a Three demo needs many skinned clones).
+   */
+  private modelTemplates = new Map<string, { root: THREE.Object3D; animations: THREE.AnimationClip[] }>();
+  private instantiatedModelRoots = new Map<string, THREE.Object3D>();
 
   async init(canvas: HTMLCanvasElement, opts: RendererInitOptions = {}): Promise<void> {
     // Vite's import-analysis plugin resolves bare literal dynamic imports at
@@ -268,6 +293,20 @@ export class ThreeAdapter implements RendererAdapter {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.visible = visible;
   }
+  setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
+    const m = this.meshes.get(h);
+    if (m) m.scale.set(sx, sy, sz);
+  }
+  replaceMeshGeometry(_h: MeshHandle, _geom: MeshGeometry): void {
+    // Mutating geometry requires constructing a new BufferGeometry; deferred
+    // until a Three-side System needs it (the migration is scaffolding-only).
+    void _h; void _geom;
+  }
+  setMeshBillboardMode(_h: MeshHandle, _mode: BillboardMode): void {
+    // Three has no built-in billboard mode; would need a per-frame lookAt.
+    // Deferred — Systems that need this should use a Sprite via createLabel.
+    void _h; void _mode;
+  }
   getMeshWorldPosition(h: MeshHandle, out: Vec3): Vec3 {
     const mesh = this.meshes.get(h);
     if (!mesh || !this.THREE) {
@@ -280,6 +319,24 @@ export class ThreeAdapter implements RendererAdapter {
     out[1] = this._tmpThreeVec.y;
     out[2] = this._tmpThreeVec.z;
     return out;
+  }
+  setMeshBoundingBoxExtents(_h: MeshHandle, _min: Vec3, _max: Vec3): void {
+    // Three.js + the pure-core physics integrator don't fit a BOX shape to a
+    // mesh's bounding box (sphere/box dimensions are passed explicitly in
+    // PhysicsBodyOpts), so there is nothing to override here.
+    void _h; void _min; void _max;
+  }
+  getMeshBoundingBoxExtents(h: MeshHandle): { min: Vec3; max: Vec3 } | null {
+    const mesh = this.meshes.get(h);
+    if (!mesh || !this.THREE) return null;
+    const geom = mesh.geometry;
+    if (!geom.boundingBox) geom.computeBoundingBox();
+    const bb = geom.boundingBox;
+    if (!bb) return null;
+    return {
+      min: [bb.min.x, bb.min.y, bb.min.z],
+      max: [bb.max.x, bb.max.y, bb.max.z],
+    };
   }
   disposeMesh(h: MeshHandle): void {
     const mesh = this.meshes.get(h);
@@ -300,6 +357,51 @@ export class ThreeAdapter implements RendererAdapter {
     }
     this.scene?.remove(mesh);
     this.meshes.delete(h);
+  }
+
+  createLineSystem(id: string, lines: Vec3[][], color?: Color): LineHandle {
+    if (!this.THREE || !this.scene) throw new Error('ThreeAdapter.createLineSystem: call init() first');
+    const geom = new this.THREE.BufferGeometry();
+    geom.setAttribute('position', new this.THREE.Float32BufferAttribute(flattenSegments(lines), 3));
+    const mat = new this.THREE.LineBasicMaterial({
+      color: new this.THREE.Color(color?.[0] ?? 1, color?.[1] ?? 1, color?.[2] ?? 1),
+    });
+    const segments = new this.THREE.LineSegments(geom, mat);
+    segments.name = `${id}_lines`;
+    this.scene.add(segments);
+    const handle = this.makeHandle<LineHandle>('lineSystem', id);
+    this.lines.set(handle, segments);
+    return handle;
+  }
+
+  updateLineSystem(h: LineHandle, lines: Vec3[][], color?: Color): void {
+    const segments = this.lines.get(h);
+    if (!segments || !this.THREE) return;
+    const flat = flattenSegments(lines);
+    const attr = segments.geometry.getAttribute('position');
+    if (attr && attr.array.length === flat.length) {
+      (attr.array as Float32Array).set(flat);
+      attr.needsUpdate = true;
+    } else {
+      segments.geometry.dispose();
+      segments.geometry = new this.THREE.BufferGeometry();
+      segments.geometry.setAttribute('position', new this.THREE.Float32BufferAttribute(flat, 3));
+    }
+    if (color) (segments.material as THREE.LineBasicMaterial).color.setRGB(color[0], color[1], color[2]);
+  }
+
+  setLineSystemVisible(h: LineHandle, visible: boolean): void {
+    const segments = this.lines.get(h);
+    if (segments) segments.visible = visible;
+  }
+
+  disposeLineSystem(h: LineHandle): void {
+    const segments = this.lines.get(h);
+    if (!segments) return;
+    segments.geometry.dispose();
+    (segments.material as THREE.Material).dispose();
+    this.scene?.remove(segments);
+    this.lines.delete(h);
   }
 
   physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void {
@@ -330,8 +432,81 @@ export class ThreeAdapter implements RendererAdapter {
     this.physicsCore?.setBodyVelocity(meshId, vx, vy, vz);
   }
 
+  physicsSetBodyAngularVelocity(_meshId: string, _vx: number, _vy: number, _vz: number): void {
+    // Pure-core integrator doesn't track angular velocity yet.
+    void _meshId; void _vx; void _vy; void _vz;
+  }
+
+  physicsSetBodyDrivenByMesh(_meshId: string, _drivenByMesh: boolean): void {
+    // Pure-core integrator is body-authoritative; no mesh-driven mode to toggle.
+    void _meshId; void _drivenByMesh;
+  }
+
+  physicsSetGravity(_x: number, _y: number, _z: number): void {
+    // Pure-core integrator has no global gravity hook yet.
+    void _x; void _y; void _z;
+  }
+
+  physicsResizeBoxBody(_meshId: string, _halfExtents: Vec3): void {
+    // No box collider concept in the pure-core integrator yet.
+    void _meshId; void _halfExtents;
+  }
+
+  physicsSetTimeStep(_hz: number): void {
+    // Pure-core integrator steps with whatever dt the loop hands it; no
+    // fixed timestep configuration to twist. Babylon override is where the
+    // Hz slider has bite.
+    void _hz;
+  }
+
+  physicsSetRestitution(_meshId: string, _restitution: number): void {
+    // Pure-core integrator has no material model yet.
+    void _meshId; void _restitution;
+  }
+
+  setCollidersVisible(_visible: boolean): void {
+    // No collider debug rendering in the pure-core path.
+    void _visible;
+  }
+
+  physicsSetPaused(paused: boolean): void {
+    // The pure-core integrator only advances when `physicsStep` runs, so a
+    // flag that gates the step fully freezes it.
+    this.physicsPaused = paused;
+  }
+
+  physicsGetBodyState(meshId: string): PhysicsBodySnapshot | null {
+    if (!this.physicsCore) return null;
+    const body = this.physicsCore.bodies().find((b) => b.meshId === meshId);
+    if (!body) return null;
+    // The pure-core integrator exposes position only; rotation/angular velocity
+    // (and a readable linear velocity) aren't in its public surface yet, so
+    // they snapshot as zero. Position rewind is exact; the rest is best-effort
+    // until Rapier.js lands.
+    return {
+      position: [body.posX, body.posY, body.posZ],
+      rotation: [0, 0, 0],
+      linearVelocity: [0, 0, 0],
+      angularVelocity: [0, 0, 0],
+    };
+  }
+
+  physicsSetBodyState(meshId: string, state: PhysicsBodySnapshot): void {
+    // Restore the linear velocity (the one setter the pure-core exposes) and
+    // sync the mesh so the pose is visible while paused. The integrator has no
+    // position setter, so on resume it will drive from its own stored pose.
+    this.physicsCore?.setBodyVelocity(
+      meshId,
+      state.linearVelocity[0],
+      state.linearVelocity[1],
+      state.linearVelocity[2],
+    );
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (mesh) mesh.position.set(state.position[0], state.position[1], state.position[2]);
+  }
+
   physicsStep(dt: number): void {
-    if (!this.physicsCore) return;
+    if (!this.physicsCore || this.physicsPaused) return;
     this.physicsCore.step(dt);
     // Push integrated positions back to the meshes so the render loop picks
     // them up. Static bodies still get written; it's a no-op at the mesh level.
@@ -388,6 +563,108 @@ export class ThreeAdapter implements RendererAdapter {
     }
 
     return { meshId: id, handle, animationNames };
+  }
+
+  async loadModelTemplate(
+    url: string,
+    _opts?: LoadModelTemplateOptions,
+  ): Promise<{ animationNames: string[] }> {
+    // _opts.lockRootMotion is honored by the Babylon adapter (the shipping
+    // renderer for the pooled-character path); the Three path does not strip
+    // root motion yet.
+    if (!this.scene) throw new Error('ThreeAdapter.loadModelTemplate: call init() first');
+    const cached = this.modelTemplates.get(url);
+    if (cached) return { animationNames: cached.animations.map((c) => c.name) };
+    const spec2 = 'three/addons/loaders/GLTFLoader.js';
+    const mod = (await import(/* @vite-ignore */ spec2)) as unknown as {
+      GLTFLoader: new () => {
+        loadAsync(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }>;
+      };
+    };
+    const loader = new mod.GLTFLoader();
+    const gltf = await loader.loadAsync(url);
+    // Keep the template OFF the scene; instantiateModel clones from it.
+    this.modelTemplates.set(url, { root: gltf.scene, animations: gltf.animations });
+    return { animationNames: gltf.animations.map((c) => c.name) };
+  }
+
+  instantiateModel(id: string, url: string, spec?: ModelInstantiateSpec): MeshHandle {
+    const T = this.requireThree();
+    if (!this.scene) throw new Error('ThreeAdapter.instantiateModel: call init() first');
+    const template = this.modelTemplates.get(url);
+    if (!template) {
+      throw new Error(
+        `ThreeAdapter.instantiateModel: template not loaded for "${url}" — await loadModelTemplate first`,
+      );
+    }
+    const root = template.root.clone(true);
+    root.name = id;
+    if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
+    if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+    if (spec?.scale !== undefined) root.scale.setScalar(spec.scale);
+    root.visible = false; // start parked; setModelVisible reveals it
+    this.scene.add(root);
+    this.instantiatedModelRoots.set(id, root);
+
+    const handle = this.makeHandle<MeshHandle>('model', id);
+    // Stored as Mesh for the shared transform helpers; we only touch
+    // position/rotation/visible on it, all present on Object3D.
+    this.meshes.set(handle, root as unknown as THREE.Mesh);
+
+    // Per-clone mixer + actions keyed by id, mirroring loadMesh.
+    if (template.animations.length > 0) {
+      const mixer = new T.AnimationMixer(root);
+      this.animationMixers.set(id, mixer);
+      for (const clip of template.animations) {
+        this.animationActions.set(`${id}/${clip.name}`, mixer.clipAction(clip));
+      }
+    }
+    return handle;
+  }
+
+  setModelVisible(h: MeshHandle, visible: boolean): void {
+    const root = this.meshes.get(h);
+    if (root) root.visible = visible;
+  }
+
+  setModelAlpha(id: string, alpha: number): void {
+    const root = this.instantiatedModelRoots.get(id);
+    if (!root) return;
+    root.traverse((o) => {
+      const mesh = o as unknown as { material?: { transparent?: boolean; opacity?: number } | Array<{ transparent?: boolean; opacity?: number }> };
+      const mat = mesh.material;
+      if (!mat) return;
+      const apply = (m: { transparent?: boolean; opacity?: number }) => {
+        m.transparent = true;
+        m.opacity = alpha;
+      };
+      if (Array.isArray(mat)) mat.forEach(apply);
+      else apply(mat);
+    });
+  }
+
+  disposeModel(id: string, h: MeshHandle): void {
+    const root = this.instantiatedModelRoots.get(id);
+    if (root) {
+      this.scene?.remove(root);
+      this.instantiatedModelRoots.delete(id);
+    }
+    this.animationMixers.get(id)?.stopAllAction();
+    this.animationMixers.delete(id);
+    for (const key of [...this.animationActions.keys()]) {
+      if (key.startsWith(`${id}/`)) this.animationActions.delete(key);
+    }
+    this.meshes.delete(h);
+  }
+
+  playAnimationOnce(meshId: string, clipName: string): number {
+    const action = this.findAnimationAction(meshId, clipName);
+    if (!action || !this.THREE) return 0;
+    action.setLoop(this.THREE.LoopOnce, 1);
+    action.reset();
+    action.clampWhenFinished = true;
+    action.play();
+    return action.getClip().duration;
   }
 
   private _tmpThreeVec?: THREE.Vector3;
@@ -650,6 +927,50 @@ export class ThreeAdapter implements RendererAdapter {
     entry.camera.lookAt(tx, ty, tz);
     ctrl?.update();
   }
+  setCameraRadius(h: CameraHandle, radius: number): void {
+    const entry = this.cameras.get(h);
+    if (!entry) return;
+    const ctrl = entry.controls as { target: THREE.Vector3; update(): void } | undefined;
+    const tx = ctrl?.target.x ?? 0;
+    const ty = ctrl?.target.y ?? 0;
+    const tz = ctrl?.target.z ?? 0;
+    const dx = entry.camera.position.x - tx;
+    const dy = entry.camera.position.y - ty;
+    const dz = entry.camera.position.z - tz;
+    const cur = Math.hypot(dx, dy, dz);
+    if (cur < 1e-6) return;
+    const s = Math.max(0.01, radius) / cur;
+    entry.camera.position.set(tx + dx * s, ty + dy * s, tz + dz * s);
+    entry.camera.lookAt(tx, ty, tz);
+    ctrl?.update();
+  }
+  setCameraRadiusLimits(h: CameraHandle, min: number, max: number): void {
+    const entry = this.cameras.get(h);
+    const ctrl = entry?.controls as { minDistance: number; maxDistance: number; update(): void } | undefined;
+    if (!ctrl) return;
+    ctrl.minDistance = min;
+    ctrl.maxDistance = max;
+    ctrl.update();
+  }
+  setCameraFov(h: CameraHandle, fov: number): void {
+    const entry = this.cameras.get(h);
+    if (!entry) return;
+    // Three's PerspectiveCamera takes FOV in degrees; interface ships radians.
+    entry.camera.fov = (fov * 180) / Math.PI;
+    entry.camera.updateProjectionMatrix();
+  }
+  setCameraControlsEnabled(h: CameraHandle, enabled: boolean): void {
+    const entry = this.cameras.get(h);
+    const ctrl = entry?.controls as { enabled: boolean } | undefined;
+    if (ctrl) ctrl.enabled = enabled;
+  }
+
+  pickAtScreenPoint(_x: number, _y: number, _opts?: PickOptions): PickResult | null {
+    // Raycasting against the active scene + meshes lookup is doable but not
+    // yet wired into any Three-side System; defer until needed.
+    void _x; void _y; void _opts;
+    return null;
+  }
 
   attachShadowCaster(light: LightHandle, mesh: MeshHandle): ShadowCasterHandle {
     this.enableShadowMap();
@@ -670,6 +991,19 @@ export class ThreeAdapter implements RendererAdapter {
     const m = this.meshes.get(h);
     if (m) m.receiveShadow = receive;
   }
+
+  createSkybox(id: string, _spec: SkyboxSpec): SkyboxHandle {
+    return this.makeHandle<SkyboxHandle>('skybox', id);
+  }
+  updateSkyboxSun(_h: SkyboxHandle, _sunDirection: Vec3, _sunColor?: Color): void {}
+  disposeSkybox(_h: SkyboxHandle): void {}
+
+  // IBL on Three needs PMREMGenerator + a different file format than Babylon's
+  // .env — no-op for now; a future implementation would load HDR/EXR + run
+  // PMREM, then assign to scene.environment.
+  setEnvironmentTexture(_url: string, _opts?: EnvironmentTextureOpts): void {}
+  clearEnvironmentTexture(): void {}
+  applyPbrMaterial(_handle: MeshHandle, _spec: PbrMaterialSpec): void {}
 
   createLabel(id: string, spec: LabelSpec): LabelHandle {
     const T = this.requireThree();
@@ -880,6 +1214,7 @@ export class ThreeAdapter implements RendererAdapter {
     this.renderer?.dispose();
     this.renderer = undefined;
     this.scene = undefined;
+    this.lines.clear();
     this.meshes.clear();
     this.meshesByMeshId.clear();
     this.lights.clear();
@@ -896,4 +1231,16 @@ export class ThreeAdapter implements RendererAdapter {
     this.renderer.shadowMap.type = this.THREE.PCFSoftShadowMap;
     this.shadowMapEnabled = true;
   }
+}
+
+/** Flatten polylines into a flat XYZ buffer of segment endpoint pairs for THREE.LineSegments. */
+function flattenSegments(lines: Vec3[][]): number[] {
+  const out: number[] = [];
+  for (const poly of lines) {
+    for (let i = 0; i + 1 < poly.length; i++) {
+      out.push(poly[i]![0], poly[i]![1], poly[i]![2]);
+      out.push(poly[i + 1]![0], poly[i + 1]![1], poly[i + 1]![2]);
+    }
+  }
+  return out;
 }

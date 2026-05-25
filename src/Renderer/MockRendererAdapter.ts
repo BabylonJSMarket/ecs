@@ -7,23 +7,36 @@
 
 import type {
   ArcCameraSpec,
+  BillboardMode,
   CameraHandle,
   DirectionalLightSpec,
   HemisphericLightSpec,
   LabelHandle,
   LabelSpec,
+  LineHandle,
   LightHandle,
   MaterialSpec,
+  MeshGeometry,
   MeshHandle,
   MeshLoadResult,
   MeshLoadSpec,
+  LoadModelTemplateOptions,
+  ModelInstantiateSpec,
   PhysicsBodyOpts,
+  PhysicsBodySnapshot,
+  PickOptions,
+  PickResult,
   PrimitiveSpec,
   RendererAdapter,
   RendererInitOptions,
   ShadowCasterHandle,
+  SkyboxHandle,
+  SkyboxSpec,
+  EnvironmentTextureOpts,
+  PbrMaterialSpec,
   Vec3,
 } from './types';
+import type { Color } from './types';
 
 export interface MockCall {
   method: string;
@@ -41,6 +54,9 @@ export class MockRendererAdapter implements RendererAdapter {
 
   /** Per-mesh world position stub; tests can set this to drive camera-follow logic. */
   meshWorldPositions = new Map<MeshHandle, Vec3>();
+
+  /** Per-mesh bounding-box extents stub; populated by `setMeshBoundingBoxExtents`. */
+  meshBoundingExtents = new Map<MeshHandle, { min: Vec3; max: Vec3 }>();
 
   /** Per-camera angles / target stub; tests can preload values. */
   cameraAngles = new Map<CameraHandle, { alpha: number; beta: number; radius: number }>();
@@ -75,6 +91,15 @@ export class MockRendererAdapter implements RendererAdapter {
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     this.record('setMeshVisible', h, visible);
   }
+  setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
+    this.record('setMeshScale', h, sx, sy, sz);
+  }
+  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
+    this.record('replaceMeshGeometry', h, geom);
+  }
+  setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void {
+    this.record('setMeshBillboardMode', h, mode);
+  }
   getMeshWorldPosition(h: MeshHandle, out: Vec3): Vec3 {
     const pos = this.meshWorldPositions.get(h) ?? [0, 0, 0];
     out[0] = pos[0];
@@ -83,8 +108,43 @@ export class MockRendererAdapter implements RendererAdapter {
     this.record('getMeshWorldPosition', h);
     return out;
   }
+  setMeshBoundingBoxExtents(h: MeshHandle, min: Vec3, max: Vec3): void {
+    this.meshBoundingExtents.set(h, { min: [...min] as Vec3, max: [...max] as Vec3 });
+    this.record('setMeshBoundingBoxExtents', h, min, max);
+  }
+  getMeshBoundingBoxExtents(h: MeshHandle): { min: Vec3; max: Vec3 } | null {
+    this.record('getMeshBoundingBoxExtents', h);
+    return this.meshBoundingExtents.get(h) ?? null;
+  }
   disposeMesh(h: MeshHandle): void {
     this.record('disposeMesh', h);
+  }
+
+  /** Per-line-system stub; tests can assert the last polylines + color drawn. */
+  lineSystems = new Map<LineHandle, { lines: Vec3[][]; color?: Color; visible: boolean }>();
+
+  createLineSystem(id: string, lines: Vec3[][], color?: Color): LineHandle {
+    const h = makeHandle<LineHandle>('lineSystem', id);
+    this.lineSystems.set(h, { lines, color, visible: true });
+    this.record('createLineSystem', id, lines, color);
+    return h;
+  }
+  updateLineSystem(h: LineHandle, lines: Vec3[][], color?: Color): void {
+    const rec = this.lineSystems.get(h);
+    if (rec) {
+      rec.lines = lines;
+      if (color) rec.color = color;
+    }
+    this.record('updateLineSystem', h, lines, color);
+  }
+  setLineSystemVisible(h: LineHandle, visible: boolean): void {
+    const rec = this.lineSystems.get(h);
+    if (rec) rec.visible = visible;
+    this.record('setLineSystemVisible', h, visible);
+  }
+  disposeLineSystem(h: LineHandle): void {
+    this.lineSystems.delete(h);
+    this.record('disposeLineSystem', h);
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
@@ -175,6 +235,25 @@ export class MockRendererAdapter implements RendererAdapter {
     if (a) a.beta = Math.max(0.01, Math.min(Math.PI - 0.01, a.beta + delta));
     this.record('nudgeCameraBeta', h, delta);
   }
+  setCameraRadius(h: CameraHandle, radius: number): void {
+    const a = this.cameraAngles.get(h);
+    if (a) a.radius = radius;
+    this.record('setCameraRadius', h, radius);
+  }
+  setCameraRadiusLimits(h: CameraHandle, min: number, max: number): void {
+    this.record('setCameraRadiusLimits', h, min, max);
+  }
+  setCameraFov(h: CameraHandle, fov: number): void {
+    this.record('setCameraFov', h, fov);
+  }
+  setCameraControlsEnabled(h: CameraHandle, enabled: boolean): void {
+    this.record('setCameraControlsEnabled', h, enabled);
+  }
+
+  pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
+    this.record('pickAtScreenPoint', x, y, opts);
+    return null;
+  }
 
   attachShadowCaster(light: LightHandle, mesh: MeshHandle): ShadowCasterHandle {
     const h = makeHandle<ShadowCasterHandle>('shadow', `${String((light as any).__mockHandle)}+${String((mesh as any).__mockHandle)}`);
@@ -199,6 +278,40 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   setAnimationSpeed(meshId: string, clipName: string, speed: number): void {
     this.record('setAnimationSpeed', meshId, clipName, speed);
+  }
+
+  /** Tests can preload the clip names `loadModelTemplate` resolves with. */
+  modelTemplateAnimationNames: string[] = [];
+  /**
+   * Duration `playAnimationOnce` reports back (seconds). Default 0 so consumers
+   * fall back to their own configured one-shot durations in unit tests.
+   */
+  animationOnceDuration = 0;
+
+  async loadModelTemplate(
+    url: string,
+    opts?: LoadModelTemplateOptions,
+  ): Promise<{ animationNames: string[] }> {
+    this.record('loadModelTemplate', url, opts);
+    return { animationNames: [...this.modelTemplateAnimationNames] };
+  }
+  instantiateModel(id: string, url: string, spec?: ModelInstantiateSpec): MeshHandle {
+    const h = makeHandle<MeshHandle>('model', id);
+    this.record('instantiateModel', id, url, spec);
+    return h;
+  }
+  setModelVisible(h: MeshHandle, visible: boolean): void {
+    this.record('setModelVisible', h, visible);
+  }
+  setModelAlpha(id: string, alpha: number): void {
+    this.record('setModelAlpha', id, alpha);
+  }
+  disposeModel(id: string, h: MeshHandle): void {
+    this.record('disposeModel', id, h);
+  }
+  playAnimationOnce(meshId: string, clipName: string): number {
+    this.record('playAnimationOnce', meshId, clipName);
+    return this.animationOnceDuration;
   }
 
   createLabel(id: string, spec: LabelSpec): LabelHandle {
@@ -228,14 +341,98 @@ export class MockRendererAdapter implements RendererAdapter {
     this.record('disposeLabel', h);
   }
 
+  createSkybox(id: string, spec: SkyboxSpec): SkyboxHandle {
+    const h = makeHandle<SkyboxHandle>('skybox', id);
+    this.record('createSkybox', id, spec);
+    return h;
+  }
+  updateSkyboxSun(h: SkyboxHandle, sunDirection: Vec3, sunColor?: Color): void {
+    this.record('updateSkyboxSun', h, sunDirection, sunColor);
+  }
+  disposeSkybox(h: SkyboxHandle): void {
+    this.record('disposeSkybox', h);
+  }
+
+  setEnvironmentTexture(url: string, opts?: EnvironmentTextureOpts): void {
+    this.record('setEnvironmentTexture', url, opts);
+  }
+  clearEnvironmentTexture(): void {
+    this.record('clearEnvironmentTexture');
+  }
+  applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void {
+    this.record('applyPbrMaterial', handle, spec);
+  }
+
+  /**
+   * In-memory body kinematics, so `physicsGetBodyState`/`physicsSetBodyState`
+   * round-trip in tests without a real engine. Tests can preload/mutate this to
+   * simulate physics motion between frames.
+   */
+  physicsBodies = new Map<string, PhysicsBodySnapshot>();
+  physicsPaused = false;
+
   physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void {
     this.record('physicsCreateBody', meshId, opts);
+    if (!this.physicsBodies.has(meshId)) {
+      this.physicsBodies.set(meshId, {
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        linearVelocity: [0, 0, 0],
+        angularVelocity: [0, 0, 0],
+      });
+    }
+  }
+  physicsSetPaused(paused: boolean): void {
+    this.record('physicsSetPaused', paused);
+    this.physicsPaused = paused;
+  }
+  physicsGetBodyState(meshId: string): PhysicsBodySnapshot | null {
+    this.record('physicsGetBodyState', meshId);
+    const s = this.physicsBodies.get(meshId);
+    if (!s) return null;
+    return {
+      position: [...s.position],
+      rotation: [...s.rotation],
+      linearVelocity: [...s.linearVelocity],
+      angularVelocity: [...s.angularVelocity],
+    };
+  }
+  physicsSetBodyState(meshId: string, state: PhysicsBodySnapshot): void {
+    this.record('physicsSetBodyState', meshId, state);
+    this.physicsBodies.set(meshId, {
+      position: [...state.position],
+      rotation: [...state.rotation],
+      linearVelocity: [...state.linearVelocity],
+      angularVelocity: [...state.angularVelocity],
+    });
   }
   physicsDestroyBody(meshId: string): void {
     this.record('physicsDestroyBody', meshId);
   }
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void {
     this.record('physicsSetBodyVelocity', meshId, vx, vy, vz);
+  }
+  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void {
+    this.record('physicsSetBodyAngularVelocity', meshId, vx, vy, vz);
+  }
+  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
+    this.record('physicsSetBodyDrivenByMesh', meshId, drivenByMesh);
+  }
+  physicsSetGravity(x: number, y: number, z: number): void {
+    this.record('physicsSetGravity', x, y, z);
+  }
+
+  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void {
+    this.record('physicsResizeBoxBody', meshId, halfExtents);
+  }
+  physicsSetTimeStep(hz: number): void {
+    this.record('physicsSetTimeStep', hz);
+  }
+  physicsSetRestitution(meshId: string, restitution: number): void {
+    this.record('physicsSetRestitution', meshId, restitution);
+  }
+  setCollidersVisible(visible: boolean): void {
+    this.record('setCollidersVisible', visible);
   }
   physicsStep(dt: number): void {
     this.record('physicsStep', dt);

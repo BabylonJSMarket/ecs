@@ -9,6 +9,8 @@
     "forceConsistentCasingInFileNames": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": [],
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
     "noEmit": true
   },
   "include": ["src/**/*"],

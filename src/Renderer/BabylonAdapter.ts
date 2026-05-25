@@ -12,44 +12,68 @@ import {
   Engine,
   Scene,
   SceneLoader,
+  LoadAssetContainerAsync,
   Vector3,
+  Quaternion,
   Color3,
   Color4,
+  CubeTexture,
   MeshBuilder,
   StandardMaterial,
+  PBRMaterial,
+  ShaderMaterial,
   HemisphericLight as BabylonHemisphericLight,
   DirectionalLight as BabylonDirectionalLight,
   ArcRotateCamera,
   ShadowGenerator,
+  AnimationPropertiesOverride,
   Mesh,
+  LinesMesh,
   DynamicTexture,
   AnimationGroup,
   PhysicsAggregate,
   PhysicsShapeType,
+  PhysicsShapeBox,
   PhysicsMotionType,
+  PhysicsViewer,
   HavokPlugin,
+  BoundingInfo,
 } from '@babylonjs/core';
+import type { AssetContainer, InstantiatedEntries, TransformNode } from '@babylonjs/core';
 import '@babylonjs/loaders';
 import HavokPhysics from '@babylonjs/havok';
 import type {
   ArcCameraSpec,
+  BillboardMode,
   CameraHandle,
   DirectionalLightSpec,
   HemisphericLightSpec,
   LabelHandle,
+  LineHandle,
   LabelSpec,
   LightHandle,
   MaterialSpec,
+  MeshGeometry,
   MeshHandle,
   MeshLoadResult,
   MeshLoadSpec,
+  LoadModelTemplateOptions,
+  ModelInstantiateSpec,
   PhysicsBodyOpts,
+  PhysicsBodySnapshot,
+  PickOptions,
+  PickResult,
   PrimitiveSpec,
   RendererAdapter,
+  PbrMaterialSpec,
   RendererInitOptions,
   ShadowCasterHandle,
+  SkyboxHandle,
+  SkyboxSpec,
+  EnvironmentTextureOpts,
   Vec3,
 } from './types';
+import type { Color } from './types';
 
 function notImplemented(method: string): never {
   throw new Error(`BabylonAdapter.${method}: not implemented yet`);
@@ -62,6 +86,10 @@ export class BabylonAdapter implements RendererAdapter {
   scene?: Scene;
 
   private meshes = new Map<MeshHandle, Mesh>();
+  // Debug line systems (ray-cast helpers etc.). `shape` is the per-polyline
+  // point count at last build — lets updateLineSystem reuse the mesh in place
+  // (Babylon's `instance`) when the topology is unchanged, else rebuild.
+  private lines = new Map<LineHandle, { mesh: LinesMesh; shape: number[] }>();
   /**
    * Parallel lookup so `physicsCreateBody(meshId, ...)` and related physics
    * methods can find the mesh by the same id used at `createMesh(id, ...)`
@@ -74,9 +102,21 @@ export class BabylonAdapter implements RendererAdapter {
    * used by `playAnimation` etc.), the inner Map's key is the clip name.
    */
   private loadedAnimationGroups = new Map<string, Map<string, AnimationGroup>>();
+  /**
+   * Off-scene asset containers for instanced models, keyed by url. Loaded once
+   * via `loadModelTemplate`; `instantiateModel` clones from them. The in-flight
+   * promise map dedupes concurrent loads so N enemies share one 9 MB parse.
+   */
+  private modelTemplates = new Map<string, AssetContainer>();
+  private modelTemplatePromises = new Map<string, Promise<AssetContainer>>();
+  /** Per-entity instantiated clones, keyed by the id passed to `instantiateModel`. */
+  private instantiatedModels = new Map<string, InstantiatedEntries>();
   /** Havok physics state — lazily initialized the first time physicsCreateBody runs. */
   private physicsAggregates = new Map<string, PhysicsAggregate>();
+  private physicsViewer: PhysicsViewer | null = null;
   private havokPlugin: HavokPlugin | null = null;
+  /** Timestep saved while physics is paused via `physicsSetPaused`. */
+  private savedTimeStep: number | null = null;
   private havokReady = false;
   private havokInitPromise: Promise<void> | null = null;
   /** Pending create requests queued while Havok is still initializing. */
@@ -85,6 +125,10 @@ export class BabylonAdapter implements RendererAdapter {
   private cameras = new Map<CameraHandle, ArcRotateCamera>();
   private shadowGenerators = new Map<LightHandle, ShadowGenerator>();
   private shadowCasters = new Map<ShadowCasterHandle, { light: LightHandle; mesh: MeshHandle }>();
+  private skyboxes = new Map<SkyboxHandle, {
+    mesh: Mesh;
+    material: ShaderMaterial;
+  }>();
   private labels = new Map<LabelHandle, {
     plane: Mesh;
     material: StandardMaterial;
@@ -107,6 +151,15 @@ export class BabylonAdapter implements RendererAdapter {
     // Without this, a scene authored in RH would be Z-mirrored under Babylon.
     this.scene.useRightHandedSystem = true;
     this.scene.collisionsEnabled = true;
+    // Crossfade between character clips (walk↔punch↔death) instead of snapping:
+    // when an AnimationGroup starts, it eases from the skeleton's current pose
+    // over ~blendingSpeed. Scene-global is safe here — only skinned character
+    // clips use Babylon Animations; bullets, muzzle flashes and cameras are
+    // driven by direct transforms, not Animation objects.
+    const blend = new AnimationPropertiesOverride();
+    blend.enableBlending = true;
+    blend.blendingSpeed = 0.08;
+    this.scene.animationPropertiesOverride = blend;
     this.scene.setRenderingAutoClearDepthStencil(1, false, false);
     this.scene.setRenderingAutoClearDepthStencil(2, false, false);
     if (opts.clearColor) {
@@ -207,7 +260,43 @@ export class BabylonAdapter implements RendererAdapter {
   }
   setMeshRotation(h: MeshHandle, x: number, y: number, z: number): void {
     const mesh = this.meshes.get(h);
-    if (mesh) mesh.rotation.set(x, y, z);
+    if (!mesh) return;
+    // PhysicsAggregate assigns rotationQuaternion to drive Havok; once that's
+    // set, Babylon ignores mesh.rotation. Write into the quaternion so
+    // kinematic bodies (flippers, doors, paddles) actually move.
+    if (mesh.rotationQuaternion) {
+      Quaternion.FromEulerAnglesToRef(x, y, z, mesh.rotationQuaternion);
+    } else {
+      mesh.rotation.set(x, y, z);
+    }
+  }
+  setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    mesh.scaling.x = sx;
+    mesh.scaling.y = sy;
+    mesh.scaling.z = sz;
+  }
+  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    // `updatable = true` so subsequent calls can rewrite the same buffer.
+    mesh.setVerticesData('position', geom.positions, true);
+    mesh.setIndices(geom.indices);
+    if (geom.normals) {
+      mesh.setVerticesData('normal', geom.normals, true);
+    } else {
+      // No normals supplied — recompute from positions so lighting works.
+      mesh.createNormals(true);
+    }
+    if (geom.uvs) mesh.setVerticesData('uv', geom.uvs, true);
+    mesh.refreshBoundingInfo();
+  }
+  setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    // Babylon constants: BILLBOARDMODE_NONE=0, BILLBOARDMODE_Y=2, BILLBOARDMODE_ALL=7.
+    mesh.billboardMode = mode === 'all' ? 7 : mode === 'y' ? 2 : 0;
   }
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     const mesh = this.meshes.get(h);
@@ -234,6 +323,24 @@ export class BabylonAdapter implements RendererAdapter {
     }
     return out;
   }
+  setMeshBoundingBoxExtents(h: MeshHandle, min: Vec3, max: Vec3): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    mesh.setBoundingInfo(
+      new BoundingInfo(
+        new Vector3(min[0], min[1], min[2]),
+        new Vector3(max[0], max[1], max[2]),
+      ),
+    );
+  }
+  getMeshBoundingBoxExtents(h: MeshHandle): { min: Vec3; max: Vec3 } | null {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return null;
+    const info = mesh.getBoundingInfo();
+    const min = info.boundingBox.minimum;
+    const max = info.boundingBox.maximum;
+    return { min: [min.x, min.y, min.z], max: [max.x, max.y, max.z] };
+  }
   disposeMesh(h: MeshHandle): void {
     const mesh = this.meshes.get(h);
     if (mesh) {
@@ -248,6 +355,54 @@ export class BabylonAdapter implements RendererAdapter {
       mesh.material?.dispose();
       mesh.dispose();
       this.meshes.delete(h);
+    }
+  }
+
+  createLineSystem(id: string, lines: Vec3[][], color?: Color): LineHandle {
+    const scene = this.scene;
+    if (!scene) throw new Error('BabylonAdapter.createLineSystem: call init() first');
+    const mesh = MeshBuilder.CreateLineSystem(
+      `${id}_lines`,
+      { lines: toV3Lines(lines), updatable: true },
+      scene,
+    );
+    mesh.isPickable = false;
+    if (color) mesh.color = new Color3(color[0], color[1], color[2]);
+    const handle = this.makeHandle<LineHandle>('lineSystem', id);
+    this.lines.set(handle, { mesh, shape: lines.map((l) => l.length) });
+    return handle;
+  }
+
+  updateLineSystem(h: LineHandle, lines: Vec3[][], color?: Color): void {
+    const rec = this.lines.get(h);
+    if (!rec || !this.scene) return;
+    const shape = lines.map((l) => l.length);
+    const sameShape = shape.length === rec.shape.length && shape.every((n, i) => n === rec.shape[i]);
+    if (sameShape) {
+      // Reuse the GPU buffers in place — no per-frame allocation.
+      MeshBuilder.CreateLineSystem(rec.mesh.name, { lines: toV3Lines(lines), instance: rec.mesh }, this.scene);
+    } else {
+      const visible = rec.mesh.isVisible;
+      const name = rec.mesh.name;
+      rec.mesh.dispose();
+      rec.mesh = MeshBuilder.CreateLineSystem(name, { lines: toV3Lines(lines), updatable: true }, this.scene);
+      rec.mesh.isPickable = false;
+      rec.mesh.isVisible = visible;
+      rec.shape = shape;
+    }
+    if (color) rec.mesh.color = new Color3(color[0], color[1], color[2]);
+  }
+
+  setLineSystemVisible(h: LineHandle, visible: boolean): void {
+    const rec = this.lines.get(h);
+    if (rec) rec.mesh.isVisible = visible;
+  }
+
+  disposeLineSystem(h: LineHandle): void {
+    const rec = this.lines.get(h);
+    if (rec) {
+      rec.mesh.dispose();
+      this.lines.delete(h);
     }
   }
 
@@ -283,6 +438,14 @@ export class BabylonAdapter implements RendererAdapter {
     }
     this.loadedAnimationGroups.set(id, byName);
 
+    // Cast a shadow from the loaded meshes (mirrors instantiateModel). A GLB
+    // player model otherwise floats shadow-less while its invisible collision
+    // proxy has its own caster disabled.
+    const gen = this.shadowGenerators.values().next().value as ShadowGenerator | undefined;
+    if (gen) {
+      for (const child of root.getChildMeshes(false)) gen.addShadowCaster(child, false);
+    }
+
     return {
       meshId: id,
       handle,
@@ -290,9 +453,202 @@ export class BabylonAdapter implements RendererAdapter {
     };
   }
 
+  async loadModelTemplate(
+    url: string,
+    opts?: LoadModelTemplateOptions,
+  ): Promise<{ animationNames: string[] }> {
+    if (!this.scene) throw new Error('BabylonAdapter.loadModelTemplate: call init() first');
+    const cached = this.modelTemplates.get(url);
+    if (cached) return { animationNames: cached.animationGroups.map((g) => g.name) };
+    // Dedupe concurrent loads: 24-32 pooled enemies built in one tick must
+    // trigger ONE network fetch + glTF parse, not one each.
+    let pending = this.modelTemplatePromises.get(url);
+    if (!pending) {
+      // LoadAssetContainerAsync keeps the result OFF the scene — it's a template
+      // we clone from. Passing the full url string lets the glTF loader resolve
+      // any sibling .bin / textures itself.
+      pending = LoadAssetContainerAsync(url, this.scene);
+      this.modelTemplatePromises.set(url, pending);
+    }
+    const container = await pending;
+    const firstLoad = !this.modelTemplates.has(url);
+    this.modelTemplates.set(url, container);
+    // Strip baked horizontal root motion once, on the shared template (clones
+    // inherit it). Keeps clips playing in place at the gameplay position.
+    if (firstLoad && opts?.lockRootMotion) this.lockRootMotion(container);
+    return { animationNames: container.animationGroups.map((g) => g.name) };
+  }
+
+  /**
+   * Pin the rig's ROOT bone to the centre horizontally so every clip plays "in
+   * place" over the entity's position. Two cases both need handling:
+   *   • baked root MOTION (a death clip slides the hips across X/Z), and
+   *   • a constant root OFFSET (e.g. the punch clip keeps the hips off-centre) —
+   *     which, once the model yaws to face a target, orbits the proxy and traces
+   *     a "J" instead of spinning in place.
+   * So we force the root bone's X/Z to 0 on every keyframe (keeping Y, so
+   * vertical bob/crouch/fall survive). Other bones keep their structural offsets.
+   *
+   * The root is identified from the skeleton (the parent-less bone) rather than
+   * by motion, so a constant offset is caught too. A variance fallback also
+   * catches a translating track if the name lookup ever misses. Mutates the
+   * template's animations before any clone is made.
+   */
+  private lockRootMotion(container: AssetContainer): void {
+    // Names that identify the skeleton root bone (and its linked node).
+    const rootNames = new Set<string>();
+    for (const skel of container.skeletons) {
+      const root = skel.bones.find((b) => !b.getParent()) ?? skel.bones[0];
+      if (!root) continue;
+      rootNames.add(root.name);
+      const tn = (root as { getTransformNode?: () => { name?: string } | null }).getTransformNode?.();
+      if (tn?.name) rootNames.add(tn.name);
+    }
+
+    for (const group of container.animationGroups) {
+      for (const ta of group.targetedAnimations) {
+        const anim = ta.animation;
+        if (!anim.targetProperty || !anim.targetProperty.toLowerCase().includes('position')) continue;
+        const keys = anim.getKeys();
+        if (keys.length === 0) continue;
+        const targetName = (ta.target as { name?: string } | null)?.name ?? '';
+
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (const k of keys) {
+          const v = k.value as Vector3;
+          if (v.x < minX) minX = v.x;
+          if (v.x > maxX) maxX = v.x;
+          if (v.z < minZ) minZ = v.z;
+          if (v.z > maxZ) maxZ = v.z;
+        }
+        const varies = maxX - minX + (maxZ - minZ) > 1e-3;
+
+        // Only the root bone: matched by name (catches a constant offset) or, as
+        // a fallback, any position track that actually translates (only the root
+        // does in a normal humanoid rig — other bones keep a fixed local offset).
+        if (!rootNames.has(targetName) && !varies) continue;
+
+        for (const k of keys) {
+          const v = k.value as Vector3;
+          k.value = new Vector3(0, v.y, 0);
+        }
+        anim.setKeys(keys);
+      }
+    }
+  }
+
+  instantiateModel(id: string, url: string, spec?: ModelInstantiateSpec): MeshHandle {
+    const container = this.modelTemplates.get(url);
+    if (!container) {
+      throw new Error(
+        `BabylonAdapter.instantiateModel: template not loaded for "${url}" — await loadModelTemplate first`,
+      );
+    }
+    // Skinned meshes can't share a skeleton, so Babylon CLONES (not GPU-
+    // instances) the rig here — each clone gets its own skeleton and its own
+    // animation groups retargeted to it, which is exactly the per-enemy
+    // isolation we need. `cloneMaterials=false` shares the one material.
+    const entries = container.instantiateModelsToScene((n) => `${id}_${n}`, false);
+    this.instantiatedModels.set(id, entries);
+
+    const root = entries.rootNodes[0] as TransformNode | undefined;
+    if (!root) throw new Error(`BabylonAdapter.instantiateModel: no root node for "${url}"`);
+    // glTF sets rotationQuaternion which nullifies Euler `.rotation`; clear it so
+    // setMeshRotation's Euler-yaw path applies (same fix as loadMesh).
+    root.rotationQuaternion = null;
+    if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
+    if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+    if (spec?.scale !== undefined) root.scaling.setAll(spec.scale);
+    // Start parked/hidden — the model System reveals it when the entity is live.
+    root.setEnabled(false);
+
+    // Store the clone root under a handle so setMeshPosition/setMeshRotation
+    // (which touch .position/.rotation — present on TransformNode) drive it.
+    const handle = this.makeHandle<MeshHandle>('model', id);
+    this.meshes.set(handle, root as unknown as Mesh);
+
+    // Register THIS clone's groups under `id` so playAnimation(id, clip) resolves
+    // to its own groups and never grabs another enemy's. Stop them at rest.
+    //
+    // IMPORTANT: instantiateModelsToScene RENAMES each cloned group via our
+    // nameFunction (so the clone's `.name` is `${id}_Walking`, not `Walking`).
+    // Callers ask for the ORIGINAL clip name (`Walking`), so key each clone by
+    // its source group's name — `entries.animationGroups[i]` corresponds to
+    // `container.animationGroups[i]` (cloned in order).
+    const byName = new Map<string, AnimationGroup>();
+    entries.animationGroups.forEach((group, i) => {
+      group.stop();
+      const sourceName = container.animationGroups[i]?.name ?? group.name;
+      byName.set(sourceName, group);
+    });
+    this.loadedAnimationGroups.set(id, byName);
+
+    // Route shadows to the clone's skinned meshes (the invisible sphere proxy
+    // has its caster disabled, so the humanoid casts the shadow, not a sphere).
+    const gen = this.shadowGenerators.values().next().value as ShadowGenerator | undefined;
+    if (gen) {
+      for (const child of root.getChildMeshes(false)) gen.addShadowCaster(child, false);
+    }
+
+    return handle;
+  }
+
+  setModelVisible(h: MeshHandle, visible: boolean): void {
+    const node = this.meshes.get(h);
+    // Clone roots are TransformNodes — toggle the whole subtree with setEnabled
+    // (isVisible only affects a single Mesh, not its children).
+    if (node) node.setEnabled(visible);
+  }
+
+  setModelAlpha(id: string, alpha: number): void {
+    const entries = this.instantiatedModels.get(id);
+    if (!entries) return;
+    // `visibility` is a 0..1 fade multiplier honored by Standard/PBR materials;
+    // apply it to every skinned mesh under the clone root.
+    for (const root of entries.rootNodes) {
+      for (const mesh of (root as TransformNode).getChildMeshes(false)) {
+        mesh.visibility = alpha;
+      }
+    }
+  }
+
+  disposeModel(id: string, h: MeshHandle): void {
+    const entries = this.instantiatedModels.get(id);
+    if (entries) {
+      entries.dispose();
+      this.instantiatedModels.delete(id);
+    }
+    this.meshes.delete(h);
+    this.loadedAnimationGroups.delete(id);
+  }
+
+  playAnimationOnce(meshId: string, clipName: string): number {
+    const group = this.findAnimationGroup(meshId, clipName);
+    if (!group) return 0;
+    // Restart from frame 0 even if already running — playAnimation no-ops while
+    // a clip plays, which would block re-triggering a one-shot (hit/death).
+    group.stop();
+    group.start(false, 1, group.from, group.to, false);
+    const fps = group.targetedAnimations[0]?.animation?.framePerSecond ?? 60;
+    return fps > 0 ? (group.to - group.from) / fps : 0;
+  }
+
   /** Back-compat accessor used by not-yet-migrated Systems (ArcCamera, Shadow). */
   getMeshObject(h: MeshHandle): Mesh | undefined {
     return this.meshes.get(h);
+  }
+
+  applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void {
+    const mesh = this.meshes.get(handle);
+    if (!mesh || !this.scene) return;
+    const mat = new PBRMaterial(spec.name ?? 'pbrMaterial', this.scene);
+    if (spec.metallic !== undefined) mat.metallic = spec.metallic;
+    if (spec.roughness !== undefined) mat.roughness = spec.roughness;
+    if (spec.albedoColor) {
+      mat.albedoColor = new Color3(spec.albedoColor[0], spec.albedoColor[1], spec.albedoColor[2]);
+    }
+    if (spec.environmentIntensity !== undefined) mat.environmentIntensity = spec.environmentIntensity;
+    mesh.material = mat;
   }
 
   private applyPivotAtBottom(mesh: Mesh, offset: number): void {
@@ -397,8 +753,15 @@ export class BabylonAdapter implements RendererAdapter {
         new Vector3(spec.target[0], spec.target[1], spec.target[2]),
         this.scene,
       );
-      camera.attachControl(this.engine.getRenderingCanvas(), true);
       this.scene.activeCamera = camera;
+    }
+    // controlsEnabled defaults to true to preserve historical behavior; the
+    // detach branch lets fixed-camera scenes (top-down shooter, pinball)
+    // ignore mouse input without per-game ceremony in the host file.
+    if (spec.controlsEnabled === false) {
+      camera.detachControl();
+    } else {
+      camera.attachControl(this.engine.getRenderingCanvas(), true);
     }
 
     camera.alpha = spec.alpha;
@@ -496,6 +859,46 @@ export class BabylonAdapter implements RendererAdapter {
     // are set, but not all scenes do. Guard against NaN/negative here.
     cam.radius = Number.isFinite(next) ? Math.max(0.01, next) : cam.radius;
   }
+  setCameraRadius(h: CameraHandle, radius: number): void {
+    const cam = this.cameras.get(h);
+    if (cam) cam.radius = radius;
+  }
+  setCameraRadiusLimits(h: CameraHandle, min: number, max: number): void {
+    const cam = this.cameras.get(h);
+    if (!cam) return;
+    cam.lowerRadiusLimit = min;
+    cam.upperRadiusLimit = max;
+  }
+  setCameraFov(h: CameraHandle, fov: number): void {
+    const cam = this.cameras.get(h);
+    if (cam) cam.fov = fov;
+  }
+  setCameraControlsEnabled(h: CameraHandle, enabled: boolean): void {
+    const cam = this.cameras.get(h);
+    if (!cam) return;
+    if (enabled) {
+      cam.attachControl(this.engine?.getRenderingCanvas(), true);
+    } else {
+      cam.detachControl();
+    }
+  }
+
+  pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
+    if (!this.scene) return null;
+    const predicate = opts?.meshPredicate;
+    const pick = this.scene.pick(
+      x,
+      y,
+      predicate ? (m) => predicate(m.name) : undefined,
+    );
+    if (!pick?.hit || !pick.pickedPoint) return null;
+    return {
+      x: pick.pickedPoint.x,
+      y: pick.pickedPoint.y,
+      z: pick.pickedPoint.z,
+      meshId: pick.pickedMesh?.name ?? '',
+    };
+  }
 
   /** Back-compat accessor used by not-yet-migrated Systems. */
   getBabylonCamera(h: CameraHandle): ArcRotateCamera | undefined {
@@ -523,6 +926,103 @@ export class BabylonAdapter implements RendererAdapter {
   setMeshReceiveShadows(h: MeshHandle, receive: boolean): void {
     const m = this.meshes.get(h);
     if (m) m.receiveShadows = receive;
+  }
+
+  createSkybox(id: string, spec: SkyboxSpec): SkyboxHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createSkybox: call init() first');
+    const scene = this.scene;
+    const size = spec.size ?? 800;
+
+    const mesh = MeshBuilder.CreateSphere(`Skybox_${id}`, {
+      diameter: size,
+      segments: 24,
+      // Invert via sideOrientation so we render the inside faces.
+      sideOrientation: Mesh.BACKSIDE,
+    }, scene);
+    mesh.infiniteDistance = true;
+    mesh.applyFog = false;
+    mesh.isPickable = false;
+    // Skybox is the background — it should NEVER occlude scene geometry via
+    // depth. Without this, distant meshes z-fight the sky at the far plane.
+    mesh.renderingGroupId = 0;
+
+    const material = new ShaderMaterial(
+      `Skybox_${id}_mat`,
+      scene,
+      {
+        vertexSource: SKYBOX_VERTEX_SHADER,
+        fragmentSource: SKYBOX_FRAGMENT_SHADER,
+      },
+      {
+        attributes: ['position'],
+        uniforms: [
+          'worldViewProjection',
+          'sunDir',
+          'sunColor',
+          'zenithColor',
+          'horizonColor',
+          'groundColor',
+          'sunSize',
+          'sunGlowSize',
+        ],
+        needAlphaBlending: false,
+        needAlphaTesting: false,
+      },
+    );
+    material.backFaceCulling = false;
+    material.disableDepthWrite = true;
+
+    const sunDir = normalizeVec3(spec.sunDirection);
+    material.setVector3('sunDir', new Vector3(sunDir[0], sunDir[1], sunDir[2]));
+    material.setColor3('sunColor', Color3.FromArray(spec.sunColor));
+    material.setColor3('zenithColor', Color3.FromArray(spec.zenithColor));
+    material.setColor3('horizonColor', Color3.FromArray(spec.horizonColor));
+    material.setColor3('groundColor', Color3.FromArray(spec.groundColor));
+    material.setFloat('sunSize', spec.sunSize ?? 0.9995);
+    material.setFloat('sunGlowSize', spec.sunGlowSize ?? 60);
+
+    mesh.material = material;
+
+    const handle = this.makeHandle<SkyboxHandle>('skybox', id);
+    this.skyboxes.set(handle, { mesh, material });
+    return handle;
+  }
+
+  updateSkyboxSun(h: SkyboxHandle, sunDirection: Vec3, sunColor?: Color): void {
+    const entry = this.skyboxes.get(h);
+    if (!entry) return;
+    const n = normalizeVec3(sunDirection);
+    entry.material.setVector3('sunDir', new Vector3(n[0], n[1], n[2]));
+    if (sunColor) entry.material.setColor3('sunColor', Color3.FromArray(sunColor));
+  }
+
+  disposeSkybox(h: SkyboxHandle): void {
+    const entry = this.skyboxes.get(h);
+    if (!entry) return;
+    entry.material.dispose();
+    entry.mesh.dispose();
+    this.skyboxes.delete(h);
+  }
+
+  setEnvironmentTexture(url: string, opts?: EnvironmentTextureOpts): void {
+    if (!this.scene) throw new Error('BabylonAdapter.setEnvironmentTexture: call init() first');
+    // `.env` cubemaps are Babylon's prefiltered IBL format. Other formats
+    // would need `CubeTexture.CreateFromImages` or `HDRCubeTexture`; callers
+    // generally ship a renderer-specific URL anyway.
+    const env = CubeTexture.CreateFromPrefilteredData(url, this.scene);
+    env.level = opts?.level ?? 1.0;
+    // Cast lifts the duplicate-@babylonjs/core type tangle (this repo can pull
+    // two copies — packages/ + games/). At runtime they're the same API.
+    (this.scene as unknown as { environmentTexture: unknown }).environmentTexture = env;
+  }
+
+  clearEnvironmentTexture(): void {
+    if (!this.scene) return;
+    const s = this.scene as unknown as {
+      environmentTexture?: { dispose?: () => void } | null;
+    };
+    s.environmentTexture?.dispose?.();
+    s.environmentTexture = null;
   }
 
   createLabel(id: string, spec: LabelSpec): LabelHandle {
@@ -798,10 +1298,158 @@ export class BabylonAdapter implements RendererAdapter {
     aggregate.body.setLinearVelocity(new Vector3(vx, vy, vz));
   }
 
+  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void {
+    const aggregate = this.physicsAggregates.get(meshId);
+    if (!aggregate) return;
+    aggregate.body.setAngularVelocity(new Vector3(vx, vy, vz));
+  }
+
+  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
+    const aggregate = this.physicsAggregates.get(meshId);
+    if (!aggregate) return;
+    // drivenByMesh=true → Babylon reads the mesh transform each step
+    // (disablePreStep = false). drivenByMesh=false → physics owns the
+    // transform; useful for teleports that shouldn't be overwritten.
+    aggregate.body.disablePreStep = !drivenByMesh;
+  }
+
+  physicsSetGravity(x: number, y: number, z: number): void {
+    this.scene?.getPhysicsEngine()?.setGravity(new Vector3(x, y, z));
+  }
+
+  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void {
+    if (!this.scene) return;
+    const aggregate = this.physicsAggregates.get(meshId);
+    if (!aggregate) return;
+    // Build a new BOX shape at the requested dimensions, hot-swap it onto
+    // the body, then dispose the old shape. The body keeps motion type,
+    // mass, restitution, friction, pose, and velocity.
+    const dims = new Vector3(halfExtents[0] * 2, halfExtents[1] * 2, halfExtents[2] * 2);
+    const newShape = new PhysicsShapeBox(
+      new Vector3(0, 0, 0),
+      new Quaternion(0, 0, 0, 1),
+      dims,
+      this.scene,
+    );
+    const oldShape = aggregate.body.shape;
+    aggregate.body.shape = newShape;
+    oldShape?.dispose();
+  }
+
+  physicsSetRestitution(meshId: string, restitution: number): void {
+    const aggregate = this.physicsAggregates.get(meshId);
+    const shape = aggregate?.body.shape;
+    if (!shape) return;
+    shape.material = { ...shape.material, restitution };
+  }
+
+  setCollidersVisible(visible: boolean): void {
+    if (!this.scene) return;
+    if (visible) {
+      if (!this.physicsViewer) this.physicsViewer = new PhysicsViewer(this.scene);
+      for (const agg of this.physicsAggregates.values()) {
+        this.physicsViewer.showBody(agg.body);
+      }
+    } else if (this.physicsViewer) {
+      for (const agg of this.physicsAggregates.values()) {
+        this.physicsViewer.hideBody(agg.body);
+      }
+      this.physicsViewer.dispose();
+      this.physicsViewer = null;
+    }
+  }
+
   physicsStep(_dt: number): void {
     // Havok advances during `scene.render`. Exposed as a no-op so the System
     // can call it uniformly across adapters.
     void _dt;
+  }
+
+  physicsSetPaused(paused: boolean): void {
+    if (!this.havokPlugin) return;
+    if (paused) {
+      // Save the live rate once and freeze the sim. `scene.render` still runs
+      // (we don't control the render loop here), but a 0 timestep means Havok
+      // performs no integration, so bodies hold still while we step.
+      if (this.savedTimeStep === null) {
+        this.savedTimeStep = this.havokPlugin.getTimeStep();
+        this.havokPlugin.setTimeStep(0);
+      }
+    } else if (this.savedTimeStep !== null) {
+      this.havokPlugin.setTimeStep(this.savedTimeStep);
+      this.savedTimeStep = null;
+    }
+  }
+
+  physicsGetBodyState(meshId: string): PhysicsBodySnapshot | null {
+    const aggregate = this.physicsAggregates.get(meshId);
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (!aggregate || !mesh) return null;
+
+    const lin = aggregate.body.getLinearVelocity();
+    const ang = aggregate.body.getAngularVelocity();
+
+    let rx = mesh.rotation.x;
+    let ry = mesh.rotation.y;
+    let rz = mesh.rotation.z;
+    if (mesh.rotationQuaternion) {
+      // PhysicsAggregate drives rotationQuaternion; convert to Euler for the
+      // renderer-agnostic snapshot.
+      const e = mesh.rotationQuaternion.toEulerAngles();
+      rx = e.x;
+      ry = e.y;
+      rz = e.z;
+    }
+
+    return {
+      position: [mesh.position.x, mesh.position.y, mesh.position.z],
+      rotation: [rx, ry, rz],
+      linearVelocity: [lin.x, lin.y, lin.z],
+      angularVelocity: [ang.x, ang.y, ang.z],
+    };
+  }
+
+  physicsSetBodyState(meshId: string, state: PhysicsBodySnapshot): void {
+    const aggregate = this.physicsAggregates.get(meshId);
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (!aggregate || !mesh) return;
+
+    const [px, py, pz] = state.position;
+    const [rx, ry, rz] = state.rotation;
+
+    // Sync the mesh first so the restore is visible immediately even while
+    // physics is paused (no step will copy the body pose back this frame).
+    mesh.position.set(px, py, pz);
+    let q: Quaternion;
+    if (mesh.rotationQuaternion) {
+      Quaternion.FromEulerAnglesToRef(rx, ry, rz, mesh.rotationQuaternion);
+      q = mesh.rotationQuaternion;
+    } else {
+      mesh.rotation.set(rx, ry, rz);
+      q = Quaternion.FromEulerAngles(rx, ry, rz);
+    }
+
+    // Teleport the body so the solver adopts the restored pose, then restore
+    // both velocities so resuming continues with the recorded momentum.
+    aggregate.body.setTargetTransform(new Vector3(px, py, pz), q);
+    aggregate.body.setLinearVelocity(
+      new Vector3(state.linearVelocity[0], state.linearVelocity[1], state.linearVelocity[2]),
+    );
+    aggregate.body.setAngularVelocity(
+      new Vector3(state.angularVelocity[0], state.angularVelocity[1], state.angularVelocity[2]),
+    );
+  }
+
+  physicsSetTimeStep(hz: number): void {
+    if (!Number.isFinite(hz) || hz <= 0) return;
+    // Buffer the rate if Havok hasn't booted yet; ensureHavok drains
+    // pending creates but not arbitrary callbacks, so we just retry once
+    // the plugin is live.
+    if (!this.havokPlugin) {
+      void this.ensureHavok().then(() => this.physicsSetTimeStep(hz));
+      return;
+    }
+    this.havokPlugin.setTimeStep(1 / hz);
   }
 
   startLoop(onFrame: (dtSeconds: number) => void): void {
@@ -855,6 +1503,7 @@ export class BabylonAdapter implements RendererAdapter {
     this.engine?.dispose();
     this.scene = undefined;
     this.engine = undefined;
+    this.lines.clear();
     this.meshes.clear();
     this.meshesByMeshId.clear();
     this.lights.clear();
@@ -862,9 +1511,68 @@ export class BabylonAdapter implements RendererAdapter {
     this.shadowGenerators.clear();
     this.shadowCasters.clear();
     this.labels.clear();
+    this.skyboxes.clear();
     this.loadedAnimationGroups.clear();
   }
 }
 
-// Silence unused-import warnings for symbols that will be used in later steps.
-void Vector3;
+function normalizeVec3(v: Vec3): Vec3 {
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+function toV3Lines(lines: Vec3[][]): Vector3[][] {
+  return lines.map((poly) => poly.map((p) => new Vector3(p[0], p[1], p[2])));
+}
+
+// Vertex: pass model-space position as the "view ray" — the skybox sphere is
+// centered on the camera (infiniteDistance), so the unnormalized vertex
+// position is the direction we want to shade.
+const SKYBOX_VERTEX_SHADER = `
+precision highp float;
+attribute vec3 position;
+uniform mat4 worldViewProjection;
+varying vec3 vDir;
+void main() {
+  vDir = position;
+  gl_Position = worldViewProjection * vec4(position, 1.0);
+}
+`;
+
+// Fragment: horizon→zenith→ground gradient + sun disc + halo + horizon haze
+// toward the sun. All emissive (skybox is not lit by scene lights).
+const SKYBOX_FRAGMENT_SHADER = `
+precision highp float;
+varying vec3 vDir;
+uniform vec3 sunDir;
+uniform vec3 sunColor;
+uniform vec3 zenithColor;
+uniform vec3 horizonColor;
+uniform vec3 groundColor;
+uniform float sunSize;
+uniform float sunGlowSize;
+
+void main() {
+  vec3 dir = normalize(vDir);
+  vec3 sun = normalize(sunDir);
+  float vy = dir.y;
+
+  vec3 sky;
+  if (vy > 0.0) {
+    float t = smoothstep(0.0, 0.6, vy);
+    sky = mix(horizonColor, zenithColor, t);
+  } else {
+    float t = smoothstep(0.0, 0.4, -vy);
+    sky = mix(horizonColor, groundColor, t);
+  }
+
+  float sunDot = max(0.0, dot(dir, sun));
+  float disc = smoothstep(sunSize, 1.0, sunDot);
+  float halo = pow(sunDot, sunGlowSize);
+  float horizon = smoothstep(0.25, 0.0, abs(vy));
+  float haze = pow(sunDot, 6.0) * horizon * 0.55;
+
+  vec3 col = sky + sunColor * (disc * 1.6 + halo * 0.55 + haze);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
