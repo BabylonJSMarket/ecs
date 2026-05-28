@@ -38,6 +38,19 @@ export interface EventBusOptions {
  * the running System. Avoids a direct dependency so the bus stays a plain
  * messaging primitive.
  */
+/**
+ * A single event captured by the ring-buffer recorder. `seq` is a strictly-
+ * increasing global counter — debug viewers track the last seq they consumed
+ * and drain only newer slots, so a polling reader never re-processes events.
+ */
+export interface RecordedEvent {
+  type: string;
+  data: unknown;
+  frame: number;
+  timestamp: number;
+  seq: number;
+}
+
 export interface IRaceDetectorEventSink {
   recordEvent(type: string, data: unknown): void;
 }
@@ -180,6 +193,21 @@ export class EventBus {
    */
   private _raceDetector: IRaceDetectorEventSink | null = null;
 
+  // ── Ring-buffer recording (for debug overlays) ────────────────────────
+  // A fixed-capacity circular log of recent emits. Debug viewers (EventBus
+  // debugger, profilers) call enableRecording(N) when shown and poll
+  // getRecentEvents(sinceSeq) on a timer to drain new events. The bus pays
+  // ONE check per emit (a null-test on the buffer), and when active a few
+  // field writes per emit reusing pre-allocated slots — there's no per-
+  // subscriber dispatch and no event-wrapper allocation (the wildcard path
+  // does both, which is why having any '*' subscriber tanks high-volume
+  // scenes). Refcounted enable so multiple viewers can share the buffer.
+  private _recordingBuffer: RecordedEvent[] | null = null;
+  private _recordingCapacity = 0;
+  private _recordingIndex = 0;
+  private _recordingSeq = 0;
+  private _recordingEnableCount = 0;
+
   /**
    * Create a new EventBus instance.
    * @param options - Configuration options
@@ -222,6 +250,85 @@ export class EventBus {
   }
 
   /**
+   * Start recording emits into a fixed-capacity ring buffer. Refcounted, so
+   * multiple debug viewers can share the same buffer; the buffer is freed
+   * when the last viewer calls disableRecording(). When the buffer is full,
+   * the oldest slot is overwritten. If a later caller asks for a larger
+   * capacity than what's already allocated, the buffer is grown to match.
+   *
+   * Designed for debug overlays (EventBus debugger, profilers, etc.). Cheaper
+   * than subscribing to '*': there's no per-subscriber dispatch and no event-
+   * wrapper allocation — the bus stays on its fast emit path.
+   */
+  enableRecording(maxEvents: number): void {
+    this._recordingEnableCount++;
+    const want = Math.max(1, maxEvents | 0);
+    if (this._recordingBuffer !== null) {
+      if (want > this._recordingCapacity) this._allocRecordingBuffer(want);
+      return;
+    }
+    this._allocRecordingBuffer(want);
+  }
+
+  /**
+   * Decrement the recording refcount; the buffer is freed when no viewers
+   * remain. Safe to call when recording isn't active.
+   */
+  disableRecording(): void {
+    if (this._recordingEnableCount === 0) return;
+    this._recordingEnableCount--;
+    if (this._recordingEnableCount === 0) {
+      this._recordingBuffer = null;
+      this._recordingCapacity = 0;
+      this._recordingIndex = 0;
+    }
+  }
+
+  /** True while recording is active. */
+  get isRecording(): boolean {
+    return this._recordingBuffer !== null;
+  }
+
+  /**
+   * Return recorded events in chronological order (oldest first). Pass the
+   * caller's last-seen `seq` to drain only what's new since the previous
+   * poll — the recommended polling pattern for debug overlays.
+   */
+  getRecentEvents(sinceSeq: number = 0): RecordedEvent[] {
+    const buf = this._recordingBuffer;
+    if (!buf) return [];
+    const cap = this._recordingCapacity;
+    const out: RecordedEvent[] = [];
+    // Walk from the next-to-overwrite slot (oldest) forward, wrapping.
+    for (let i = 0; i < cap; i++) {
+      const e = buf[(this._recordingIndex + i) % cap];
+      if (e && e.seq > sinceSeq) out.push(e);
+    }
+    return out;
+  }
+
+  private _allocRecordingBuffer(capacity: number): void {
+    this._recordingCapacity = capacity;
+    this._recordingBuffer = new Array(capacity);
+    this._recordingIndex = 0;
+    // Pre-fill with reusable slots so steady-state recording doesn't GC.
+    for (let i = 0; i < capacity; i++) {
+      this._recordingBuffer[i] = { type: '', data: undefined, frame: 0, timestamp: 0, seq: 0 };
+    }
+  }
+
+  private _recordEmit(type: string, data: unknown): void {
+    this._recordingSeq++;
+    const slot = this._recordingBuffer![this._recordingIndex];
+    slot.type = type;
+    slot.data = data;
+    slot.frame = this._currentFrame;
+    slot.timestamp = performance.now();
+    slot.seq = this._recordingSeq;
+    this._recordingIndex = (this._recordingIndex + 1) % this._recordingCapacity;
+  }
+
+  /**
    * Emit an event to all listeners of that type.
    *
    * Events emitted during listener execution are queued and
@@ -231,6 +338,10 @@ export class EventBus {
    * @param data - Optional data to pass to listeners
    */
   emit<T = any>(type: string, data?: T): void {
+    // Ring-buffer recording (debug overlays). One null-check when off, a
+    // handful of slot writes when on — see _recordEmit. Stays out of the
+    // wildcard/wrapper code path so the fast emit path is preserved.
+    if (this._recordingBuffer !== null) this._recordEmit(type, data);
     // Check for duplicate events if tracking is enabled
     this.checkDuplicate(type, data);
 
@@ -353,6 +464,9 @@ export class EventBus {
    * @param data - Optional event data
    */
   emitImmediate<T = any>(type: string, data?: T): void {
+    // Mirror emit's ring-buffer recording so debug viewers see immediate
+    // emits too (otherwise hot-path emitImmediate calls would vanish).
+    if (this._recordingBuffer !== null) this._recordEmit(type, data);
     // Fast path when no wildcard listeners
     if (this.wildcardListeners.size === 0) {
       this.processEventDirect(type, data);

@@ -77,6 +77,17 @@ export const EventBusDebuggerEvents = {
 export class EventBusDebuggerSystem extends System {
   private eventUnsubscribes: (() => void)[] = [];
   private component: EventBusDebuggerComponent | null = null;
+  // We no longer subscribe to '*' — any wildcard subscriber forces every emit
+  // off the bus's fast path. Instead the bus has its own opt-in ring buffer
+  // (EventBus.enableRecording); we drive it on/off with panel visibility and
+  // drain new entries on a low-frequency poll. The targeted listeners
+  // (entity.removed) stay on always — they're cheap and routed by event name.
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastReadSeq = 0;
+  /** Ring-buffer capacity at the bus while the panel is recording. */
+  private readonly RECORD_CAPACITY = 1024;
+  /** Drain cadence — the panel UI refreshes about 5×/s, plenty for debugging. */
+  private readonly POLL_MS = 200;
 
   private readonly STORAGE_KEY = 'arcade-ebd-expanded';
   private readonly PANEL_ID = 'eventbus-debugger';
@@ -125,6 +136,7 @@ export class EventBusDebuggerSystem extends System {
     const comp = entity.get(EventBusDebuggerComponent);
     if (comp === this.component) {
       vizStore.unregisterPanel(this.PANEL_ID);
+      this.stopRecording();
       this.eventUnsubscribes.forEach((u) => u());
       this.eventUnsubscribes = [];
       this.component = null;
@@ -141,24 +153,25 @@ export class EventBusDebuggerSystem extends System {
         {},
       );
     }
+    // Gate bus-side recording on visibility (visibility IS the toggle):
+    // hidden → recording off → bus stays on its fast path → zero overhead at
+    // high event volumes. Showing the panel turns recording back on and the
+    // poll drains new events; the buffer starts empty from that moment,
+    // which is the right semantics for a debug tool you reach for on demand.
+    if (panelVisible) this.startRecording();
+    else this.stopRecording();
   }
 
   protected onShutdown(): void {
     vizStore.unregisterPanel(this.PANEL_ID);
+    this.stopRecording();
     this.eventUnsubscribes.forEach((u) => u());
     this.eventUnsubscribes = [];
   }
 
-  private setupEventListeners(comp: EventBusDebuggerComponent): void {
-    const unsub = this.eventBus.on('*', (event: { type: string; data: unknown }) => {
-      if (this.paused[0]()) return;
-      for (const exclude of comp.excludeEvents) {
-        if (event.type.startsWith(exclude)) return;
-      }
-      this.logEvent(event.type, event.data);
-    });
-    this.eventUnsubscribes.push(unsub);
-
+  private setupEventListeners(_comp: EventBusDebuggerComponent): void {
+    // Only the targeted listeners go here — the wildcard '*' lives behind
+    // subscribeWildcard() so it's added/removed with panel visibility.
     const removedUnsub = this.eventBus.on(
       'world.entity.removed',
       (data: { entityId?: string }) => {
@@ -170,6 +183,38 @@ export class EventBusDebuggerSystem extends System {
       },
     );
     this.eventUnsubscribes.push(removedUnsub);
+  }
+
+  private startRecording(): void {
+    if (this.pollTimer !== null) return;
+    this.eventBus.enableRecording(this.RECORD_CAPACITY);
+    // Skip whatever's already in the buffer — fresh tail from "now."
+    const recent = this.eventBus.getRecentEvents(0);
+    this.lastReadSeq = recent.length > 0 ? recent[recent.length - 1].seq : 0;
+    this.pollTimer = setInterval(() => this.drainRecording(), this.POLL_MS);
+  }
+
+  private stopRecording(): void {
+    if (this.pollTimer === null) return;
+    clearInterval(this.pollTimer);
+    this.pollTimer = null;
+    this.eventBus.disableRecording();
+    this.lastReadSeq = 0;
+  }
+
+  private drainRecording(): void {
+    if (this.paused[0]() || !this.component) return;
+    const events = this.eventBus.getRecentEvents(this.lastReadSeq);
+    if (events.length === 0) return;
+    const excludes = this.component.excludeEvents;
+    for (const ev of events) {
+      let excluded = false;
+      for (const ex of excludes) {
+        if (ev.type.startsWith(ex)) { excluded = true; break; }
+      }
+      if (!excluded) this.logEvent(ev.type, ev.data);
+    }
+    this.lastReadSeq = events[events.length - 1].seq;
   }
 
   private logEvent(eventType: string, data: unknown): void {
