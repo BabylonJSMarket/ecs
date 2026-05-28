@@ -26,6 +26,7 @@ import type {
   MeshHandle,
   PhysicsBodyOpts,
   PrimitiveSpec,
+  SkyboxSpec,
   Vec3,
 } from './types';
 
@@ -347,6 +348,442 @@ describe('MockRendererAdapter', () => {
       for (const e of entries) {
         expect(e.args).toEqual([]);
       }
+    });
+  });
+
+  describe('mesh extended operations', () => {
+    const prim: PrimitiveSpec = { kind: 'box', width: 1, height: 1, depth: 1 };
+
+    it('setMeshScale records the call with the handle and scale args', () => {
+      const h = renderer.createMesh('block', prim);
+      renderer.setMeshScale(h, 2, 3, 4);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('setMeshScale');
+      expect(last.args).toEqual([h, 2, 3, 4]);
+    });
+
+    it('replaceMeshGeometry records the call with the geometry', () => {
+      const h = renderer.createMesh('block', prim);
+      const geom = { positions: [0, 1, 2], indices: [0, 1, 2], normals: [0, 1, 0] };
+      renderer.replaceMeshGeometry(h, geom as any);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('replaceMeshGeometry');
+      expect(last.args[1]).toBe(geom);
+    });
+
+    it('setMeshBillboardMode records the call with the mode', () => {
+      const h = renderer.createMesh('sprite', prim);
+      renderer.setMeshBillboardMode(h, 'all');
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('setMeshBillboardMode');
+      expect(last.args).toEqual([h, 'all']);
+    });
+
+    it('setMeshBoundingBoxExtents stores extents and records the call', () => {
+      const h = renderer.createMesh('block', prim);
+      const min: Vec3 = [-1, -1, -1];
+      const max: Vec3 = [1, 1, 1];
+      renderer.setMeshBoundingBoxExtents(h, min, max);
+      const stored = renderer.meshBoundingExtents.get(h);
+      expect(stored).toEqual({ min: [-1, -1, -1], max: [1, 1, 1] });
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('setMeshBoundingBoxExtents');
+    });
+
+    it('getMeshBoundingBoxExtents returns stored extents after set', () => {
+      const h = renderer.createMesh('block', prim);
+      renderer.setMeshBoundingBoxExtents(h, [-2, -2, -2], [2, 2, 2]);
+      const result = renderer.getMeshBoundingBoxExtents(h);
+      expect(result).toEqual({ min: [-2, -2, -2], max: [2, 2, 2] });
+      expect(renderer.calls.some((c) => c.method === 'getMeshBoundingBoxExtents')).toBe(true);
+    });
+
+    it('getMeshBoundingBoxExtents returns null when no extents set', () => {
+      const h = renderer.createMesh('block', prim);
+      const result = renderer.getMeshBoundingBoxExtents(h);
+      expect(result).toBeNull();
+    });
+
+    it('setMeshPosition round-trips through getMeshWorldPosition', () => {
+      const h = renderer.createMesh('hero', prim);
+      renderer.setMeshPosition(h, 5, 10, 15);
+      const out: Vec3 = [0, 0, 0];
+      renderer.getMeshWorldPosition(h, out);
+      expect(out).toEqual([5, 10, 15]);
+    });
+  });
+
+  describe('line system', () => {
+    it('createLineSystem returns a handle, stores the lines, and records the call', () => {
+      const lines: Vec3[][] = [[[0, 0, 0], [1, 1, 1]]];
+      const h = renderer.createLineSystem('path', lines, [1, 0, 0]);
+      expect(h).toBeDefined();
+      const stored = renderer.lineSystems.get(h);
+      expect(stored).toBeDefined();
+      expect(stored!.lines).toEqual(lines);
+      expect(stored!.color).toEqual([1, 0, 0]);
+      expect(stored!.visible).toBe(true);
+      expect(renderer.calls[0].method).toBe('createLineSystem');
+    });
+
+    it('updateLineSystem mutates stored lines and color', () => {
+      const h = renderer.createLineSystem('path', [[[0, 0, 0], [1, 0, 0]]]);
+      const newLines: Vec3[][] = [[[2, 2, 2], [3, 3, 3]]];
+      renderer.updateLineSystem(h, newLines, [0, 1, 0]);
+      const stored = renderer.lineSystems.get(h);
+      expect(stored!.lines).toEqual(newLines);
+      expect(stored!.color).toEqual([0, 1, 0]);
+      expect(renderer.calls.some((c) => c.method === 'updateLineSystem')).toBe(true);
+    });
+
+    it('updateLineSystem on unknown handle records the call without throwing', () => {
+      const fakeHandle = { __mockHandle: 'lineSystem:ghost' } as any;
+      const lines: Vec3[][] = [[[0, 0, 0], [1, 0, 0]]];
+      renderer.updateLineSystem(fakeHandle, lines);
+      expect(renderer.calls[0].method).toBe('updateLineSystem');
+    });
+
+    it('updateLineSystem without color does not overwrite existing color', () => {
+      const h = renderer.createLineSystem('path', [[[0, 0, 0], [1, 0, 0]]], [1, 0, 0]);
+      renderer.updateLineSystem(h, [[[5, 5, 5], [6, 6, 6]]]);
+      const stored = renderer.lineSystems.get(h);
+      expect(stored!.color).toEqual([1, 0, 0]); // unchanged
+    });
+
+    it('setLineSystemVisible mutates the visible flag', () => {
+      const h = renderer.createLineSystem('path', []);
+      renderer.setLineSystemVisible(h, false);
+      expect(renderer.lineSystems.get(h)!.visible).toBe(false);
+      expect(renderer.calls.some((c) => c.method === 'setLineSystemVisible')).toBe(true);
+    });
+
+    it('setLineSystemVisible on unknown handle records the call without throwing', () => {
+      const fakeHandle = { __mockHandle: 'lineSystem:ghost' } as any;
+      renderer.setLineSystemVisible(fakeHandle, true);
+      expect(renderer.calls[0].method).toBe('setLineSystemVisible');
+    });
+
+    it('disposeLineSystem removes the entry from lineSystems', () => {
+      const h = renderer.createLineSystem('path', []);
+      renderer.disposeLineSystem(h);
+      expect(renderer.lineSystems.has(h)).toBe(false);
+      expect(renderer.calls.some((c) => c.method === 'disposeLineSystem')).toBe(true);
+    });
+  });
+
+  describe('cameras extended', () => {
+    const camSpec: ArcCameraSpec = {
+      alpha: Math.PI / 4,
+      beta: Math.PI / 3,
+      radius: 10,
+      minRadius: 1,
+      maxRadius: 50,
+      minBeta: 0.1,
+      maxBeta: Math.PI - 0.1,
+      target: [1, 2, 3],
+      inertia: 0.9,
+      wheelPrecision: 50,
+      angularSensibility: 1000,
+    };
+
+    it('setCameraRadius sets the radius directly', () => {
+      const cam = renderer.createArcCamera('main', camSpec);
+      renderer.setCameraRadius(cam, 25);
+      expect(renderer.getCameraAngles(cam).radius).toBe(25);
+      expect(renderer.calls.some((c) => c.method === 'setCameraRadius')).toBe(true);
+    });
+
+    it('setCameraRadius on unknown handle records the call without throwing', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      renderer.setCameraRadius(fakeHandle, 10);
+      expect(renderer.calls[0].method).toBe('setCameraRadius');
+    });
+
+    it('setCameraRadiusLimits records the call with min and max', () => {
+      const cam = renderer.createArcCamera('main', camSpec);
+      renderer.setCameraRadiusLimits(cam, 2, 30);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('setCameraRadiusLimits');
+      expect(last.args).toEqual([cam, 2, 30]);
+    });
+
+    it('setCameraFov records the call with the fov value', () => {
+      const cam = renderer.createArcCamera('main', camSpec);
+      renderer.setCameraFov(cam, 0.8);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('setCameraFov');
+      expect(last.args).toEqual([cam, 0.8]);
+    });
+
+    it('setCameraControlsEnabled records the call with the enabled flag', () => {
+      const cam = renderer.createArcCamera('main', camSpec);
+      renderer.setCameraControlsEnabled(cam, false);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('setCameraControlsEnabled');
+      expect(last.args).toEqual([cam, false]);
+    });
+
+    it('getCameraTarget returns origin when no camera registered', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      const out: Vec3 = [99, 99, 99];
+      renderer.getCameraTarget(fakeHandle, out);
+      expect(out).toEqual([0, 0, 0]);
+    });
+
+    it('getCameraAngles returns zeros when no camera registered', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      const angles = renderer.getCameraAngles(fakeHandle);
+      expect(angles).toEqual({ alpha: 0, beta: 0, radius: 0 });
+    });
+
+    it('getCameraForward falls back to alpha=0 for unknown camera', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      const out: Vec3 = [0, 0, 0];
+      renderer.getCameraForward(fakeHandle, out);
+      // alpha=0 → forward = (-cos0, 0, -sin0) = (-1, 0, 0)
+      expect(out[0]).toBeCloseTo(-1);
+      expect(out[2]).toBeCloseTo(0);
+    });
+
+    it('getCameraRight returns a vector perpendicular to forward', () => {
+      const cam = renderer.createArcCamera('main', { ...camSpec, alpha: 0 });
+      const out: Vec3 = [0, 0, 0];
+      renderer.getCameraRight(cam, out);
+      // alpha=0 → right = (sin0, 0, -cos0) = (0, 0, -1)
+      expect(out[0]).toBeCloseTo(0);
+      expect(out[1]).toBe(0);
+      expect(out[2]).toBeCloseTo(-1);
+    });
+
+    it('nudgeCameraAlpha / nudgeCameraRadius / nudgeCameraBeta on unknown handle record without throwing', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      renderer.nudgeCameraAlpha(fakeHandle, 0.1);
+      renderer.nudgeCameraRadius(fakeHandle, 1);
+      renderer.nudgeCameraBeta(fakeHandle, 0.1);
+      const methods = renderer.calls.map((c) => c.method);
+      expect(methods).toContain('nudgeCameraAlpha');
+      expect(methods).toContain('nudgeCameraRadius');
+      expect(methods).toContain('nudgeCameraBeta');
+    });
+
+    it('nudgeCameraBeta clamps to (0.01, π − 0.01)', () => {
+      const cam = renderer.createArcCamera('main', { ...camSpec, beta: Math.PI / 2 });
+      renderer.nudgeCameraBeta(cam, 9999);
+      expect(renderer.getCameraAngles(cam).beta).toBeLessThan(Math.PI);
+      renderer.nudgeCameraBeta(cam, -9999);
+      expect(renderer.getCameraAngles(cam).beta).toBeGreaterThan(0);
+    });
+
+    it('nudgeCameraTarget on unknown handle creates and records a new entry', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      renderer.nudgeCameraTarget(fakeHandle, 1, 2, 3);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('nudgeCameraTarget');
+    });
+  });
+
+  describe('picking', () => {
+    it('pickAtScreenPoint returns null and records the call', () => {
+      const result = renderer.pickAtScreenPoint(320, 240);
+      expect(result).toBeNull();
+      expect(renderer.calls[0]).toMatchObject({ method: 'pickAtScreenPoint', args: [320, 240, undefined] });
+    });
+
+    it('pickAtScreenPoint passes opts through to the call record', () => {
+      renderer.pickAtScreenPoint(100, 200, { meshFilter: () => true } as any);
+      expect(renderer.calls[0].args[2]).toBeDefined();
+    });
+  });
+
+  describe('instanced models', () => {
+    it('loadModelTemplate resolves with animationNames from the stub', async () => {
+      renderer.modelTemplateAnimationNames = ['idle', 'walk', 'run'];
+      const result = await renderer.loadModelTemplate('/models/hero.glb');
+      expect(result.animationNames).toEqual(['idle', 'walk', 'run']);
+      expect(renderer.calls[0]).toMatchObject({ method: 'loadModelTemplate', args: ['/models/hero.glb', undefined] });
+    });
+
+    it('loadModelTemplate passes opts through to the call record', async () => {
+      await renderer.loadModelTemplate('/models/hero.glb', { lockRootMotion: true } as any);
+      expect(renderer.calls[0].args[1]).toMatchObject({ lockRootMotion: true });
+    });
+
+    it('instantiateModel returns a handle and records the call', () => {
+      const h = renderer.instantiateModel('hero1', '/models/hero.glb', { position: [1, 0, 0] } as any);
+      expect(h).toBeDefined();
+      const last = renderer.calls[0];
+      expect(last.method).toBe('instantiateModel');
+      expect(last.args[0]).toBe('hero1');
+    });
+
+    it('setModelVisible / setModelAlpha / disposeModel record their calls', () => {
+      const h = renderer.instantiateModel('hero1', '/models/hero.glb');
+      renderer.setModelVisible(h, false);
+      renderer.setModelAlpha('hero1', 0.5);
+      renderer.disposeModel('hero1', h);
+      const methods = renderer.calls.map((c) => c.method);
+      expect(methods).toContain('setModelVisible');
+      expect(methods).toContain('setModelAlpha');
+      expect(methods).toContain('disposeModel');
+    });
+
+    it('playAnimationOnce returns animationOnceDuration and records the call', () => {
+      renderer.animationOnceDuration = 1.5;
+      const dur = renderer.playAnimationOnce('hero1', 'attack');
+      expect(dur).toBe(1.5);
+      expect(renderer.calls[0]).toMatchObject({ method: 'playAnimationOnce', args: ['hero1', 'attack'] });
+    });
+  });
+
+  describe('skybox', () => {
+    const skySpec: SkyboxSpec = { kind: 'procedural', skyColor: [0.4, 0.7, 1.0], horizonColor: [1, 1, 1], groundColor: [0.2, 0.2, 0.2] };
+
+    it('createSkybox returns a handle and records the call', () => {
+      const h = renderer.createSkybox('sky1', skySpec);
+      expect(h).toBeDefined();
+      expect(renderer.calls[0]).toMatchObject({ method: 'createSkybox', args: ['sky1', skySpec] });
+    });
+
+    it('updateSkyboxSun records the call with direction and color', () => {
+      const h = renderer.createSkybox('sky1', skySpec);
+      renderer.updateSkyboxSun(h, [0, -1, 0], [1, 1, 0.8]);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('updateSkyboxSun');
+      expect(last.args[1]).toEqual([0, -1, 0]);
+    });
+
+    it('disposeSkybox records the call', () => {
+      const h = renderer.createSkybox('sky1', skySpec);
+      renderer.disposeSkybox(h);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('disposeSkybox');
+      expect(last.args).toEqual([h]);
+    });
+  });
+
+  describe('environment and materials', () => {
+    it('setEnvironmentTexture records the call with url and opts', () => {
+      renderer.setEnvironmentTexture('/env/studio.hdr', { rotationY: 0.5 } as any);
+      expect(renderer.calls[0]).toMatchObject({ method: 'setEnvironmentTexture', args: ['/env/studio.hdr', { rotationY: 0.5 }] });
+    });
+
+    it('clearEnvironmentTexture records the call with no args', () => {
+      renderer.clearEnvironmentTexture();
+      expect(renderer.calls[0]).toMatchObject({ method: 'clearEnvironmentTexture', args: [] });
+    });
+
+    it('applyPbrMaterial records the call with handle and spec', () => {
+      const h = renderer.createMesh('sphere', { kind: 'sphere', diameter: 1 });
+      const spec = { albedoColor: [1, 0, 0], metallic: 0.8, roughness: 0.2 };
+      renderer.applyPbrMaterial(h, spec as any);
+      const last = renderer.calls[renderer.calls.length - 1];
+      expect(last.method).toBe('applyPbrMaterial');
+      expect(last.args[0]).toBe(h);
+      expect(last.args[1]).toBe(spec);
+    });
+  });
+
+  describe('physics extended', () => {
+    const opts: PhysicsBodyOpts = {
+      shapeType: 'box',
+      motionType: 'dynamic',
+      mass: 1,
+      friction: 0.5,
+      restitution: 0.3,
+      lockRotation: true,
+    };
+
+    it('physicsCreateBody does not overwrite an existing body snapshot', () => {
+      renderer.physicsCreateBody('cube', opts);
+      renderer.physicsBodies.set('cube' as any, {
+        position: [5, 5, 5],
+        rotation: [0, 0, 0],
+        linearVelocity: [1, 0, 0],
+        angularVelocity: [0, 0, 0],
+      });
+      // calling again should not reset the preloaded values
+      renderer.physicsCreateBody('cube', opts);
+      expect(renderer.physicsBodies.get('cube' as any)!.position).toEqual([5, 5, 5]);
+    });
+
+    it('physicsSetPaused sets the physicsPaused flag and records the call', () => {
+      renderer.physicsSetPaused(true);
+      expect(renderer.physicsPaused).toBe(true);
+      renderer.physicsSetPaused(false);
+      expect(renderer.physicsPaused).toBe(false);
+      const methods = renderer.calls.map((c) => c.method);
+      expect(methods).toEqual(['physicsSetPaused', 'physicsSetPaused']);
+    });
+
+    it('physicsGetBodyState returns null for an unregistered mesh', () => {
+      const result = renderer.physicsGetBodyState('ghost');
+      expect(result).toBeNull();
+      expect(renderer.calls[0].method).toBe('physicsGetBodyState');
+    });
+
+    it('physicsGetBodyState returns a snapshot copy for a registered body', () => {
+      renderer.physicsCreateBody('ball', { ...opts, shapeType: 'sphere' });
+      renderer.physicsBodies.set('ball' as any, {
+        position: [1, 2, 3],
+        rotation: [0.1, 0.2, 0.3],
+        linearVelocity: [4, 5, 6],
+        angularVelocity: [0, 0.1, 0],
+      });
+      const snap = renderer.physicsGetBodyState('ball');
+      expect(snap).not.toBeNull();
+      expect(snap!.position).toEqual([1, 2, 3]);
+      expect(snap!.linearVelocity).toEqual([4, 5, 6]);
+    });
+
+    it('physicsSetBodyState persists the snapshot and records the call', () => {
+      renderer.physicsCreateBody('ball', { ...opts, shapeType: 'sphere' });
+      const state = {
+        position: [10, 20, 30] as Vec3,
+        rotation: [0, 0, 0] as Vec3,
+        linearVelocity: [1, 2, 3] as Vec3,
+        angularVelocity: [0, 0, 0] as Vec3,
+      };
+      renderer.physicsSetBodyState('ball', state);
+      const snap = renderer.physicsGetBodyState('ball');
+      expect(snap!.position).toEqual([10, 20, 30]);
+      expect(renderer.calls.some((c) => c.method === 'physicsSetBodyState')).toBe(true);
+    });
+
+    it('physicsSetBodyAngularVelocity records the call with the velocity args', () => {
+      renderer.physicsSetBodyAngularVelocity('cube', 0.1, 0.2, 0.3);
+      const last = renderer.calls[0];
+      expect(last.method).toBe('physicsSetBodyAngularVelocity');
+      expect(last.args).toEqual(['cube', 0.1, 0.2, 0.3]);
+    });
+
+    it('physicsSetBodyDrivenByMesh records the call with the flag', () => {
+      renderer.physicsSetBodyDrivenByMesh('cube', true);
+      expect(renderer.calls[0]).toMatchObject({ method: 'physicsSetBodyDrivenByMesh', args: ['cube', true] });
+    });
+
+    it('physicsSetGravity records the call with x y z', () => {
+      renderer.physicsSetGravity(0, -9.8, 0);
+      expect(renderer.calls[0]).toMatchObject({ method: 'physicsSetGravity', args: [0, -9.8, 0] });
+    });
+
+    it('physicsResizeBoxBody records the call with meshId and halfExtents', () => {
+      renderer.physicsResizeBoxBody('cube', [0.5, 0.5, 0.5]);
+      expect(renderer.calls[0]).toMatchObject({ method: 'physicsResizeBoxBody', args: ['cube', [0.5, 0.5, 0.5]] });
+    });
+
+    it('physicsSetTimeStep records the call with the hz value', () => {
+      renderer.physicsSetTimeStep(120);
+      expect(renderer.calls[0]).toMatchObject({ method: 'physicsSetTimeStep', args: [120] });
+    });
+
+    it('physicsSetRestitution records the call with meshId and restitution', () => {
+      renderer.physicsSetRestitution('ball', 0.9);
+      expect(renderer.calls[0]).toMatchObject({ method: 'physicsSetRestitution', args: ['ball', 0.9] });
+    });
+
+    it('setCollidersVisible records the call with the visible flag', () => {
+      renderer.setCollidersVisible(true);
+      expect(renderer.calls[0]).toMatchObject({ method: 'setCollidersVisible', args: [true] });
     });
   });
 
