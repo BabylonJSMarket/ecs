@@ -66,6 +66,26 @@ describe('MockRendererAdapter', () => {
       });
     });
 
+    it('records the full `tube` primitive spec so silo-wall Systems can be asserted', () => {
+      // The silo wall is an open-ended cylinder shell; render Systems emit it
+      // via createMesh({kind:'tube',...}) and tests assert on the recorded spec.
+      const tubePrim: PrimitiveSpec = {
+        kind: 'tube',
+        diameter: 2,
+        height: 3,
+        thickness: 0.15,
+        tessellation: 32,
+      };
+      const h = renderer.createMesh('building.silo', tubePrim, mat);
+      expect(h).toBeDefined();
+      expect(renderer.calls[0]).toMatchObject({
+        method: 'createMesh',
+        args: ['building.silo', tubePrim, mat],
+      });
+      // The exact spec object is preserved (kind + every param), not a copy.
+      expect(renderer.calls[0].args[1]).toBe(tubePrim);
+    });
+
     it('setMeshPosition / setMeshRotation / setMeshColor / setMeshVisible all record their mutations', () => {
       const h = renderer.createMesh('hero', prim);
       renderer.setMeshPosition(h, 1, 2, 3);
@@ -301,6 +321,25 @@ describe('MockRendererAdapter', () => {
         'setLabelVisible',
         'disposeLabel',
       ]);
+    });
+
+    it('records the optional background / borderColor sign-plate fields', () => {
+      // Building signs carry a filled plate + border behind the text; render
+      // Systems set them on the LabelSpec and tests assert the recorded call.
+      const signSpec: LabelSpec = {
+        text: 'Saloon',
+        fontSize: 26,
+        background: 'rgba(15, 23, 42, 0.88)',
+        borderColor: 'rgba(148, 163, 184, 0.95)',
+      };
+      renderer.createLabel('sign.bar', signSpec);
+      expect(renderer.calls[0]).toMatchObject({
+        method: 'createLabel',
+        args: ['sign.bar', signSpec],
+      });
+      const recorded = renderer.calls[0].args[1] as LabelSpec;
+      expect(recorded.background).toBe('rgba(15, 23, 42, 0.88)');
+      expect(recorded.borderColor).toBe('rgba(148, 163, 184, 0.95)');
     });
   });
 

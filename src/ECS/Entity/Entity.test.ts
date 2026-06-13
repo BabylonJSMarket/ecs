@@ -520,4 +520,36 @@ describe('Entity', () => {
       expect(json.components).toEqual({});
     });
   });
+
+  describe('component identity under minified, colliding class names', () => {
+    // Production bundlers mangle class names to short, COLLIDING identifiers, so
+    // two distinct component types can share a `.name`. get()/has() must key off
+    // the stable `componentType`, not `Class.name`, or a query resolves to the
+    // wrong component (the real "t.toSpec is not a function" prod bug).
+    class LightComp extends Component {
+      lit = true;
+    }
+    class HealthComp extends Component {
+      hp = 100;
+    }
+
+    it('resolves the correct component when class names collide', () => {
+      // Simulate minification: force both classes to report the same `.name`...
+      Object.defineProperty(LightComp, 'name', { value: 'x', configurable: true });
+      Object.defineProperty(HealthComp, 'name', { value: 'x', configurable: true });
+      // ...but give each a distinct stable type id (as registerComponent would).
+      (LightComp as typeof Component).componentType = 'Light';
+      (HealthComp as typeof Component).componentType = 'Health';
+
+      const e = new Entity(eventBus);
+      e.add(new HealthComp());
+
+      // Before the fix: has(LightComp) matched via the colliding `.name === "x"`
+      // and get() returned the HealthComp instance. Now both are name-stable.
+      expect(e.has(HealthComp)).toBe(true);
+      expect(e.has(LightComp)).toBe(false);
+      expect(e.get(LightComp)).toBeUndefined();
+      expect(e.get(HealthComp)?.hp).toBe(100);
+    });
+  });
 });

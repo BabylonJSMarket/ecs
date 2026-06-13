@@ -19,6 +19,18 @@ import { EventBus } from '../EventBus/EventBus';
  */
 export abstract class Component {
   /**
+   * Stable, minification-safe type id for this component class.
+   *
+   * Component identity in queries and serialization must NOT rely on
+   * `Class.name`: production bundlers mangle class names to short, COLLIDING
+   * identifiers, so two different component types can share a `.name` and a
+   * query (`Entity.get`/`has`) resolves to the wrong one. Set this explicitly
+   * (`static componentType = "Health"`), or let `SceneLoader.registerComponent`
+   * stamp it with the registry name. Read it via {@link componentTypeId}.
+   */
+  static componentType?: string;
+
+  /**
    * The ID of the entity this component is attached to.
    * Set automatically when the component is added to an entity.
    */
@@ -146,4 +158,25 @@ export abstract class Component {
     const { entityId: _entityId, eventBus: _eventBus, ...data } = this as any;
     return data;
   }
+}
+
+/**
+ * Resolve a component class's stable, minification-safe type id.
+ *
+ * Prefers an explicit/stamped {@link Component.componentType} (set directly or by
+ * `SceneLoader.registerComponent` from the registry name) and only falls back to
+ * the minifiable `Class.name` for component classes that were never registered.
+ * Use this anywhere component identity is compared across class references —
+ * never compare `Class.name` directly, or minified, name-colliding component
+ * types will match each other.
+ */
+export function componentTypeId(
+  ctor: { componentType?: string; readonly name: string } | undefined | null,
+): string {
+  if (!ctor) return '';
+  // A stamped/explicit id is authoritative. Otherwise fall back to the class
+  // name minus a trailing "Component" (the registry-name convention, e.g.
+  // HemisphericLightComponent -> "HemisphericLight"). Both sides of an identity
+  // comparison run through here, so the fallback stays symmetric.
+  return ctor.componentType ?? ctor.name.replace(/Component$/, '');
 }

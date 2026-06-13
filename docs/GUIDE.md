@@ -138,11 +138,13 @@ renderer.startLoop((dt) => world.update(dt));
 // In one system:
 this.eventBus.emit('damage.dealt', { target: entityId, amount: 10 });
 
-// In another:
-this.eventBus.on('damage.dealt', (data) => {
+// In another (subscribe from onInitialize):
+this.listen('damage.dealt', (data) => {
   // react to damage
 });
 ```
+
+Inside a System, subscribe with `this.listen()` (or `listenOnce()` / `listenForEntity()`) — the subscription is tied to the System's lifetime and unsubscribed automatically when the System is removed. Raw `eventBus.on()` is the primitive for non-System code, where you own the returned unsubscribe function.
 
 Each component package conventionally exports an `Events` object listing the event names it emits:
 

@@ -18,7 +18,7 @@
  * 4. (Optional) Serialize World back to JSON
  */
 
-import { Component } from "../Component/Component";
+import { Component, componentTypeId } from "../Component/Component";
 import { Entity } from "../Entity/Entity";
 import { System } from "../System/System";
 import { World } from "../World/World";
@@ -199,6 +199,10 @@ export class SceneLoader {
     componentClass: new (data?: any) => Component,
     systemClass?: new (eventBus: EventBus) => System,
   ): void {
+    // Stamp the registry name as the class's stable, minification-safe type id
+    // (unless the class declares its own). This is what Entity.get/has match on,
+    // so identity survives bundler class-name mangling. See componentTypeId().
+    stampComponentType(componentClass, name);
     this.componentRegistry.set(name, {
       component: componentClass,
       system: systemClass,
@@ -220,6 +224,7 @@ export class SceneLoader {
    */
   registerComponents(components: Record<string, ComponentEntry>): void {
     for (const [name, entry] of Object.entries(components)) {
+      if (entry.component) stampComponentType(entry.component, name);
       this.componentRegistry.set(name, entry);
     }
   }
@@ -564,8 +569,8 @@ export class SceneLoader {
         const ComponentClass = componentTypes[i];
         const component = componentInstances[i];
 
-        // Get component type name from class name
-        const typeName = ComponentClass.name.replace(/Component$/, "");
+        // Stable, minification-safe type id (the registry name once registered).
+        const typeName = componentTypeId(ComponentClass);
 
         // Use component's toJSON if available
         if ("toJSON" in component && typeof component.toJSON === "function") {
@@ -593,5 +598,17 @@ export class SceneLoader {
       name: sceneName,
       entities,
     };
+  }
+}
+
+/**
+ * Stamp `name` as a component class's stable type id, unless the class already
+ * declares its OWN `componentType` (explicit `static componentType`, or a prior
+ * registration). Uses an own-property check so a concrete class never silently
+ * inherits a parent's stamped id. See {@link componentTypeId}.
+ */
+function stampComponentType(componentClass: object, name: string): void {
+  if (!Object.prototype.hasOwnProperty.call(componentClass, "componentType")) {
+    (componentClass as { componentType?: string }).componentType = name;
   }
 }

@@ -1,6 +1,7 @@
 import type { ComponentType } from '../types';
 import { Entity } from '../Entity/Entity';
 import { EventBus } from '../EventBus/EventBus';
+import type { EventCallback, UnsubscribeFn } from '../EventBus/EventBus';
 import type { World } from '../World/World';
 
 /**
@@ -111,6 +112,12 @@ export abstract class System {
    */
   private _initialized: boolean = false;
 
+  /**
+   * Unsubscribe functions for subscriptions made via listen()/listenOnce()/
+   * listenForEntity(). Drained automatically by shutdown().
+   */
+  private _subscriptions: UnsubscribeFn[] = [];
+
   constructor(eventBus: EventBus) {
     this.eventBus = eventBus;
   }
@@ -202,6 +209,9 @@ export abstract class System {
   /**
    * Shutdown the system. Called when the system is removed from a World.
    * Override onShutdown() for custom cleanup logic.
+   *
+   * Subscriptions made via listen()/listenOnce()/listenForEntity() are
+   * unsubscribed automatically after onShutdown() runs.
    */
   shutdown(): void {
     if (!this._initialized) {
@@ -209,6 +219,15 @@ export abstract class System {
     }
 
     this.onShutdown();
+
+    // Drain tracked subscriptions. Swap out the array first so the tracked
+    // wrappers' self-removal doesn't mutate what we're iterating.
+    const subscriptions = this._subscriptions;
+    this._subscriptions = [];
+    for (const unsubscribe of subscriptions) {
+      unsubscribe();
+    }
+
     this.entities.clear();
     this._initialized = false;
   }
@@ -216,9 +235,64 @@ export abstract class System {
   /**
    * Override this method for custom cleanup.
    * Called when the system is removed from the World.
-   * Good place to unsubscribe from events and release resources.
+   * Subscriptions made via listen() are cleaned up automatically — only
+   * release non-event resources (DOM listeners, handles, panels) here.
    */
   protected onShutdown(): void {}
+
+  /**
+   * Subscribe to an event, with the subscription's lifetime tied to this
+   * system: it is unsubscribed automatically when the system shuts down.
+   * Prefer this over this.eventBus.on() inside systems — no unsubscribe
+   * bookkeeping or onShutdown cleanup is needed.
+   *
+   * Call from onInitialize() so the subscription is re-established if the
+   * system is removed and re-added to a world.
+   *
+   * @param type - Event type to listen for, or '*' for all events
+   * @param callback - Function to call when the event is emitted
+   * @returns Unsubscribe function for early manual removal (rarely needed)
+   */
+  protected listen<T = any>(type: string, callback: EventCallback<T>): UnsubscribeFn {
+    return this.track(this.eventBus.on(type, callback));
+  }
+
+  /**
+   * Subscribe to a single occurrence of an event (see EventBus.once),
+   * auto-cleaned on system shutdown if it hasn't fired yet.
+   */
+  protected listenOnce<T = any>(type: string, callback: EventCallback<T>): UnsubscribeFn {
+    return this.track(this.eventBus.once(type, callback));
+  }
+
+  /**
+   * Subscribe to an event for a single entity (see EventBus.onForEntity),
+   * auto-cleaned on system shutdown.
+   */
+  protected listenForEntity<T extends { entityId: string } = { entityId: string }>(
+    type: string,
+    entityId: string,
+    callback: EventCallback<T>,
+  ): UnsubscribeFn {
+    return this.track(this.eventBus.onForEntity(type, entityId, callback));
+  }
+
+  /**
+   * Track an unsubscribe function for automatic disposal at shutdown.
+   * The returned wrapper also removes itself from the tracking list when
+   * called manually, so per-entity subscription churn doesn't accumulate.
+   */
+  private track(unsubscribe: UnsubscribeFn): UnsubscribeFn {
+    const tracked: UnsubscribeFn = () => {
+      unsubscribe();
+      const index = this._subscriptions.indexOf(tracked);
+      if (index !== -1) {
+        this._subscriptions.splice(index, 1);
+      }
+    };
+    this._subscriptions.push(tracked);
+    return tracked;
+  }
 
   /**
    * Add an entity to this system if it matches the query.

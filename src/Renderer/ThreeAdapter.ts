@@ -94,6 +94,8 @@ export class ThreeAdapter implements RendererAdapter {
     fontSize: number;
     fontWeight: 'normal' | 'bold';
     aspect: number;
+    background?: string; // optional opaque sign plate, persisted across setLabelText
+    borderColor?: string; // optional border stroked inside the plate
   }>();
   private shadowMapEnabled = false;
   private onFrame?: (dt: number) => void;
@@ -235,11 +237,31 @@ export class ThreeAdapter implements RendererAdapter {
         geometry = new T.CircleGeometry(prim.radius ?? 0.5, prim.tessellation ?? 24);
         geometry.rotateX(-Math.PI / 2);
         break;
+      case 'tube': {
+        // Open-ended (uncapped) cylinder shell along +Y to match Babylon's
+        // CreateTube silo wall. Three's CylinderGeometry is centered on the
+        // origin, so we translate up by height/2 to base-pivot it (Babylon's
+        // tube grows from y=0 to y=height). `openEnded:true` drops the caps.
+        // Single-surface shell — `thickness` (a real inner wall) isn't modeled
+        // here; double-side rendering below makes the wall visible from inside.
+        const radius = (prim.diameter ?? 1) / 2;
+        const tubeHeight = prim.height ?? 1;
+        geometry = new T.CylinderGeometry(
+          radius,
+          radius,
+          tubeHeight,
+          prim.tessellation ?? 32,
+          1,
+          true, // openEnded
+        );
+        geometry.translate(0, tubeHeight / 2, 0);
+        break;
+      }
       default:
         throw new Error(`ThreeAdapter.createMesh: unknown primitive kind "${prim.kind}"`);
     }
 
-    if (prim.pivotAtBottom) {
+    if (prim.pivotAtBottom && prim.kind !== 'tube') {
       const h = prim.kind === 'sphere' ? (prim.diameter ?? 1) / 2 : (prim.height ?? 1) / 2;
       geometry.translate(0, h, 0);
     }
@@ -261,6 +283,9 @@ export class ThreeAdapter implements RendererAdapter {
       shininess: 64,
       transparent: (mat?.alpha ?? 1) < 1,
       opacity: mat?.alpha ?? 1,
+      // The open-ended tube shell has no caps, so its inner face is exposed;
+      // render both sides (matches Babylon's Mesh.DOUBLESIDE on the silo).
+      side: prim.kind === 'tube' ? T.DoubleSide : T.FrontSide,
     });
 
     const mesh = new T.Mesh(geometry, material);
@@ -1014,7 +1039,7 @@ export class ThreeAdapter implements RendererAdapter {
     const canvas = document.createElement('canvas');
     canvas.width = texW;
     canvas.height = texH;
-    this.drawLabelText(canvas, spec.text, fontSize, fontWeight);
+    this.drawLabelText(canvas, spec.text, fontSize, fontWeight, spec.background, spec.borderColor);
 
     const texture = new T.CanvasTexture(canvas);
     // Canvas is authored in sRGB space. Without this the label looks washed out.
@@ -1049,6 +1074,8 @@ export class ThreeAdapter implements RendererAdapter {
       fontSize,
       fontWeight,
       aspect,
+      background: spec.background,
+      borderColor: spec.borderColor,
     });
     return handle;
   }
@@ -1056,7 +1083,10 @@ export class ThreeAdapter implements RendererAdapter {
   setLabelText(h: LabelHandle, text: string): void {
     const entry = this.labels.get(h);
     if (!entry) return;
-    this.drawLabelText(entry.canvas, text, entry.fontSize, entry.fontWeight);
+    this.drawLabelText(
+      entry.canvas, text, entry.fontSize, entry.fontWeight,
+      entry.background, entry.borderColor,
+    );
     entry.texture.needsUpdate = true;
   }
 
@@ -1100,10 +1130,24 @@ export class ThreeAdapter implements RendererAdapter {
     text: string,
     fontSize: number,
     fontWeight: 'normal' | 'bold',
+    background?: string,
+    borderColor?: string,
   ): void {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Optional sign plate: a filled background rect over the whole canvas with
+    // an optional border stroked just inside its edge, drawn before the text
+    // so the glyphs sit on top. Mirrors Buildings.createSignMeshes.
+    if (background) {
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (borderColor) {
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+      }
+    }
     ctx.font = `${fontWeight} ${fontSize}px system-ui, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';

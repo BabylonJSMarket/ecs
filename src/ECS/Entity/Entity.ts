@@ -1,5 +1,5 @@
 import type { EntityId, ComponentType } from '../types';
-import { Component } from '../Component/Component';
+import { Component, componentTypeId } from '../Component/Component';
 import { EventBus } from '../EventBus/EventBus';
 
 /**
@@ -167,11 +167,13 @@ export class Entity {
     const direct = this.components.get(ComponentClass);
     if (direct) return direct as T;
 
-    // Fallback: find by class name (handles dynamic import mismatches)
-    // This can happen when the same class is imported from different modules
-    const targetName = ComponentClass.name;
+    // Fallback: match by stable component type id (handles dynamic-import class
+    // mismatches where the same component is loaded as two class objects). Uses
+    // componentTypeId, NOT Class.name — minified, name-colliding component types
+    // would otherwise match each other and return the wrong component.
+    const targetType = componentTypeId(ComponentClass);
     for (const [cls, comp] of this.components) {
-      if (cls.name === targetName) {
+      if (componentTypeId(cls) === targetType) {
         return comp as T;
       }
     }
@@ -186,10 +188,10 @@ export class Entity {
    */
   has(ComponentClass: ComponentType): boolean {
     if (this.components.has(ComponentClass)) return true;
-    // Fallback: check by name for dynamic import compatibility
-    const targetName = ComponentClass.name;
+    // Fallback: match by stable component type id (see get()) — never Class.name.
+    const targetType = componentTypeId(ComponentClass);
     for (const cls of this.components.keys()) {
-      if (cls.name === targetName) return true;
+      if (componentTypeId(cls) === targetType) return true;
     }
     return false;
   }

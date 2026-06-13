@@ -59,25 +59,27 @@ class HealthSystem extends System {
 
   onInitialize() {
     // Called once when the System is added to a World.
-    // Use it to subscribe to global events on the EventBus.
+    // Use it to subscribe to global events via this.listen().
   }
 
   onShutdown() {
-    // Called once when the System is removed. Unsubscribe here.
+    // Called once when the System is removed. Release non-event
+    // resources here (DOM listeners, handles). Subscriptions made via
+    // this.listen() are unsubscribed automatically after this runs.
   }
 }
 ```
 
 ## Listening to events
 
-Systems coordinate via the EventBus rather than holding references to each other. Subscribe in `onInitialize`, and unsubscribe in `onShutdown` so listeners don't leak when the System is removed:
+Systems coordinate via the EventBus rather than holding references to each other. Subscribe in `onInitialize` with `this.listen()` — the subscription's lifetime is tied to the System, so it's unsubscribed automatically when the System is removed:
 
 ```ts
 class DamageSystem extends System {
   query: ISystemQuery = { required: [Health] };
 
   onInitialize() {
-    this.eventBus.on('damage.dealt', ({ targetId, amount }) => {
+    this.listen('damage.dealt', ({ targetId, amount }) => {
       const entity = this.world.getEntity(targetId);
       if (!entity || !this.entities.has(entity)) return;
       const hp = entity.get(Health)!;
@@ -90,7 +92,7 @@ class DamageSystem extends System {
 }
 ```
 
-Listen by name with `eventBus.on(name, callback)`. Emit with `eventBus.emit(name, data)`. `on()` returns an `unsubscribe` function — collect those and call them in `onShutdown` to avoid stale listeners.
+Listen by name with `this.listen(name, callback)`. Emit with `this.eventBus.emit(name, data)`. Two variants cover the other subscription shapes: `this.listenOnce(name, callback)` fires once, and `this.listenForEntity(name, entityId, callback)` only fires for events about one entity. All three return an unsubscribe function for early manual removal, but you rarely need it — the base class drains every `listen()` subscription when the System shuts down. (Raw `eventBus.on` is the primitive underneath; use it outside Systems, where you own the unsubscribe yourself.)
 
 ## Reading the renderer
 

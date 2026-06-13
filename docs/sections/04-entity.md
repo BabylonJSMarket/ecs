@@ -87,8 +87,8 @@ Systems can subscribe to `'entity.destroyed'` to clean up renderer handles or ex
 ```ts
 import { EntityEvents } from '@babylonjsmarket/ecs';
 
-this.eventBus.on(EntityEvents.DESTROYED, ({ entityId }) => {
-  // clean up
+this.listen(EntityEvents.DESTROYED, ({ entityId }) => {
+  // clean up — listen() auto-unsubscribes when the System is removed
 });
 ```
 

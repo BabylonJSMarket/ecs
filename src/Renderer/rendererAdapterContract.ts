@@ -142,6 +142,33 @@ export function runRendererAdapterContract(
         // Creating a fresh mesh after a dispose must still work.
         expect(() => adapter.createMesh('other', prim, mat)).not.toThrow();
       });
+
+      it('createMesh accepts a `tube` primitive (open-ended cylinder shell)', () => {
+        // Silo walls: an uncapped vertical cylinder shell, base-pivoted. Both
+        // the thin-shell (no thickness) and walled (thickness) forms must
+        // build without throwing and yield a usable, round-trippable handle.
+        const thin: PrimitiveSpec = { kind: 'tube', diameter: 2, height: 3, tessellation: 32 };
+        const walled: PrimitiveSpec = { kind: 'tube', diameter: 2, height: 3, thickness: 0.15 };
+        let a: ReturnType<RendererAdapter['createMesh']> | undefined;
+        let b: ReturnType<RendererAdapter['createMesh']> | undefined;
+        expect(() => {
+          a = adapter.createMesh('silo_thin', thin, mat);
+          b = adapter.createMesh('silo_walled', walled, mat);
+        }).not.toThrow();
+        expect(a).not.toBe(b);
+        // A tube mesh round-trips position like any other primitive.
+        adapter.setMeshPosition(a!, 4, 0, -2);
+        const out: Vec3 = [0, 0, 0];
+        adapter.getMeshWorldPosition(a!, out);
+        expect(out[0]).toBeCloseTo(4, 5);
+        expect(out[2]).toBeCloseTo(-2, 5);
+        // Scaling + visibility + dispose are all smoke-safe on a tube.
+        expect(() => {
+          adapter.setMeshScale(a!, 2, 1, 2);
+          adapter.setMeshVisible(a!, false);
+          adapter.disposeMesh(a!);
+        }).not.toThrow();
+      });
     });
 
     // ---------------------------------------------------------------------
@@ -306,6 +333,28 @@ export function runRendererAdapterContract(
             adapter.setLabelVisible(h, true);
           }).not.toThrow();
           expect(() => adapter.disposeLabel(h)).not.toThrow();
+        });
+
+        it('createLabel honors optional background / borderColor (sign plate)', () => {
+          // Building signs draw a filled plate + border behind the text. The
+          // extra fields are optional and must not break the create/update/
+          // dispose surface — and the plate must survive a setLabelText repaint.
+          const signSpec: LabelSpec = {
+            text: 'Saloon',
+            fontSize: 26,
+            background: 'rgba(15, 23, 42, 0.88)',
+            borderColor: 'rgba(148, 163, 184, 0.95)',
+          };
+          let h: ReturnType<RendererAdapter['createLabel']> | undefined;
+          expect(() => {
+            h = adapter.createLabel('sign', signSpec);
+          }).not.toThrow();
+          expect(h).toBeDefined();
+          expect(() => {
+            adapter.setLabelText(h!, 'Assay Office');
+            adapter.setLabelAlpha(h!, 0.5);
+            adapter.disposeLabel(h!);
+          }).not.toThrow();
         });
       });
     }

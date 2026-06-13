@@ -144,6 +144,129 @@ describe('System', () => {
     });
   });
 
+  describe('listen (auto-disposed subscriptions)', () => {
+    class ListeningSystem extends System {
+      received: any[] = [];
+
+      protected onInitialize(): void {
+        this.listen('test.event', (data) => this.received.push(data));
+      }
+
+      protected onUpdate(): void {}
+
+      // Expose the protected helpers for direct testing
+      listenPublic<T>(type: string, cb: (data: T) => void) {
+        return this.listen(type, cb);
+      }
+      listenOncePublic<T>(type: string, cb: (data: T) => void) {
+        return this.listenOnce(type, cb);
+      }
+      listenForEntityPublic(type: string, entityId: string, cb: (data: any) => void) {
+        return this.listenForEntity(type, entityId, cb);
+      }
+    }
+
+    let listening: ListeningSystem;
+
+    beforeEach(() => {
+      listening = new ListeningSystem(eventBus);
+    });
+
+    it('should receive events subscribed via listen', () => {
+      listening.initialize();
+      eventBus.emit('test.event', { value: 1 });
+      expect(listening.received).toEqual([{ value: 1 }]);
+    });
+
+    it('should unsubscribe automatically on shutdown', () => {
+      listening.initialize();
+      listening.shutdown();
+
+      eventBus.emit('test.event', { value: 1 });
+
+      expect(listening.received).toEqual([]);
+      expect(eventBus.getListenerCount('test.event')).toBe(0);
+    });
+
+    it('should re-subscribe when re-initialized after shutdown', () => {
+      listening.initialize();
+      listening.shutdown();
+      listening.initialize();
+
+      eventBus.emit('test.event', { value: 2 });
+
+      expect(listening.received).toEqual([{ value: 2 }]);
+    });
+
+    it('should not double-fire after a shutdown/initialize cycle', () => {
+      listening.initialize();
+      listening.shutdown();
+      listening.initialize();
+
+      eventBus.emit('test.event', 'once');
+
+      expect(listening.received).toHaveLength(1);
+    });
+
+    it('should support manual unsubscribe before shutdown', () => {
+      listening.initialize();
+      const unsub = listening.listenPublic('other.event', (d) => listening.received.push(d));
+
+      unsub();
+      eventBus.emit('other.event', 1);
+
+      expect(listening.received).toEqual([]);
+      // Manual unsub is idempotent and shutdown still works cleanly
+      unsub();
+      listening.shutdown();
+    });
+
+    it('should clean up subscriptions made outside onInitialize', () => {
+      listening.initialize();
+      listening.listenPublic('late.event', (d) => listening.received.push(d));
+
+      listening.shutdown();
+      eventBus.emit('late.event', 1);
+
+      expect(listening.received).toEqual([]);
+      expect(eventBus.getListenerCount('late.event')).toBe(0);
+    });
+
+    it('listenOnce should fire once and be safe to drain at shutdown', () => {
+      listening.initialize();
+      listening.listenOncePublic('once.event', (d) => listening.received.push(d));
+
+      eventBus.emit('once.event', 1);
+      eventBus.emit('once.event', 2);
+
+      expect(listening.received).toEqual([1]);
+      listening.shutdown(); // already-fired once-sub must not throw
+    });
+
+    it('listenOnce should be cleaned at shutdown if never fired', () => {
+      listening.initialize();
+      listening.listenOncePublic('once.event', (d) => listening.received.push(d));
+
+      listening.shutdown();
+      eventBus.emit('once.event', 1);
+
+      expect(listening.received).toEqual([]);
+    });
+
+    it('listenForEntity should route by entityId and clean up at shutdown', () => {
+      listening.initialize();
+      listening.listenForEntityPublic('pos.changed', 'hero', (d) => listening.received.push(d));
+
+      eventBus.emit('pos.changed', { entityId: 'npc-1', x: 1 });
+      eventBus.emit('pos.changed', { entityId: 'hero', x: 2 });
+      expect(listening.received).toEqual([{ entityId: 'hero', x: 2 }]);
+
+      listening.shutdown();
+      eventBus.emit('pos.changed', { entityId: 'hero', x: 3 });
+      expect(listening.received).toHaveLength(1);
+    });
+  });
+
   describe('query matching', () => {
     let entity: Entity;
 

@@ -23,7 +23,7 @@ export type SkyboxHandle = { readonly __skybox: unique symbol };
 export type LineHandle = { readonly __line: unique symbol };
 
 export interface PrimitiveSpec {
-  kind: 'box' | 'sphere' | 'cylinder' | 'capsule' | 'ground' | 'torus' | 'disc' | 'plane';
+  kind: 'box' | 'sphere' | 'cylinder' | 'capsule' | 'ground' | 'torus' | 'disc' | 'plane' | 'tube';
   width?: number;
   height?: number;
   depth?: number;
@@ -33,8 +33,19 @@ export interface PrimitiveSpec {
   segments?: number;
   tessellation?: number;
   radius?: number;
+  /**
+   * Wall thickness for the `tube` primitive: a positive value extrudes an
+   * inner shell so the wall has real depth (inner radius = outer − thickness).
+   * Omit / 0 → a single zero-thickness double-sided surface (what the silo
+   * uses). Also reused as the torus tube thickness (existing behavior).
+   */
   thickness?: number;
   subdivisions?: number;
+  /**
+   * Pivot the primitive at its base (y = 0) rather than centered. Honored by
+   * box / sphere / cylinder / capsule. The `tube` primitive is ALWAYS
+   * base-pivoted (it grows from y = 0 to y = height) regardless of this flag.
+   */
   pivotAtBottom?: boolean;
 }
 
@@ -161,6 +172,20 @@ export interface LabelSpec {
   fontWeight?: 'normal' | 'bold';
   /** World-space scale multiplier on the billboard quad/sprite. */
   scale?: number;
+  /**
+   * Optional opaque background plate drawn behind the text (a filled rect
+   * covering the whole texture) — used for sign-style labels that need a
+   * solid backing rather than the default transparent outline-only text. Any
+   * CSS color string (e.g. `'rgba(15, 23, 42, 0.88)'`). Omit → no plate
+   * (existing transparent behavior, unchanged for current callers).
+   */
+  background?: string;
+  /**
+   * Optional border stroked around the inside edge of the background plate,
+   * drawn before the text. Any CSS color string. No effect unless `background`
+   * is also set. Omit → no border.
+   */
+  borderColor?: string;
 }
 
 export interface EnvironmentTextureOpts {

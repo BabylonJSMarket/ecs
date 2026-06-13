@@ -137,6 +137,8 @@ export class BabylonAdapter implements RendererAdapter {
     fontSize: number;
     fontWeight: 'normal' | 'bold';
     aspect: number; // width / height of the underlying canvas
+    background?: string; // optional opaque sign plate, persisted across setLabelText
+    borderColor?: string; // optional border stroked inside the plate
   }>();
   private onFrame?: (dt: number) => void;
   private lastTime = 0;
@@ -235,6 +237,31 @@ export class BabylonAdapter implements RendererAdapter {
         mesh.bakeCurrentTransformIntoVertices();
         mesh.rotation.x = 0;
         break;
+      case 'tube': {
+        // Open-ended (uncapped) cylinder shell along +Y, base-pivoted: the
+        // tube grows from y=0 up to y=height. The silo wall uses a single
+        // zero-thickness double-sided surface; an optional `thickness`
+        // extrudes an inner wall via the CreateTube `thickness` option.
+        const radius = (prim.diameter ?? 1) / 2;
+        const height = prim.height ?? 1;
+        const opts: {
+          path: Vector3[];
+          radius: number;
+          tessellation: number;
+          cap: number;
+          sideOrientation: number;
+          thickness?: number;
+        } = {
+          path: [new Vector3(0, 0, 0), new Vector3(0, height, 0)],
+          radius,
+          tessellation: prim.tessellation ?? 32,
+          cap: Mesh.NO_CAP,
+          sideOrientation: Mesh.DOUBLESIDE,
+        };
+        if (prim.thickness && prim.thickness > 0) opts.thickness = prim.thickness;
+        mesh = MeshBuilder.CreateTube(`${id}_tube`, opts, scene);
+        break;
+      }
       default:
         throw new Error(`BabylonAdapter.createMesh: unknown primitive kind "${prim.kind}"`);
     }
@@ -1039,7 +1066,10 @@ export class BabylonAdapter implements RendererAdapter {
       true,
     );
     texture.hasAlpha = true;
-    this.drawLabelText(texture, spec.text, fontSize, fontWeight, padding);
+    this.drawLabelText(
+      texture, spec.text, fontSize, fontWeight, padding,
+      spec.background, spec.borderColor,
+    );
     const aspect = texW / texH;
 
     const baseHeight = 1;
@@ -1078,6 +1108,8 @@ export class BabylonAdapter implements RendererAdapter {
       fontSize,
       fontWeight,
       aspect,
+      background: spec.background,
+      borderColor: spec.borderColor,
     });
     return handle;
   }
@@ -1085,7 +1117,10 @@ export class BabylonAdapter implements RendererAdapter {
   setLabelText(h: LabelHandle, text: string): void {
     const entry = this.labels.get(h);
     if (!entry) return;
-    this.drawLabelText(entry.texture, text, entry.fontSize, entry.fontWeight, 12);
+    this.drawLabelText(
+      entry.texture, text, entry.fontSize, entry.fontWeight, 12,
+      entry.background, entry.borderColor,
+    );
   }
 
   setLabelPosition(h: LabelHandle, x: number, y: number, z: number): void {
@@ -1128,12 +1163,26 @@ export class BabylonAdapter implements RendererAdapter {
     fontSize: number,
     fontWeight: 'normal' | 'bold',
     padding: number,
+    background?: string,
+    borderColor?: string,
   ): void {
     const size = texture.getSize();
     const ctx = texture.getContext() as CanvasRenderingContext2D;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, size.width, size.height);
+    // Optional sign plate: a filled background rect over the whole texture,
+    // with an optional border stroked just inside its edge. Drawn before the
+    // text so the glyphs sit on top. Mirrors Buildings.createSignMeshes.
+    if (background) {
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, size.width, size.height);
+      if (borderColor) {
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, size.width - 2, size.height - 2);
+      }
+    }
     ctx.restore();
 
     // DynamicTexture.drawText respects the texture's invertY flag, which

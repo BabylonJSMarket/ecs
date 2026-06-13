@@ -17,23 +17,14 @@ eventBus.emit('damage.dealt', { targetId: 'ent_a7...', amount: 10 });
 unsubscribe();
 ```
 
-Every System receives the EventBus in its constructor (`new MySystem(world.getEventBus())`) and stores it on `this.eventBus`. From inside a System you'd write:
+Every System receives the EventBus in its constructor (`new MySystem(world.getEventBus())`) and stores it on `this.eventBus`. From inside a System, though, don't call `eventBus.on` directly — use the System's `listen()` wrapper, which ties the subscription to the System's lifetime:
 
 ```ts
 class DamageSystem extends System {
-  private unsubscribes: Array<() => void> = [];
-
   onInitialize() {
-    this.unsubscribes.push(
-      this.eventBus.on('damage.dealt', (data) => {
-        // ...
-      })
-    );
-  }
-
-  onShutdown() {
-    this.unsubscribes.forEach((unsub) => unsub());
-    this.unsubscribes = [];
+    this.listen('damage.dealt', (data) => {
+      // ...
+    });
   }
 
   someMethod() {
@@ -42,7 +33,7 @@ class DamageSystem extends System {
 }
 ```
 
-Collect the unsubscribe functions returned by `on()` and call them in `onShutdown` so listeners don't leak when the System is removed.
+Subscriptions made via `listen()` (and its siblings `listenOnce()` and `listenForEntity()`) are unsubscribed automatically when the System is removed from the World — no unsubscribe bookkeeping, no `onShutdown` drain. Raw `on()`/`once()`/`off()` remain the public API for everything that isn't a System — Components, app glue, UI panels — where you store the returned unsubscribe function and call it when you're done.
 
 ## Naming convention
 

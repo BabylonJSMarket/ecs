@@ -90,7 +90,9 @@ Components extend the `Component` base class and hold state. Systems extend `Sys
 
 ### Events, not direct references
 
-Systems publish via `eventBus.emit(name, data)` and subscribe via `eventBus.on(name, cb)`. This keeps systems decoupled — `PlayerInput` can fire `MOVE` events without knowing or caring that `Movement`, `Animation`, or `CameraShake` will listen.
+Systems publish via `eventBus.emit(name, data)` and subscribe via `this.listen(name, cb)`. This keeps systems decoupled — `PlayerInput` can fire `MOVE` events without knowing or caring that `Movement`, `Animation`, or `CameraShake` will listen.
+
+Since 0.4.0, the `System` base class provides `listen()`, `listenOnce()`, and `listenForEntity()` — auto-disposed subscriptions whose lifetime is tied to the system. Subscribe in `onInitialize()` and the base class unsubscribes everything when the system is removed from the World; no manual unsubscribe bookkeeping. Raw `eventBus.on(name, cb)` remains the primitive for non-System code.
 
 ### Renderer adapters are a thin port
 
