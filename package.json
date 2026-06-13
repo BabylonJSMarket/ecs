@@ -1,6 +1,6 @@
 {
   "name": "@babylonjsmarket/ecs",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "license": "MIT",
   "description": "Entity-Component-System framework with Babylon and Three renderer adapters",
@@ -29,17 +29,10 @@
     "./renderer-types": {
       "types": "./dist/Renderer/types.d.ts",
       "import": "./dist/Renderer/types.js"
-    },
-    "./viz": {
-      "types": "./src/Viz/index.ts",
-      "import": "./src/Viz/index.ts"
     }
   },
   "files": [
     "dist",
-    "src/Viz",
-    "src/ECS/EventBus/EventBus.viz.tsx",
-    "src/ECS/EventBus/EventBus.panel.tsx",
     ".claude-plugin",
     "skills",
     "README.md"
