@@ -26,6 +26,7 @@ import type {
   MaterialSpec,
   PrimitiveSpec,
   RendererAdapter,
+  ThinFieldSpec,
   Vec3,
 } from './types';
 
@@ -43,6 +44,14 @@ export interface RendererAdapterContractOptions {
    * physics smoke tests. Default false.
    */
   skipPhysics?: boolean;
+  /**
+   * Engine adapters (Babylon/Three) can't fetch a real GLB in the headless test
+   * environment, so `loadThinField` can't be exercised against them here — set
+   * this to skip the thin-field load/update/dispose test. The Mock adapter runs
+   * the full sequence. Default false. (`screenToWorldPoint` is NOT gated — every
+   * adapter is exercised for it.)
+   */
+  skipThinField?: boolean;
   /**
    * Optional async setup hook called once per test (after the factory). Use
    * it to drive `adapter.init(canvas)` if the adapter is engine-coupled.
@@ -291,6 +300,16 @@ export function runRendererAdapterContract(
         const len = Math.hypot(out[0], out[1], out[2]);
         expect(len).toBeCloseTo(1, 4);
       });
+
+      it('screenToWorldPoint writes a finite Vec3 into `out` and returns it', () => {
+        const h = adapter.createArcCamera('main', camSpec);
+        const out: Vec3 = [0, 0, 0];
+        const returned = adapter.screenToWorldPoint(h, 0.5, 0.5, 14, out);
+        expect(returned).toBe(out);
+        expect(Number.isFinite(out[0])).toBe(true);
+        expect(Number.isFinite(out[1])).toBe(true);
+        expect(Number.isFinite(out[2])).toBe(true);
+      });
     });
 
     // ---------------------------------------------------------------------
@@ -400,6 +419,44 @@ export function runRendererAdapterContract(
         }).not.toThrow();
       });
     });
+
+    // ---------------------------------------------------------------------
+    // Thin-instance fields (opt-out for engine adapters that can't fetch a GLB
+    // in the headless test env). The Mock adapter runs the full sequence.
+    // ---------------------------------------------------------------------
+    if (!options.skipThinField) {
+      describe('thin field', () => {
+        const spec: ThinFieldSpec = {
+          src: '/test/coins.glb',
+          nodeName: 'GoldCoin',
+          desiredSize: 0.5,
+          capacity: 8,
+        };
+
+        it('loadThinField resolves a handle; instances + dispose are safe', async () => {
+          const handle = await adapter.loadThinField(spec);
+          expect(handle).not.toBeNull();
+          // stride 5 per instance: [x, y, z, yaw, scale]
+          const packed = new Float32Array([
+            1, 0.3, 2, 0, 1,
+            -3, 0.3, 4, Math.PI / 2, 0.5,
+          ]);
+          expect(() => {
+            adapter.setThinFieldInstances(handle!, packed, 2);
+            adapter.disposeThinField(handle!);
+          }).not.toThrow();
+        });
+
+        it('setThinFieldInstances / disposeThinField are smoke-safe with zero count', async () => {
+          const handle = await adapter.loadThinField(spec);
+          expect(handle).not.toBeNull();
+          expect(() => {
+            adapter.setThinFieldInstances(handle!, new Float32Array(0), 0);
+            adapter.disposeThinField(handle!);
+          }).not.toThrow();
+        });
+      });
+    }
 
     // ---------------------------------------------------------------------
     // Physics (opt-out for adapters with no physics integrator)

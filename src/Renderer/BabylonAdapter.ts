@@ -71,9 +71,12 @@ import type {
   SkyboxHandle,
   SkyboxSpec,
   EnvironmentTextureOpts,
+  ThinFieldHandle,
+  ThinFieldSpec,
   Vec3,
 } from './types';
 import type { Color } from './types';
+import { Matrix, Ray } from '@babylonjs/core';
 
 function notImplemented(method: string): never {
   throw new Error(`BabylonAdapter.${method}: not implemented yet`);
@@ -140,6 +143,21 @@ export class BabylonAdapter implements RendererAdapter {
     background?: string; // optional opaque sign plate, persisted across setLabelText
     borderColor?: string; // optional border stroked inside the plate
   }>();
+  /**
+   * Thin-instance fields (coin piles, debris). Each holds the merged master
+   * mesh, its matrix buffer, and the stored normalization scale applied per
+   * instance in setThinFieldInstances.
+   */
+  private thinFields = new Map<ThinFieldHandle, { master: Mesh; buffer: Float32Array; baseScale: number }>();
+  // Reused per instance-matrix compose so a sweep over thousands of slots never
+  // allocates. Shared across all fields — setThinFieldInstances is synchronous.
+  private readonly _tfScale = new Vector3();
+  private readonly _tfPos = new Vector3();
+  private readonly _tfQuat = new Quaternion();
+  private readonly _tfMat = Matrix.Identity();
+  // Reused by screenToWorldPoint so per-frame projection never allocates.
+  private readonly _tfRay = new Ray(Vector3.Zero(), Vector3.Up());
+  private readonly _tfIdentity = Matrix.Identity();
   private onFrame?: (dt: number) => void;
   private lastTime = 0;
 
@@ -431,6 +449,129 @@ export class BabylonAdapter implements RendererAdapter {
       rec.mesh.dispose();
       this.lines.delete(h);
     }
+  }
+
+  // ─── Thin-instance fields ───
+  async loadThinField(spec: ThinFieldSpec): Promise<ThinFieldHandle | null> {
+    if (!this.scene) throw new Error('BabylonAdapter.loadThinField: call init() first');
+    const scene = this.scene;
+    let container: AssetContainer;
+    try {
+      container = await LoadAssetContainerAsync(spec.src, scene);
+    } catch (err) {
+      console.error('[BabylonAdapter] loadThinField failed to load', spec.src, err);
+      return null;
+    }
+
+    // Find the named node and merge all its geometry into ONE master mesh at the
+    // origin (transforms baked into the verts). The originals stay in the
+    // container (never added to the scene) and are reclaimed on container
+    // dispose below.
+    const all = [...container.transformNodes, ...container.meshes];
+    const node = all.find((n) => n.name === spec.nodeName);
+    if (!node) {
+      console.warn('[BabylonAdapter] loadThinField: node', spec.nodeName, 'missing in', spec.src);
+      container.dispose();
+      return null;
+    }
+
+    const sources: Mesh[] = [];
+    const pushIfGeo = (m: unknown): void => {
+      const mesh = m as Mesh;
+      if (mesh && typeof mesh.getTotalVertices === 'function' && mesh.getTotalVertices() > 0) {
+        sources.push(mesh);
+      }
+    };
+    pushIfGeo(node);
+    for (const child of (node as TransformNode).getChildMeshes(false)) pushIfGeo(child);
+    if (!sources.length) {
+      container.dispose();
+      return null;
+    }
+
+    // disposeSource=false: the GLB nodes may share geometry, so never dispose a
+    // source — the untouched originals are reclaimed by container.dispose().
+    const merged = Mesh.MergeMeshes(sources, false, true, undefined, false, true);
+    if (!merged) {
+      container.dispose();
+      return null;
+    }
+    merged.name = `thinField_${spec.nodeName}`;
+    merged.rotationQuaternion = null;
+    merged.rotation.set(0, 0, 0);
+    merged.scaling.set(1, 1, 1);
+    merged.position.set(0, 0, 0);
+    merged.computeWorldMatrix(true);
+    merged.refreshBoundingInfo();
+
+    // Recenter on its OWN bounding-box center: MergeMeshes bakes any GLB world
+    // offset into the verts, so without this the geometry would render at its
+    // authored offset rather than at the instance positions we give it.
+    const c = merged.getBoundingInfo().boundingBox.center;
+    merged.position.set(-c.x, -c.y, -c.z);
+    merged.bakeCurrentTransformIntoVertices();
+    merged.refreshBoundingInfo();
+
+    merged.isPickable = false;
+    merged.receiveShadows = false;
+    // Field spans the arena; skip per-instance frustum culling so it never pops
+    // out when the master's (origin) bbox leaves view.
+    merged.alwaysSelectAsActiveMesh = true;
+
+    const ext = merged.getBoundingInfo().boundingBox.extendSize;
+    const maxDim = 2 * Math.max(ext.x, ext.y, ext.z);
+    const baseScale = maxDim > 1e-5 ? spec.desiredSize / maxDim : 1;
+
+    const buffer = new Float32Array(spec.capacity * 16);
+    merged.thinInstanceSetBuffer('matrix', buffer, 16, false);
+    merged.thinInstanceCount = 0; // grows to the drawn count in setThinFieldInstances
+
+    // The container only held the source geometry, now merged + baked into
+    // `merged`; drop it so its off-scene originals don't linger.
+    container.dispose();
+
+    const handle = this.makeHandle<ThinFieldHandle>('thinField', spec.nodeName);
+    this.thinFields.set(handle, { master: merged, buffer, baseScale });
+    return handle;
+  }
+
+  setThinFieldInstances(handle: ThinFieldHandle, packed: Float32Array, count: number): void {
+    const field = this.thinFields.get(handle);
+    if (!field) return;
+    const { master, buffer, baseScale } = field;
+    for (let i = 0; i < count; i++) {
+      const o = i * 5;
+      const s = baseScale * packed[o + 4]!;
+      this._tfScale.set(s, s, s);
+      this._tfPos.set(packed[o]!, packed[o + 1]!, packed[o + 2]!);
+      Quaternion.RotationYawPitchRollToRef(packed[o + 3]!, 0, 0, this._tfQuat);
+      Matrix.ComposeToRef(this._tfScale, this._tfQuat, this._tfPos, this._tfMat);
+      this._tfMat.copyToArray(buffer, i * 16);
+    }
+    master.thinInstanceCount = count;
+    if (count > 0) master.thinInstanceBufferUpdated('matrix');
+  }
+
+  disposeThinField(handle: ThinFieldHandle): void {
+    const field = this.thinFields.get(handle);
+    if (!field) return;
+    field.master.dispose();
+    this.thinFields.delete(handle);
+  }
+
+  screenToWorldPoint(camera: CameraHandle, nx: number, ny: number, distance: number, out: Vec3): Vec3 {
+    const cam = this.cameras.get(camera);
+    if (!cam || !this.scene || !this.engine) {
+      out[0] = out[1] = out[2] = 0;
+      return out;
+    }
+    const sx = this.engine.getRenderWidth() * nx;
+    const sy = this.engine.getRenderHeight() * ny;
+    this.scene.createPickingRayToRef(sx, sy, this._tfIdentity, this._tfRay, cam);
+    out[0] = this._tfRay.origin.x + this._tfRay.direction.x * distance;
+    out[1] = this._tfRay.origin.y + this._tfRay.direction.y * distance;
+    out[2] = this._tfRay.origin.z + this._tfRay.direction.z * distance;
+    return out;
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
@@ -1552,6 +1693,8 @@ export class BabylonAdapter implements RendererAdapter {
     this.engine?.dispose();
     this.scene = undefined;
     this.engine = undefined;
+    for (const field of this.thinFields.values()) field.master.dispose();
+    this.thinFields.clear();
     this.lines.clear();
     this.meshes.clear();
     this.meshesByMeshId.clear();

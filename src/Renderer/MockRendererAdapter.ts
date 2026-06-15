@@ -34,6 +34,8 @@ import type {
   SkyboxSpec,
   EnvironmentTextureOpts,
   PbrMaterialSpec,
+  ThinFieldHandle,
+  ThinFieldSpec,
   Vec3,
 } from './types';
 import type { Color } from './types';
@@ -145,6 +147,37 @@ export class MockRendererAdapter implements RendererAdapter {
   disposeLineSystem(h: LineHandle): void {
     this.lineSystems.delete(h);
     this.record('disposeLineSystem', h);
+  }
+
+  /** Per-thin-field stub; tests can assert the last packed buffer + draw count. */
+  thinFields = new Map<ThinFieldHandle, { spec: ThinFieldSpec; count: number }>();
+
+  async loadThinField(spec: ThinFieldSpec): Promise<ThinFieldHandle | null> {
+    const h = makeHandle<ThinFieldHandle>('thinField', spec.nodeName);
+    this.thinFields.set(h, { spec, count: 0 });
+    this.record('loadThinField', spec);
+    return h;
+  }
+  setThinFieldInstances(handle: ThinFieldHandle, packed: Float32Array, count: number): void {
+    const rec = this.thinFields.get(handle);
+    if (rec) rec.count = count;
+    this.record('setThinFieldInstances', handle, packed, count);
+  }
+  disposeThinField(handle: ThinFieldHandle): void {
+    this.thinFields.delete(handle);
+    this.record('disposeThinField', handle);
+  }
+  screenToWorldPoint(camera: CameraHandle, nx: number, ny: number, distance: number, out: Vec3): Vec3 {
+    // Project along the camera forward direction a fixed distance from the
+    // target — enough for tests to get a finite, written-into-out Vec3.
+    const fwd: Vec3 = [0, 0, 0];
+    this.getCameraForward(camera, fwd);
+    const t = this.cameraTargets.get(camera) ?? [0, 0, 0];
+    out[0] = t[0] + fwd[0] * distance;
+    out[1] = t[1] + fwd[1] * distance;
+    out[2] = t[2] + fwd[2] * distance;
+    this.record('screenToWorldPoint', camera, nx, ny, distance);
+    return out;
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
