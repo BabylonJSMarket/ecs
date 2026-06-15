@@ -18,6 +18,7 @@ import {
   Color3,
   Color4,
   CubeTexture,
+  Texture,
   MeshBuilder,
   StandardMaterial,
   PBRMaterial,
@@ -285,12 +286,18 @@ export class BabylonAdapter implements RendererAdapter {
     }
 
     if (mat) {
-      const material = new StandardMaterial(`${id}_material`, scene);
-      if (mat.diffuse) material.diffuseColor = Color3.FromArray(mat.diffuse);
-      if (mat.specular) material.specularColor = Color3.FromArray(mat.specular);
-      if (mat.emissive) material.emissiveColor = Color3.FromArray(mat.emissive);
-      if (mat.alpha !== undefined) material.alpha = mat.alpha;
-      mesh.material = material;
+      const hasTextures =
+        !!mat.albedoTexture || !!mat.normalTexture || !!mat.roughnessTexture || !!mat.ambientTexture;
+      if (hasTextures) {
+        mesh.material = this.buildTexturedPbrMaterial(`${id}_material`, mat, scene);
+      } else {
+        const material = new StandardMaterial(`${id}_material`, scene);
+        if (mat.diffuse) material.diffuseColor = Color3.FromArray(mat.diffuse);
+        if (mat.specular) material.specularColor = Color3.FromArray(mat.specular);
+        if (mat.emissive) material.emissiveColor = Color3.FromArray(mat.emissive);
+        if (mat.alpha !== undefined) material.alpha = mat.alpha;
+        mesh.material = material;
+      }
     }
 
     const handle = this.makeHandle<MeshHandle>('mesh', id);
@@ -817,6 +824,41 @@ export class BabylonAdapter implements RendererAdapter {
     }
     if (spec.environmentIntensity !== undefined) mat.environmentIntensity = spec.environmentIntensity;
     mesh.material = mat;
+  }
+
+  /**
+   * Build a `PBRMaterial` from a textured {@link MaterialSpec}. Mirrors how the
+   * raw-Babylon arcade room wires its carpet floor: albedo + normal (bump) +
+   * roughness (as the green channel of the metallic texture) + AO (ambient),
+   * each tiled by `uScale`/`vScale`. Called only when at least one texture URL
+   * is present; the flat-color path stays on `StandardMaterial`.
+   */
+  private buildTexturedPbrMaterial(name: string, mat: MaterialSpec, scene: Scene): PBRMaterial {
+    const pbr = new PBRMaterial(name, scene);
+    const uScale = mat.uScale ?? 1;
+    const vScale = mat.vScale ?? 1;
+    const tex = (url: string): Texture => {
+      const t = new Texture(url, scene);
+      t.uScale = uScale;
+      t.vScale = vScale;
+      return t;
+    };
+    if (mat.albedoTexture) pbr.albedoTexture = tex(mat.albedoTexture);
+    if (mat.normalTexture) pbr.bumpTexture = tex(mat.normalTexture);
+    if (mat.roughnessTexture) {
+      // Babylon reads roughness from the green channel of the metallic texture.
+      pbr.metallicTexture = tex(mat.roughnessTexture);
+      pbr.useRoughnessFromMetallicTextureGreen = true;
+      pbr.useRoughnessFromMetallicTextureAlpha = false;
+    }
+    if (mat.ambientTexture) pbr.ambientTexture = tex(mat.ambientTexture);
+    if (mat.diffuse) pbr.albedoColor = Color3.FromArray(mat.diffuse);
+    if (mat.emissive) pbr.emissiveColor = Color3.FromArray(mat.emissive);
+    if (mat.metallic !== undefined) pbr.metallic = mat.metallic;
+    else pbr.metallic = 0;
+    if (mat.roughness !== undefined) pbr.roughness = mat.roughness;
+    if (mat.alpha !== undefined) pbr.alpha = mat.alpha;
+    return pbr;
   }
 
   private applyPivotAtBottom(mesh: Mesh, offset: number): void {

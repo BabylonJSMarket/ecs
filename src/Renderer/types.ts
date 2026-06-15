@@ -55,6 +55,26 @@ export interface MaterialSpec {
   specular?: Color;
   emissive?: Color;
   alpha?: number;
+  /**
+   * Texture maps. When ANY texture URL below is set, the adapter builds a
+   * physically-based material (Babylon `PBRMaterial`, Three `MeshStandardMaterial`)
+   * instead of the flat-color `StandardMaterial` path — so a `MeshPrimitive`
+   * ground can show a tiled carpet/PBR set (albedo + normal + roughness + AO),
+   * exactly like the raw-Babylon arcade room. Adapters without a PBR pipeline
+   * (mocks) record the spec and no-op the actual texture load. URLs are loaded
+   * by the adapter's native texture loader.
+   */
+  albedoTexture?: string;
+  normalTexture?: string;
+  roughnessTexture?: string;
+  /** Ambient-occlusion map URL. */
+  ambientTexture?: string;
+  /** PBR scalars, applied only on the textured/PBR path. */
+  metallic?: number;
+  roughness?: number;
+  /** Texture tiling repeated across the surface (UV scale). Applied to every map. */
+  uScale?: number;
+  vScale?: number;
 }
 
 export interface DirectionalLightSpec {

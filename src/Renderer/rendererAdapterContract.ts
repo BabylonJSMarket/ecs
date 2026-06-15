@@ -178,6 +178,32 @@ export function runRendererAdapterContract(
           adapter.disposeMesh(a!);
         }).not.toThrow();
       });
+
+      it('createMesh accepts a textured (PBR) MaterialSpec', () => {
+        // A textured material (albedo + normal + roughness + AO, tiled) must
+        // build the PBR path without throwing and yield a usable handle — this
+        // is what the arcade-room carpet floor relies on. Adapters without a
+        // PBR pipeline (mocks) record the spec and no-op the load.
+        const ground: PrimitiveSpec = { kind: 'ground', width: 24, depth: 12 };
+        const textured: MaterialSpec = {
+          albedoTexture: 'https://example.invalid/carpet_color.jpg',
+          normalTexture: 'https://example.invalid/carpet_normal.jpg',
+          roughnessTexture: 'https://example.invalid/carpet_rough.jpg',
+          ambientTexture: 'https://example.invalid/carpet_ao.jpg',
+          roughness: 0.9,
+          uScale: 45,
+          vScale: 45,
+        };
+        let h: ReturnType<RendererAdapter['createMesh']> | undefined;
+        expect(() => {
+          h = adapter.createMesh('floor', ground, textured);
+        }).not.toThrow();
+        adapter.setMeshPosition(h!, 0, 0, 0);
+        const out: Vec3 = [0, 0, 0];
+        adapter.getMeshWorldPosition(h!, out);
+        expect(out[1]).toBeCloseTo(0, 5);
+        expect(() => adapter.disposeMesh(h!)).not.toThrow();
+      });
     });
 
     // ---------------------------------------------------------------------

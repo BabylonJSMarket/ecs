@@ -292,19 +292,55 @@ export class ThreeAdapter implements RendererAdapter {
     const toColor = (rgb: [number, number, number]): THREE.Color =>
       new T.Color().setRGB(rgb[0], rgb[1], rgb[2], T.SRGBColorSpace);
 
-    const material = new T.MeshPhongMaterial({
-      color: mat?.diffuse ? toColor(mat.diffuse) : new T.Color().setRGB(1, 1, 1, T.SRGBColorSpace),
-      specular: mat?.specular
-        ? toColor(mat.specular)
-        : new T.Color().setRGB(1, 1, 1, T.SRGBColorSpace),
-      emissive: mat?.emissive ? toColor(mat.emissive) : new T.Color(0, 0, 0),
-      shininess: 64,
-      transparent: (mat?.alpha ?? 1) < 1,
-      opacity: mat?.alpha ?? 1,
-      // The open-ended tube shell has no caps, so its inner face is exposed;
-      // render both sides (matches Babylon's Mesh.DOUBLESIDE on the silo).
-      side: prim.kind === 'tube' ? T.DoubleSide : T.FrontSide,
-    });
+    const side = prim.kind === 'tube' ? T.DoubleSide : T.FrontSide;
+    const hasTextures =
+      !!mat?.albedoTexture || !!mat?.normalTexture || !!mat?.roughnessTexture || !!mat?.ambientTexture;
+
+    let material: THREE.Material;
+    if (hasTextures && mat) {
+      // Textured PBR path — mirrors the Babylon `PBRMaterial` branch. A
+      // MeshStandardMaterial carries map/normalMap/roughnessMap/aoMap, each
+      // tiled by uScale/vScale via RepeatWrapping.
+      const loader = new T.TextureLoader();
+      const uScale = mat.uScale ?? 1;
+      const vScale = mat.vScale ?? 1;
+      const load = (url: string, srgb: boolean): THREE.Texture => {
+        const tex = loader.load(url);
+        tex.wrapS = T.RepeatWrapping;
+        tex.wrapT = T.RepeatWrapping;
+        tex.repeat.set(uScale, vScale);
+        if (srgb) tex.colorSpace = T.SRGBColorSpace;
+        return tex;
+      };
+      const std = new T.MeshStandardMaterial({
+        color: mat.diffuse ? toColor(mat.diffuse) : new T.Color(1, 1, 1),
+        emissive: mat.emissive ? toColor(mat.emissive) : new T.Color(0, 0, 0),
+        metalness: mat.metallic ?? 0,
+        roughness: mat.roughness ?? 1,
+        transparent: (mat.alpha ?? 1) < 1,
+        opacity: mat.alpha ?? 1,
+        side,
+      });
+      if (mat.albedoTexture) std.map = load(mat.albedoTexture, true);
+      if (mat.normalTexture) std.normalMap = load(mat.normalTexture, false);
+      if (mat.roughnessTexture) std.roughnessMap = load(mat.roughnessTexture, false);
+      if (mat.ambientTexture) std.aoMap = load(mat.ambientTexture, false);
+      material = std;
+    } else {
+      material = new T.MeshPhongMaterial({
+        color: mat?.diffuse ? toColor(mat.diffuse) : new T.Color().setRGB(1, 1, 1, T.SRGBColorSpace),
+        specular: mat?.specular
+          ? toColor(mat.specular)
+          : new T.Color().setRGB(1, 1, 1, T.SRGBColorSpace),
+        emissive: mat?.emissive ? toColor(mat.emissive) : new T.Color(0, 0, 0),
+        shininess: 64,
+        transparent: (mat?.alpha ?? 1) < 1,
+        opacity: mat?.alpha ?? 1,
+        // The open-ended tube shell has no caps, so its inner face is exposed;
+        // render both sides (matches Babylon's Mesh.DOUBLESIDE on the silo).
+        side,
+      });
+    }
 
     const mesh = new T.Mesh(geometry, material);
     mesh.name = id;
