@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>EventBus benchmark — real browser</title>
+<!--
+  EventBus dispatch benchmark — runs in a REAL browser, on purpose.
+
+  Why not a vitest/jsdom bench? jsdom's EventTarget/Event is a JavaScript
+  reimplementation, not the engine's native C++ one, so it mis-measures the
+  native path. The whole question here ("is the custom bus worth it vs the
+  platform's CustomEvent?") only has a trustworthy answer on a real engine.
+
+  HOW TO RUN
+    1. Build the package so dist/ exists:   npm run build  -w @babylonjsmarket/ecs
+    2. Serve the package root (module imports need http, not file://):
+         cd packages/ecs && python3 -m http.server 8080
+    3. Open: http://localhost:8080/src/ECS/EventBus/EventBus.bench.html
+       Results render below and are also on window.__BENCH__ (for headless capture).
+
+  Each row reports emits/sec (higher is better). Numbers vary by machine and
+  engine — the point is the *shape*, which is robust everywhere: the bus's
+  fast path allocates nothing and runs no event-propagation, so it wins; a
+  single '*' listener drops every emit onto the allocating path; onForEntity's
+  index beats hand-filtering a crowd.
+-->
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; background:#0b1020; color:#cfe; padding:24px; }
+  h1 { color:#6ee7ff; } table { border-collapse:collapse; margin-top:12px; }
+  th,td { border:1px solid #2a3a5a; padding:6px 12px; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  td.win { color:#6f6; } .muted { color:#89a; }
+</style>
+</head>
+<body>
+<h1>EventBus benchmark <span class="muted" id="status">— running…</span></h1>
+<div id="ua" class="muted"></div>
+<div id="out"></div>
+<script type="module">
+import { EventBus } from '../../../dist/ECS/EventBus/EventBus.js';
+
+function opsPerSec(fn, budgetMs = 500, batch = 2000) {
+  for (let i = 0; i < 50000; i++) fn();                 // warmup
+  let count = 0, elapsed = 0;
+  const start = performance.now();
+  while (elapsed < budgetMs) {
+    for (let i = 0; i < batch; i++) fn();
+    count += batch;
+    elapsed = performance.now() - start;
+  }
+  return Math.round(count / (elapsed / 1000));
+}
+
+function run() {
+  let sink = 0;
+  const handler = (d) => { sink += d.value; };
+  const payload = { value: 1 };
+  const out = { fast: {}, native: {}, wildcard: {}, entity: {} };
+
+  for (const n of [1, 10, 100]) {
+    const bus = new EventBus();
+    for (let i = 0; i < n; i++) bus.on('tick', handler);
+    out.fast[n] = opsPerSec(() => bus.emit('tick', payload));
+
+    const target = new EventTarget();
+    const nh = (e) => { sink += e.detail.value; };
+    for (let i = 0; i < n; i++) target.addEventListener('tick', nh);
+    out.native[n] = opsPerSec(() =>
+      target.dispatchEvent(new CustomEvent('tick', { detail: payload })));
+  }
+
+  const fast = new EventBus();
+  for (let i = 0; i < 10; i++) fast.on('tick', handler);
+  out.wildcard.fast = opsPerSec(() => fast.emit('tick', payload));
+  const slow = new EventBus();
+  for (let i = 0; i < 10; i++) slow.on('tick', handler);
+  slow.on('*', () => { sink += 1; });
+  out.wildcard.slow = opsPerSec(() => slow.emit('tick', payload));
+
+  const ids = Array.from({ length: 100 }, (_, i) => 'e' + i);
+  const targetId = ids[42];
+  const indexed = new EventBus();
+  indexed.onForEntity('position.changed', targetId, (d) => { sink += d.entityId.length; });
+  out.entity.indexed = opsPerSec(() => { for (const id of ids) indexed.emit('position.changed', { entityId: id }); }, 500, 50);
+  const filtered = new EventBus();
+  filtered.on('position.changed', (d) => { if (d.entityId === targetId) sink += d.entityId.length; });
+  out.entity.filtered = opsPerSec(() => { for (const id of ids) filtered.emit('position.changed', { entityId: id }); }, 500, 50);
+
+  out._sink = sink;
+  return out;
+}
+
+const fmt = (n) => n.toLocaleString();
+const r = run();
+window.__BENCH__ = r;
+document.getElementById('ua').textContent = navigator.userAgent;
+document.getElementById('status').textContent = '— done';
+const rows = [
+  ['EventBus.emit — 1 listener (fast path)', r.fast[1], r.native[1]],
+  ['EventBus.emit — 10 listeners', r.fast[10], r.native[10]],
+  ['EventBus.emit — 100 listeners', r.fast[100], r.native[100]],
+];
+let html = '<table><tr><th>scenario</th><th>EventBus emits/sec</th><th>EventTarget+CustomEvent/sec</th><th>×</th></tr>';
+for (const [label, a, b] of rows)
+  html += `<tr><td>${label}</td><td class="win">${fmt(a)}</td><td>${fmt(b)}</td><td>${(a / b).toFixed(1)}×</td></tr>`;
+html += `</table><table><tr><th>extra</th><th>emits/sec</th></tr>
+  <tr><td>fast path (no wildcard)</td><td class="win">${fmt(r.wildcard.fast)}</td></tr>
+  <tr><td>one '*' subscriber (slow path)</td><td>${fmt(r.wildcard.slow)} — ${(r.wildcard.fast / r.wildcard.slow).toFixed(2)}× slower</td></tr>
+  <tr><td>onForEntity (indexed, 100 emitters)</td><td class="win">${fmt(r.entity.indexed)}</td></tr>
+  <tr><td>on() + manual entityId filter</td><td>${fmt(r.entity.filtered)} — ${(r.entity.indexed / r.entity.filtered).toFixed(2)}× slower</td></tr>
+  </table>`;
+document.getElementById('out').innerHTML = html;
+</script>
+</body>
+</html>

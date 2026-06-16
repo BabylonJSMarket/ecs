@@ -1,6 +1,6 @@
 {
   "name": "@babylonjsmarket/ecs",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "type": "module",
   "license": "MIT",
   "description": "Entity-Component-System framework with Babylon and Three renderer adapters",
@@ -45,6 +45,7 @@
     "build:watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench": "npm run build && echo '\\nEventBus benchmark is real-browser only (jsdom mis-measures native events).\\nServe the package root and open the page:\\n  python3 -m http.server 8080\\n  open http://localhost:8080/src/ECS/EventBus/EventBus.bench.html\\n'",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run build && npm run test"
   },

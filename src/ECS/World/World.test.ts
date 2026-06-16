@@ -39,6 +39,14 @@ describe('World', () => {
       expect(world.getEventBus()).toBeInstanceOf(EventBus);
     });
 
+    it('should not register a wildcard listener (preserves the EventBus fast path)', () => {
+      // The World tracks entity membership via named entity.* subscriptions,
+      // never '*'. A wildcard listener would count toward getListenerCount for
+      // EVERY type and force every emit off the no-allocation fast path, so an
+      // unrelated type must report zero listeners on a fresh world.
+      expect(world.getEventBus().getListenerCount('some.unrelated.event')).toBe(0);
+    });
+
     it('should accept custom options', () => {
       const customEventBus = new EventBus();
       const customWorld = new World({

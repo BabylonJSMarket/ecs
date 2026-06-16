@@ -54,26 +54,26 @@ describe('Entity', () => {
   describe('active property', () => {
     it('should emit event when activated', () => {
       const callback = vi.fn();
-      eventBus.on(`entity.${entity.id}.activated`, callback);
+      eventBus.on('entity.activated', callback);
 
       entity.active = false;
       entity.active = true;
 
-      expect(callback).toHaveBeenCalledWith({ entity });
+      expect(callback).toHaveBeenCalledWith({ entityId: entity.id, entity });
     });
 
     it('should emit event when deactivated', () => {
       const callback = vi.fn();
-      eventBus.on(`entity.${entity.id}.deactivated`, callback);
+      eventBus.on('entity.deactivated', callback);
 
       entity.active = false;
 
-      expect(callback).toHaveBeenCalledWith({ entity });
+      expect(callback).toHaveBeenCalledWith({ entityId: entity.id, entity });
     });
 
     it('should not emit event if value does not change', () => {
       const callback = vi.fn();
-      eventBus.on(`entity.${entity.id}.activated`, callback);
+      eventBus.on('entity.activated', callback);
 
       entity.active = true; // Already true
 
@@ -101,12 +101,13 @@ describe('Entity', () => {
 
     it('should emit component.added event', () => {
       const callback = vi.fn();
-      eventBus.on(`entity.${entity.id}.component.added`, callback);
+      eventBus.on('entity.component.added', callback);
 
       entity.add(TestComponent);
       const component = entity.get(TestComponent);
 
       expect(callback).toHaveBeenCalledWith({
+        entityId: entity.id,
         entity,
         component,
         type: TestComponent,
@@ -248,11 +249,12 @@ describe('Entity', () => {
       const callback = vi.fn();
       entity.add(TestComponent);
       const component = entity.get(TestComponent);
-      eventBus.on(`entity.${entity.id}.component.removed`, callback);
+      eventBus.on('entity.component.removed', callback);
 
       entity.remove(TestComponent);
 
       expect(callback).toHaveBeenCalledWith({
+        entityId: entity.id,
         entity,
         component,
         type: TestComponent,
@@ -341,16 +343,16 @@ describe('Entity', () => {
 
       it('should emit tag.added event', () => {
         const callback = vi.fn();
-        eventBus.on(`entity.${entity.id}.tag.added`, callback);
+        eventBus.on('entity.tag.added', callback);
 
         entity.addTag('player');
 
-        expect(callback).toHaveBeenCalledWith({ entity, tag: 'player' });
+        expect(callback).toHaveBeenCalledWith({ entityId: entity.id, entity, tag: 'player' });
       });
 
       it('should not add duplicate tags', () => {
         const callback = vi.fn();
-        eventBus.on(`entity.${entity.id}.tag.added`, callback);
+        eventBus.on('entity.tag.added', callback);
 
         entity.addTag('player');
         entity.addTag('player');
@@ -372,11 +374,11 @@ describe('Entity', () => {
       it('should emit tag.removed event', () => {
         const callback = vi.fn();
         entity.addTag('player');
-        eventBus.on(`entity.${entity.id}.tag.removed`, callback);
+        eventBus.on('entity.tag.removed', callback);
 
         entity.removeTag('player');
 
-        expect(callback).toHaveBeenCalledWith({ entity, tag: 'player' });
+        expect(callback).toHaveBeenCalledWith({ entityId: entity.id, entity, tag: 'player' });
       });
 
       it('should return entity even if tag not found', () => {
@@ -483,11 +485,11 @@ describe('Entity', () => {
 
     it('should emit destroyed event', () => {
       const callback = vi.fn();
-      eventBus.on(`entity.${entity.id}.destroyed`, callback);
+      eventBus.on('entity.destroyed', callback);
 
       entity.destroy();
 
-      expect(callback).toHaveBeenCalledWith({ entity });
+      expect(callback).toHaveBeenCalledWith({ entityId: entity.id, entity });
     });
   });
 

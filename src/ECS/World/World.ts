@@ -1,5 +1,5 @@
 import type { EntityId, ComponentType } from '../types';
-import { Entity } from '../Entity/Entity';
+import { Entity, EntityEvents } from '../Entity/Entity';
 import { System } from '../System/System';
 import type { ISystemQuery } from '../System/System';
 import { EventBus } from '../EventBus/EventBus';
@@ -284,40 +284,27 @@ export class World {
    * updates which systems track which entities.
    */
   private setupEventListeners(): void {
+    // Subscribe to the specific entity-lifecycle events by name rather than a
+    // wildcard. A single `'*'` listener forces EVERY emit in the game off the
+    // EventBus fast path (it must allocate a wrapper object per emit); named
+    // subscriptions keep the fast path intact. The entity travels in the
+    // payload (`data.entity`), so there is no event-type string to parse.
+    const refreshMembership = (data: { entity?: Entity }) => {
+      if (data?.entity) this.onComponentChanged(data.entity);
+    };
     this.subscriptions.push(
-      this.eventBus.on('*', (event: any) => {
-        if (!event.type || !event.data) return;
-
-        // Parse event type: "entity.{id}.{action}"
-        const parts = event.type.split('.');
-        if (parts[0] !== 'entity' || parts.length < 3) return;
-
-        const action = parts.slice(2).join('.');
-
-        switch (action) {
-          case 'component.added':
-          case 'component.removed':
-          case 'tag.added':
-          case 'tag.removed':
-            // Entity composition changed - refresh system membership
-            if (event.data.entity) {
-              this.onComponentChanged(event.data.entity);
-            }
-            break;
-          case 'activated':
-            // Entity became active - add to matching systems
-            if (event.data.entity) {
-              this.onEntityActivated(event.data.entity);
-            }
-            break;
-          case 'deactivated':
-            // Entity became inactive - remove from all systems
-            if (event.data.entity) {
-              this.onEntityDeactivated(event.data.entity);
-            }
-            break;
-        }
-      })
+      // Composition changed → re-check which systems this entity matches.
+      this.eventBus.on(EntityEvents.COMPONENT_ADDED, refreshMembership),
+      this.eventBus.on(EntityEvents.COMPONENT_REMOVED, refreshMembership),
+      this.eventBus.on(EntityEvents.TAG_ADDED, refreshMembership),
+      this.eventBus.on(EntityEvents.TAG_REMOVED, refreshMembership),
+      // Activated → add to matching systems; deactivated → remove from all.
+      this.eventBus.on(EntityEvents.ACTIVATED, (data: { entity?: Entity }) => {
+        if (data?.entity) this.onEntityActivated(data.entity);
+      }),
+      this.eventBus.on(EntityEvents.DEACTIVATED, (data: { entity?: Entity }) => {
+        if (data?.entity) this.onEntityDeactivated(data.entity);
+      }),
     );
   }
 

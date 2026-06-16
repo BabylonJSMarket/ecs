@@ -3,6 +3,28 @@ import { Component, componentTypeId } from '../Component/Component';
 import { EventBus } from '../EventBus/EventBus';
 
 /**
+ * Canonical entity-lifecycle event names.
+ *
+ * These are FIXED types — the entity id travels in the payload as `entityId`,
+ * not baked into the event name. That keeps the bus's fast path alive: the
+ * World subscribes to these few names with `on(...)` instead of a wildcard
+ * (a `'*'` listener forces every emit off the no-allocation fast path), and
+ * any per-entity listener can route by id via `onForEntity(type, id, cb)`.
+ *
+ * Import these constants rather than hardcoding the strings, so a rename can't
+ * silently desync emitter and listener.
+ */
+export const EntityEvents = {
+  ACTIVATED: 'entity.activated',
+  DEACTIVATED: 'entity.deactivated',
+  COMPONENT_ADDED: 'entity.component.added',
+  COMPONENT_REMOVED: 'entity.component.removed',
+  TAG_ADDED: 'entity.tag.added',
+  TAG_REMOVED: 'entity.tag.removed',
+  DESTROYED: 'entity.destroyed',
+} as const;
+
+/**
  * Entity - A game object composed of components.
  *
  * In ECS, an Entity is essentially an ID with a bag of components attached.
@@ -80,12 +102,13 @@ export class Entity {
 
   /**
    * Activate or deactivate this entity.
-   * Emits "entity.{id}.activated" or "entity.{id}.deactivated" events.
+   * Emits {@link EntityEvents.ACTIVATED} or {@link EntityEvents.DEACTIVATED}.
    */
   set active(value: boolean) {
     if (this._active !== value) {
       this._active = value;
-      this.eventBus.emit(`entity.${this.id}.${value ? 'activated' : 'deactivated'}`, {
+      this.eventBus.emit(value ? EntityEvents.ACTIVATED : EntityEvents.DEACTIVATED, {
+        entityId: this.id,
         entity: this,
       });
     }
@@ -144,7 +167,8 @@ export class Entity {
     component.onAttach(this.id, this.eventBus);
 
     // Notify listeners that a component was added
-    this.eventBus.emit(`entity.${this.id}.component.added`, {
+    this.eventBus.emit(EntityEvents.COMPONENT_ADDED, {
+      entityId: this.id,
       entity: this,
       component,
       type: ComponentClass,
@@ -238,7 +262,8 @@ export class Entity {
     this.components.delete(ComponentClass);
 
     // Notify listeners
-    this.eventBus.emit(`entity.${this.id}.component.removed`, {
+    this.eventBus.emit(EntityEvents.COMPONENT_REMOVED, {
+      entityId: this.id,
       entity: this,
       component,
       type: ComponentClass,
@@ -283,7 +308,7 @@ export class Entity {
   addTag(tag: string): Entity {
     if (!this.tags.has(tag)) {
       this.tags.add(tag);
-      this.eventBus.emit(`entity.${this.id}.tag.added`, { entity: this, tag });
+      this.eventBus.emit(EntityEvents.TAG_ADDED, { entityId: this.id, entity: this, tag });
     }
     return this;
   }
@@ -296,7 +321,7 @@ export class Entity {
    */
   removeTag(tag: string): Entity {
     if (this.tags.delete(tag)) {
-      this.eventBus.emit(`entity.${this.id}.tag.removed`, { entity: this, tag });
+      this.eventBus.emit(EntityEvents.TAG_REMOVED, { entityId: this.id, entity: this, tag });
     }
     return this;
   }
@@ -367,7 +392,7 @@ export class Entity {
   destroy(): void {
     this.removeAll();
     this.clearTags();
-    this.eventBus.emit(`entity.${this.id}.destroyed`, { entity: this });
+    this.eventBus.emit(EntityEvents.DESTROYED, { entityId: this.id, entity: this });
   }
 
   /**
