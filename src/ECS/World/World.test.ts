@@ -93,6 +93,29 @@ describe('World', () => {
 
       expect(initSpy).toHaveBeenCalled();
     });
+
+    it('accepts a system class and injects the event bus (no getEventBus needed)', () => {
+      class CleanSystem extends System {
+        seenBus: EventBus | undefined;
+        constructor() {
+          super(); // no event bus passed
+          this.query = {};
+        }
+        protected onUpdate(): void {}
+        protected onInitialize(): void {
+          // The bus must already be wired by the time we initialize.
+          this.seenBus = (this as unknown as { eventBus: EventBus }).eventBus;
+        }
+      }
+
+      world.addSystem(CleanSystem); // pass the class itself, not an instance
+      world.initialize();
+
+      const sys = world.getSystem(CleanSystem);
+      expect(sys).toBeInstanceOf(CleanSystem);
+      expect((sys as unknown as { eventBus: EventBus }).eventBus).toBe(world.getEventBus());
+      expect(sys!.seenBus).toBe(world.getEventBus());
+    });
   });
 
   describe('shutdown', () => {

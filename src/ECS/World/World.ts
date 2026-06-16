@@ -1,7 +1,7 @@
 import type { EntityId, ComponentType } from '../types';
 import { Entity, EntityEvents } from '../Entity/Entity';
 import { System } from '../System/System';
-import type { ISystemQuery } from '../System/System';
+import type { ISystemQuery, SystemConstructor } from '../System/System';
 import { EventBus } from '../EventBus/EventBus';
 import type { UnsubscribeFn } from '../EventBus/EventBus';
 import { SceneLoader } from '../SceneLoader/SceneLoader';
@@ -636,29 +636,35 @@ export class World {
    *
    * @param system - The system to add
    */
-  addSystem(system: System): void {
-    if (this.systems.includes(system)) {
+  addSystem(system: System | SystemConstructor): void {
+    // Accept the class itself — `world.addSystem(MovementSystem)`. Construct it
+    // here; setWorld() then injects the event bus, so callers never have to
+    // hand-wire `world.getEventBus()`. An already-built instance still works
+    // (e.g. when a system needs constructor config).
+    const instance = typeof system === 'function' ? new system() : system;
+
+    if (this.systems.includes(instance)) {
       return;
     }
 
-    // Set the world reference on the system
-    (system as any).setWorld(this);
+    // Set the world reference on the system (also injects the event bus).
+    (instance as any).setWorld(this);
 
-    this.systems.push(system);
+    this.systems.push(instance);
     // Sort by priority descending (higher priority runs first)
     this.systems.sort((a, b) => b.priority - a.priority);
 
     // Initialize immediately if world is already initialized
     if (this._initialized) {
-      system.initialize();
+      instance.initialize();
     }
 
     // Add existing entities to the new system
     this.entities.forEach(entity => {
-      system.addEntity(entity);
+      instance.addEntity(entity);
     });
 
-    this.eventBus.emit('world.system.added', { world: this, system });
+    this.eventBus.emit('world.system.added', { world: this, system: instance });
   }
 
   /**

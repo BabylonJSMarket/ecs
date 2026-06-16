@@ -70,8 +70,12 @@ export abstract class System {
   /**
    * Reference to the world's event bus for communication.
    * Use this to emit events or subscribe to other systems' events.
+   *
+   * Injected by `World.addSystem` (via `setWorld`) if not passed to the
+   * constructor — definite-assigned because it's always set before the system
+   * initializes or updates.
    */
-  protected eventBus: EventBus;
+  protected eventBus!: EventBus;
 
   /**
    * Set of entities that match this system's query.
@@ -118,8 +122,10 @@ export abstract class System {
    */
   private _subscriptions: UnsubscribeFn[] = [];
 
-  constructor(eventBus: EventBus) {
-    this.eventBus = eventBus;
+  constructor(eventBus?: EventBus) {
+    // Optional: World.addSystem injects the bus (via setWorld) before the
+    // system initializes. Passing one explicitly still works.
+    if (eventBus) this.eventBus = eventBus;
   }
 
   /**
@@ -184,6 +190,9 @@ export abstract class System {
    */
   setWorld(world: World): void {
     this.world = world;
+    // Inject the world's bus if the system wasn't constructed with one, so
+    // `world.addSystem(MySystem)` works without hand-wiring getEventBus().
+    if (!this.eventBus) this.eventBus = world.getEventBus();
   }
 
   /**
@@ -467,3 +476,9 @@ export abstract class System {
     this.entities.clear();
   }
 }
+
+/**
+ * A System subclass constructor. Lets `World.addSystem` accept the class
+ * itself (`world.addSystem(MovementSystem)`) and construct + wire it for you.
+ */
+export type SystemConstructor = new (...args: any[]) => System;
