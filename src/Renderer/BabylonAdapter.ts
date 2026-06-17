@@ -190,6 +190,10 @@ export class BabylonAdapter implements RendererAdapter {
     window.addEventListener('resize', () => this.resize());
   }
 
+  getRenderingCanvas(): HTMLCanvasElement | null {
+    return this.engine?.getRenderingCanvas() ?? null;
+  }
+
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle {
     if (!this.scene) throw new Error('BabylonAdapter.createMesh: call init() first');
     const scene = this.scene;
@@ -303,6 +307,28 @@ export class BabylonAdapter implements RendererAdapter {
     const handle = this.makeHandle<MeshHandle>('mesh', id);
     this.meshes.set(handle, mesh);
     this.meshesByMeshId.set(id, mesh);
+    return handle;
+  }
+
+  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null {
+    if (!this.scene) return null;
+    const parentMesh = this.meshes.get(parent);
+    if (!parentMesh) return null;
+
+    const box = MeshBuilder.CreateBox(id, { width: 1, height: 1, depth: 1 }, this.scene);
+    box.parent = parentMesh;
+    box.isPickable = false;
+    const material = new StandardMaterial(`${id}_material`, this.scene);
+    material.wireframe = true;
+    material.disableLighting = true;
+    material.emissiveColor = new Color3(color[0], color[1], color[2]);
+    box.material = material;
+
+    // Registered like any other mesh, so setMeshPosition/setMeshScale/
+    // setMeshVisible/disposeMesh work on the returned handle — and since the
+    // box is parented, those transforms apply in the parent's LOCAL space.
+    const handle = this.makeHandle<MeshHandle>('debugBox', id);
+    this.meshes.set(handle, box);
     return handle;
   }
 

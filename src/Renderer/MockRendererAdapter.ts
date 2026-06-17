@@ -68,13 +68,28 @@ export class MockRendererAdapter implements RendererAdapter {
     this.calls.push({ method, args });
   }
 
-  async init(_canvas: HTMLCanvasElement, _opts?: RendererInitOptions): Promise<void> {
+  /** The canvas passed to `init`, surfaced by `getRenderingCanvas`. */
+  private canvas: HTMLCanvasElement | null = null;
+
+  async init(canvas: HTMLCanvasElement, _opts?: RendererInitOptions): Promise<void> {
+    this.canvas = canvas ?? null;
     this.record('init');
+  }
+
+  getRenderingCanvas(): HTMLCanvasElement | null {
+    return this.canvas;
   }
 
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle {
     const h = makeHandle<MeshHandle>('mesh', id);
     this.record('createMesh', id, prim, mat);
+    return h;
+  }
+  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null {
+    // No rendering — fabricate a handle the same way createMesh does so the
+    // returned handle is accepted by subsequent setMeshScale/disposeMesh calls.
+    const h = makeHandle<MeshHandle>('debugBox', id);
+    this.record('createDebugBox', id, parent, color);
     return h;
   }
   setMeshPosition(h: MeshHandle, x: number, y: number, z: number): void {

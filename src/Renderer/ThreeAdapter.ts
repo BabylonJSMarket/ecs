@@ -193,6 +193,10 @@ export class ThreeAdapter implements RendererAdapter {
   private OrbitControlsCtor?: new (...args: unknown[]) => unknown;
   private canvas?: HTMLCanvasElement;
 
+  getRenderingCanvas(): HTMLCanvasElement | null {
+    return this.renderer?.domElement ?? this.canvas ?? null;
+  }
+
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle {
     const T = this.requireThree();
     const scene = this.scene!;
@@ -351,6 +355,29 @@ export class ThreeAdapter implements RendererAdapter {
     const handle = this.makeHandle<MeshHandle>('mesh', id);
     this.meshes.set(handle, mesh);
     this.meshesByMeshId.set(id, mesh);
+    return handle;
+  }
+
+  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null {
+    const T = this.requireThree();
+    const parentMesh = this.meshes.get(parent);
+    if (!parentMesh) return null;
+
+    const geometry = new T.BoxGeometry(1, 1, 1);
+    const material = new T.MeshBasicMaterial({
+      color: new T.Color().setRGB(color[0], color[1], color[2], T.SRGBColorSpace),
+      wireframe: true,
+    });
+    const box = new T.Mesh(geometry, material);
+    box.name = id;
+    // Non-pickable: drop it out of raycasts (the Three idiom — pickAtScreenPoint
+    // raycasts the scene graph).
+    box.raycast = () => {};
+    // Parent to the target mesh so setMeshPosition/setMeshScale apply in LOCAL space.
+    parentMesh.add(box);
+
+    const handle = this.makeHandle<MeshHandle>('debugBox', id);
+    this.meshes.set(handle, box);
     return handle;
   }
 

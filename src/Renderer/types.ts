@@ -292,6 +292,15 @@ export interface RendererAdapter {
 
   init(canvas: HTMLCanvasElement, opts?: RendererInitOptions): Promise<void>;
 
+  /**
+   * The DOM canvas the renderer draws into (the one passed to `init`), or null
+   * if not yet initialized / headless. Pointer-driven tools (e.g. the
+   * PinballBuilder freehand draw) attach listeners here and convert client
+   * coordinates before calling `pickAtScreenPoint`. Prefer this over reaching
+   * the engine for the canvas.
+   */
+  getRenderingCanvas(): HTMLCanvasElement | null;
+
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle;
   /**
    * Asynchronously load a 3D model (glTF/GLB) from `spec.url` and register it
@@ -357,6 +366,18 @@ export interface RendererAdapter {
   updateLineSystem(h: LineHandle, lines: Vec3[][], color?: Color): void;
   setLineSystemVisible(h: LineHandle, visible: boolean): void;
   disposeLineSystem(h: LineHandle): void;
+
+  /**
+   * Debug overlay box: a unit (1×1×1) wireframe cube parented to the mesh
+   * referenced by `parent`, drawn unlit in `color`, non-pickable. Returned as a
+   * normal MeshHandle so callers position/size it with the existing
+   * `setMeshPosition` / `setMeshScale` (in LOCAL space, since it's parented to
+   * `parent`) and remove it with `disposeMesh`. Used by debug viz that draws a
+   * collider outline tracking a moving mesh (e.g. the flipper collider overlay).
+   * Returns null if `parent` resolves to no mesh; adapters with no scene-graph
+   * may return a no-op handle.
+   */
+  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null;
 
   // ─── Thin-instance fields ───
   /**

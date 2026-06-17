@@ -145,6 +145,18 @@ export function runRendererAdapterContract(
         }).not.toThrow();
       });
 
+      it('createDebugBox parents a unit wire box to a mesh; layout + dispose are smoke-safe', () => {
+        const parent = adapter.createMesh('parent', prim, mat);
+        const box = adapter.createDebugBox('dbg', parent, [1, 0.2, 0.9]);
+        expect(box).not.toBeNull();
+        expect(() => {
+          adapter.setMeshScale(box!, 2, 1, 3);
+          adapter.setMeshPosition(box!, 0.5, 0, -0.5);
+          adapter.setMeshVisible(box!, false);
+          adapter.disposeMesh(box!);
+        }).not.toThrow();
+      });
+
       it('disposeMesh does not throw, and adapter remains usable afterward', () => {
         const h = adapter.createMesh('hero', prim, mat);
         expect(() => adapter.disposeMesh(h)).not.toThrow();
@@ -522,6 +534,14 @@ export function runRendererAdapterContract(
           adapter.stopLoop();
           adapter.resize();
         }).not.toThrow();
+      });
+
+      it('getRenderingCanvas returns an HTMLCanvasElement or null without throwing', () => {
+        let c: HTMLCanvasElement | null | undefined;
+        expect(() => {
+          c = adapter.getRenderingCanvas();
+        }).not.toThrow();
+        expect(c === null || typeof c === 'object').toBe(true);
       });
 
       it('dispose is idempotent — calling twice does not throw', () => {
