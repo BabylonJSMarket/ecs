@@ -288,7 +288,7 @@ export interface PbrMaterialSpec {
 }
 
 export interface RendererAdapter {
-  readonly kind: 'babylon' | 'three';
+  readonly kind: 'babylon' | 'three' | 'babylon-lite';
 
   init(canvas: HTMLCanvasElement, opts?: RendererInitOptions): Promise<void>;
 

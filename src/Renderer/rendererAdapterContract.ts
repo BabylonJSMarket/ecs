@@ -24,6 +24,7 @@ import type {
   HemisphericLightSpec,
   LabelSpec,
   MaterialSpec,
+  PickResult,
   PrimitiveSpec,
   RendererAdapter,
   ThinFieldSpec,
@@ -52,6 +53,13 @@ export interface RendererAdapterContractOptions {
    * adapter is exercised for it.)
    */
   skipThinField?: boolean;
+  /**
+   * Engine adapters can't fetch a real GLB headlessly, so they skip the
+   * `loadMesh` contract. The Mock adapter (no I/O — it synthesizes a handle)
+   * runs it. Default false. Engine-backed loadMesh is covered by the browser
+   * comparison demo instead.
+   */
+  skipMeshLoad?: boolean;
   /**
    * Optional async setup hook called once per test (after the factory). Use
    * it to drive `adapter.init(canvas)` if the adapter is engine-coupled.
@@ -220,6 +228,83 @@ export function runRendererAdapterContract(
         expect(() => adapter.disposeMesh(h!)).not.toThrow();
       });
     });
+
+    // ---------------------------------------------------------------------
+    // Geometry mutation, billboard, bounding box
+    // ---------------------------------------------------------------------
+    describe('geometry, billboard & bounds', () => {
+      const prim: PrimitiveSpec = { kind: 'box', width: 1, height: 1, depth: 1 };
+      const mat: MaterialSpec = { diffuse: [0.5, 0.5, 0.5] };
+
+      it('replaceMeshGeometry swaps vertex data without throwing', () => {
+        const h = adapter.createMesh('m', prim, mat);
+        expect(() =>
+          adapter.replaceMeshGeometry(h, {
+            positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+            indices: [0, 1, 2],
+            normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
+          }),
+        ).not.toThrow();
+        // Without supplied normals it must recompute them, also without throwing.
+        expect(() =>
+          adapter.replaceMeshGeometry(h, { positions: [0, 0, 0, 2, 0, 0, 0, 2, 0], indices: [0, 1, 2] }),
+        ).not.toThrow();
+      });
+
+      it('setMeshBillboardMode accepts every mode without throwing', () => {
+        const h = adapter.createMesh('m', prim, mat);
+        expect(() => {
+          adapter.setMeshBillboardMode(h, 'all');
+          adapter.setMeshBillboardMode(h, 'y');
+          adapter.setMeshBillboardMode(h, 'none');
+        }).not.toThrow();
+      });
+
+      it('setMeshBoundingBoxExtents + getMeshBoundingBoxExtents round-trips', () => {
+        const h = adapter.createMesh('m', prim, mat);
+        adapter.setMeshBoundingBoxExtents(h, [-2, -1, -3], [2, 1, 3]);
+        const got = adapter.getMeshBoundingBoxExtents(h);
+        expect(got).not.toBeNull();
+        expect(got!.min[0]).toBeCloseTo(-2, 4);
+        expect(got!.min[1]).toBeCloseTo(-1, 4);
+        expect(got!.max[2]).toBeCloseTo(3, 4);
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Picking
+    // ---------------------------------------------------------------------
+    describe('picking', () => {
+      it('pickAtScreenPoint returns a PickResult or null without throwing', () => {
+        adapter.createMesh('floor', { kind: 'ground', width: 10, depth: 10 }, { diffuse: [0.5, 0.5, 0.5] });
+        let res: PickResult | null = null;
+        expect(() => {
+          res = adapter.pickAtScreenPoint(10, 10);
+        }).not.toThrow();
+        // A miss returns null, a hit returns a PickResult — both are `typeof
+        // 'object'` (typeof null === 'object'), so this asserts the return shape
+        // without a branch that headless adapters (always a miss) can't cover.
+        expect(typeof res).toBe('object');
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Mesh load (GLB) — Mock only; engines fetch a real file (see browser demo)
+    // ---------------------------------------------------------------------
+    if (!options.skipMeshLoad) {
+      describe('mesh load', () => {
+        it('loadMesh resolves to a result addressing the mesh by id', async () => {
+          const res = await adapter.loadMesh('model', {
+            url: 'https://example.invalid/model.glb',
+            position: [1, 2, 3],
+            scale: 2,
+          });
+          expect(res.meshId).toBe('model');
+          expect(res.handle).toBeTruthy();
+          expect(Array.isArray(res.animationNames)).toBe(true);
+        });
+      });
+    }
 
     // ---------------------------------------------------------------------
     // Lights

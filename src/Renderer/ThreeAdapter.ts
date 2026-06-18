@@ -5,11 +5,19 @@
  * from @types/three (a dev-only dependency). The HTML that hosts this adapter
  * must declare an `<script type="importmap">` mapping "three" and "three/addons/".
  *
- * Migration status: scaffolding only. Methods throw NotImplemented until the
- * per-component migration steps land them.
+ * Physics: the adapter owns a Rapier.js world (@dimforge/rapier3d-compat) by
+ * default — the same role Havok plays in BabylonAdapter. Rapier is a WASM module
+ * loaded lazily the first time a body is created (creates queue until it's
+ * ready). A caller may instead inject a pure-JS `physicsFactory`
+ * (IPhysicsInstance) via the constructor to override Rapier with a custom
+ * integrator; when a factory is present the Rapier path is never engaged.
  */
 
 import type * as THREE from 'three';
+import type * as RAPIER from '@dimforge/rapier3d-compat';
+
+/** The Rapier module namespace (World ctor, RigidBodyDesc/ColliderDesc statics, init). */
+type RapierModule = typeof import('@dimforge/rapier3d-compat');
 import type {
   ArcCameraSpec,
   BillboardMode,
@@ -49,15 +57,11 @@ import type { Color } from './types';
 
 export interface ThreeAdapterOptions {
   /**
-   * Pure-JS physics integrator factory. Three.js has no native physics engine,
-   * so adapters that need rigid-body simulation must inject one. Omit to
-   * silently no-op all physics methods.
+   * Optional pure-JS physics integrator factory. Three.js has no native physics
+   * engine, so by default the adapter drives a Rapier.js world. Supply a factory
+   * to override Rapier with a custom integrator (the Rapier path stays dormant).
    */
   physicsFactory?: PhysicsFactory;
-}
-
-function notImplemented(method: string): never {
-  throw new Error(`ThreeAdapter.${method}: not implemented yet`);
 }
 
 function sphericalToCartesian(alpha: number, beta: number, radius: number, target: Vec3) {
@@ -104,15 +108,37 @@ export class ThreeAdapter implements RendererAdapter {
   private lastTime = 0;
   private rafId: number | null = null;
   /**
-   * Pure-core physics integrator used in place of a native engine (Rapier.js
-   * is a future upgrade path). Bodies are lazy — an empty sim is free.
+   * Optional injected pure-JS integrator. When a `physicsFactory` is supplied
+   * to the constructor this takes over and Rapier is never engaged (back-compat
+   * for callers that want a custom, deterministic integrator). Bodies are lazy.
    */
   private physicsCore: IPhysicsInstance | null = null;
   private physicsFactory?: PhysicsFactory;
   private physicsPaused = false;
+  /**
+   * Default physics backend: a Rapier.js world owned by the adapter (the role
+   * Havok plays in BabylonAdapter). Lazily WASM-loaded the first time a body is
+   * created; engaged only when no `physicsFactory` override was supplied.
+   */
+  private rapier: RapierPhysics | null = null;
+  private rapierReady = false;
+  private rapierInitPromise: Promise<void> | null = null;
+  private pendingRapierCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
+  /** Custom bounding-box extents declared via setMeshBoundingBoxExtents, used to size box colliders. */
+  private boxExtentOverrides = new Map<MeshHandle, { min: Vec3; max: Vec3 }>();
+  /** Rapier collider debug wireframe (built on demand by setCollidersVisible). */
+  private collidersVisible = false;
+  private colliderDebugLines?: THREE.LineSegments;
+  /** Meshes with an active billboard mode, oriented toward the active camera each frame. */
+  private billboards = new Map<MeshHandle, BillboardMode>();
 
   constructor(options: ThreeAdapterOptions = {}) {
     this.physicsFactory = options.physicsFactory;
+  }
+
+  /** True when Rapier (not an injected factory) is the active physics backend. */
+  private get usesRapier(): boolean {
+    return !this.physicsFactory;
   }
 
   /**
@@ -179,7 +205,7 @@ export class ThreeAdapter implements RendererAdapter {
     // used in the render loop). FOV matches Babylon's ArcRotateCamera default.
     this.defaultCamera = new this.THREE.PerspectiveCamera(
       (0.8 * 180) / Math.PI,
-      window.innerWidth / window.innerHeight,
+      this.canvasAspect(),
       0.1,
       200,
     );
@@ -192,6 +218,20 @@ export class ThreeAdapter implements RendererAdapter {
   private defaultCamera?: THREE.PerspectiveCamera;
   private OrbitControlsCtor?: new (...args: unknown[]) => unknown;
   private canvas?: HTMLCanvasElement;
+  private _lastCanvasW = 0;
+  private _lastCanvasH = 0;
+
+  /**
+   * Aspect ratio from the render canvas (NOT the window). Babylon's engine
+   * derives this automatically; Three needs it set explicitly, or a camera in a
+   * sub-window pane comes out stretched.
+   */
+  private canvasAspect(): number {
+    const c = this.canvas;
+    const w = c?.clientWidth || c?.width || window.innerWidth;
+    const h = c?.clientHeight || c?.height || window.innerHeight;
+    return h > 0 ? w / h : 1;
+  }
 
   getRenderingCanvas(): HTMLCanvasElement | null {
     return this.renderer?.domElement ?? this.canvas ?? null;
@@ -403,15 +443,35 @@ export class ThreeAdapter implements RendererAdapter {
     const m = this.meshes.get(h);
     if (m) m.scale.set(sx, sy, sz);
   }
-  replaceMeshGeometry(_h: MeshHandle, _geom: MeshGeometry): void {
-    // Mutating geometry requires constructing a new BufferGeometry; deferred
-    // until a Three-side System needs it (the migration is scaffolding-only).
-    void _h; void _geom;
+  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
+    const T = this.THREE;
+    const mesh = this.meshes.get(h);
+    if (!mesh || !T) return;
+    // Build a fresh BufferGeometry from the supplied buffers and hot-swap it,
+    // disposing the old one. Mirrors BabylonAdapter.replaceMeshGeometry (used
+    // for flipper geometry rewrites).
+    const next = new T.BufferGeometry();
+    next.setAttribute('position', new T.Float32BufferAttribute(geom.positions, 3));
+    next.setIndex(geom.indices);
+    if (geom.normals) {
+      next.setAttribute('normal', new T.Float32BufferAttribute(geom.normals, 3));
+    } else {
+      // No normals supplied — compute from positions so lighting works.
+      next.computeVertexNormals();
+    }
+    if (geom.uvs) next.setAttribute('uv', new T.Float32BufferAttribute(geom.uvs, 2));
+    next.computeBoundingBox();
+    next.computeBoundingSphere();
+    mesh.geometry.dispose();
+    mesh.geometry = next;
   }
-  setMeshBillboardMode(_h: MeshHandle, _mode: BillboardMode): void {
-    // Three has no built-in billboard mode; would need a per-frame lookAt.
-    // Deferred — Systems that need this should use a Sprite via createLabel.
-    void _h; void _mode;
+  setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void {
+    // Three has no built-in billboard mode, so the mesh is registered here and
+    // oriented toward the active camera each frame in the render loop. 'none'
+    // clears the registration (and the mesh keeps its last orientation).
+    if (!this.meshes.has(h)) return;
+    if (mode === 'none') this.billboards.delete(h);
+    else this.billboards.set(h, mode);
   }
   getMeshWorldPosition(h: MeshHandle, out: Vec3): Vec3 {
     const mesh = this.meshes.get(h);
@@ -426,11 +486,18 @@ export class ThreeAdapter implements RendererAdapter {
     out[2] = this._tmpThreeVec.z;
     return out;
   }
-  setMeshBoundingBoxExtents(_h: MeshHandle, _min: Vec3, _max: Vec3): void {
-    // Three.js + the pure-core physics integrator don't fit a BOX shape to a
-    // mesh's bounding box (sphere/box dimensions are passed explicitly in
-    // PhysicsBodyOpts), so there is nothing to override here.
-    void _h; void _min; void _max;
+  setMeshBoundingBoxExtents(h: MeshHandle, min: Vec3, max: Vec3): void {
+    const T = this.THREE;
+    const mesh = this.meshes.get(h);
+    if (!mesh || !T) return;
+    // Record the override so a later Rapier box collider fits these extents
+    // instead of the raw geometry bounds, and stamp the geometry's boundingBox
+    // so getMeshBoundingBoxExtents reflects it immediately.
+    this.boxExtentOverrides.set(h, { min: [...min], max: [...max] });
+    mesh.geometry.boundingBox = new T.Box3(
+      new T.Vector3(min[0], min[1], min[2]),
+      new T.Vector3(max[0], max[1], max[2]),
+    );
   }
   getMeshBoundingBoxExtents(h: MeshHandle): { min: Vec3; max: Vec3 } | null {
     const mesh = this.meshes.get(h);
@@ -463,6 +530,8 @@ export class ThreeAdapter implements RendererAdapter {
     }
     this.scene?.remove(mesh);
     this.meshes.delete(h);
+    this.billboards.delete(h);
+    this.boxExtentOverrides.delete(h);
   }
 
   createLineSystem(id: string, lines: Vec3[][], color?: Color): LineHandle {
@@ -645,85 +714,171 @@ export class ThreeAdapter implements RendererAdapter {
     return out;
   }
 
+  /**
+   * Lazily boot Rapier the first time a body is requested (the role
+   * ensureHavok plays in BabylonAdapter). Subsequent callers share the same
+   * promise so the WASM module loads once per session; queued creates drain
+   * once the world is live.
+   */
+  private ensureRapier(): Promise<void> {
+    if (this.rapierReady) return Promise.resolve();
+    if (this.rapierInitPromise) return this.rapierInitPromise;
+    // Literal specifier: Rapier is a real npm dependency (unlike `three`, which
+    // is CDN-loaded via an import map), so the consumer's bundler resolves it.
+    this.rapierInitPromise = import('@dimforge/rapier3d-compat')
+      .then(async (mod) => {
+        const R = (mod.default ?? mod) as RapierModule;
+        await R.init();
+        this.rapier = new RapierPhysics(R);
+        this.rapierReady = true;
+        const pending = this.pendingRapierCreates;
+        this.pendingRapierCreates = [];
+        for (const p of pending) this.physicsCreateBody(p.meshId, p.opts);
+      })
+      .catch((err) => {
+        console.error('[ThreeAdapter] Rapier failed to initialize:', err);
+      });
+    return this.rapierInitPromise;
+  }
+
+  /** World-space half-extents of a mesh: geometry bounds (or override) × scale. */
+  private meshHalfExtents(h: MeshHandle, mesh: THREE.Mesh): { x: number; y: number; z: number } {
+    const override = this.boxExtentOverrides.get(h);
+    let minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number;
+    if (override) {
+      [minX, minY, minZ] = override.min;
+      [maxX, maxY, maxZ] = override.max;
+    } else {
+      const g = mesh.geometry;
+      if (!g.boundingBox) g.computeBoundingBox();
+      const bb = g.boundingBox;
+      if (!bb) return { x: 0.5, y: 0.5, z: 0.5 };
+      ({ x: minX, y: minY, z: minZ } = bb.min);
+      ({ x: maxX, y: maxY, z: maxZ } = bb.max);
+    }
+    return {
+      x: Math.max(1e-3, ((maxX - minX) / 2) * mesh.scale.x),
+      y: Math.max(1e-3, ((maxY - minY) / 2) * mesh.scale.y),
+      z: Math.max(1e-3, ((maxZ - minZ) / 2) * mesh.scale.z),
+    };
+  }
+
+  /** Find the MeshHandle for a given meshId (Rapier collider sizing). */
+  private handleForMeshId(meshId: string): MeshHandle | undefined {
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (!mesh) return undefined;
+    for (const [h, m] of this.meshes) if (m === mesh) return h;
+    return undefined;
+  }
+
   physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void {
     const mesh = this.meshesByMeshId.get(meshId);
     if (!mesh) return;
-    if (!this.physicsCore) {
-      if (!this.physicsFactory) return;
-      this.physicsCore = this.physicsFactory();
+
+    if (!this.usesRapier) {
+      // Injected pure-JS integrator path (back-compat).
+      if (!this.physicsCore) this.physicsCore = this.physicsFactory!();
+      this.physicsCore.createBody(meshId, {
+        shapeType: opts.shapeType,
+        motionType: opts.motionType,
+        mass: opts.mass,
+        friction: opts.friction,
+        restitution: opts.restitution,
+        lockRotation: opts.lockRotation,
+        posX: mesh.position.x,
+        posY: mesh.position.y,
+        posZ: mesh.position.z,
+      });
+      return;
     }
-    this.physicsCore.createBody(meshId, {
-      shapeType: opts.shapeType,
-      motionType: opts.motionType,
-      mass: opts.mass,
-      friction: opts.friction,
-      restitution: opts.restitution,
-      lockRotation: opts.lockRotation,
-      posX: mesh.position.x,
-      posY: mesh.position.y,
-      posZ: mesh.position.z,
-    });
+
+    // Rapier path (default). Queue until the WASM world is live.
+    if (!this.rapierReady || !this.rapier) {
+      this.pendingRapierCreates.push({ meshId, opts });
+      void this.ensureRapier();
+      return;
+    }
+    const h = this.handleForMeshId(meshId);
+    const half = h ? this.meshHalfExtents(h, mesh) : { x: 0.5, y: 0.5, z: 0.5 };
+    const q = mesh.quaternion;
+    this.rapier.createBody(
+      meshId,
+      opts,
+      { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+      { x: q.x, y: q.y, z: q.z, w: q.w },
+      half,
+    );
   }
 
   physicsDestroyBody(meshId: string): void {
-    this.physicsCore?.destroyBody(meshId);
+    if (this.usesRapier) this.rapier?.destroyBody(meshId);
+    else this.physicsCore?.destroyBody(meshId);
   }
 
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void {
-    this.physicsCore?.setBodyVelocity(meshId, vx, vy, vz);
+    if (this.usesRapier) this.rapier?.setLinearVelocity(meshId, vx, vy, vz);
+    else this.physicsCore?.setBodyVelocity(meshId, vx, vy, vz);
   }
 
-  physicsSetBodyAngularVelocity(_meshId: string, _vx: number, _vy: number, _vz: number): void {
-    // Pure-core integrator doesn't track angular velocity yet.
-    void _meshId; void _vx; void _vy; void _vz;
+  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void {
+    // The injected pure-core integrator doesn't track angular velocity; the
+    // default Rapier backend does.
+    this.rapier?.setAngularVelocity(meshId, vx, vy, vz);
   }
 
-  physicsSetBodyDrivenByMesh(_meshId: string, _drivenByMesh: boolean): void {
-    // Pure-core integrator is body-authoritative; no mesh-driven mode to toggle.
-    void _meshId; void _drivenByMesh;
+  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
+    // drivenByMesh=true → the mesh transform is pushed into the body each step
+    // (Rapier kinematic target); false → physics owns the transform.
+    this.rapier?.setDrivenByMesh(meshId, drivenByMesh);
   }
 
-  physicsSetGravity(_x: number, _y: number, _z: number): void {
-    // Pure-core integrator has no global gravity hook yet.
-    void _x; void _y; void _z;
+  physicsSetGravity(x: number, y: number, z: number): void {
+    this.rapier?.setGravity(x, y, z);
   }
 
-  physicsResizeBoxBody(_meshId: string, _halfExtents: Vec3): void {
-    // No box collider concept in the pure-core integrator yet.
-    void _meshId; void _halfExtents;
+  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void {
+    this.rapier?.resizeBoxBody(meshId, halfExtents[0], halfExtents[1], halfExtents[2]);
   }
 
-  physicsSetTimeStep(_hz: number): void {
-    // Pure-core integrator steps with whatever dt the loop hands it; no
-    // fixed timestep configuration to twist. Babylon override is where the
-    // Hz slider has bite.
-    void _hz;
+  physicsSetTimeStep(hz: number): void {
+    // The injected pure-core integrator steps with whatever dt the loop hands
+    // it; the Rapier backend honors a fixed timestep via an accumulator.
+    this.rapier?.setTimeStep(hz);
   }
 
-  physicsSetRestitution(_meshId: string, _restitution: number): void {
-    // Pure-core integrator has no material model yet.
-    void _meshId; void _restitution;
+  physicsSetRestitution(meshId: string, restitution: number): void {
+    this.rapier?.setRestitution(meshId, restitution);
   }
 
-  setCollidersVisible(_visible: boolean): void {
-    // No collider debug rendering in the pure-core path.
-    void _visible;
+  setCollidersVisible(visible: boolean): void {
+    this.collidersVisible = visible;
+    if (this.usesRapier) {
+      if (!visible) this.clearColliderDebug();
+      // When turning on, the wireframe is (re)built on the next physicsStep.
+    }
   }
 
   physicsSetPaused(paused: boolean): void {
-    // The pure-core integrator only advances when `physicsStep` runs, so a
-    // flag that gates the step fully freezes it.
+    // Both backends only advance during physicsStep, so a flag that gates the
+    // step fully freezes the sim.
     this.physicsPaused = paused;
   }
 
   physicsGetBodyState(meshId: string): PhysicsBodySnapshot | null {
+    if (this.usesRapier) {
+      const raw = this.rapier?.getRaw(meshId);
+      if (!raw) return null;
+      return {
+        position: [raw.t.x, raw.t.y, raw.t.z],
+        rotation: this.quatToEuler(raw.r.x, raw.r.y, raw.r.z, raw.r.w),
+        linearVelocity: [raw.lv.x, raw.lv.y, raw.lv.z],
+        angularVelocity: [raw.av.x, raw.av.y, raw.av.z],
+      };
+    }
     if (!this.physicsCore) return null;
     const body = this.physicsCore.bodies().find((b) => b.meshId === meshId);
     if (!body) return null;
-    // The pure-core integrator exposes position only; rotation/angular velocity
-    // (and a readable linear velocity) aren't in its public surface yet, so
-    // they snapshot as zero. Position rewind is exact; the rest is best-effort
-    // until Rapier.js lands.
+    // The injected pure-core integrator exposes position only.
     return {
       position: [body.posX, body.posY, body.posZ],
       rotation: [0, 0, 0],
@@ -733,29 +888,127 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
   physicsSetBodyState(meshId: string, state: PhysicsBodySnapshot): void {
-    // Restore the linear velocity (the one setter the pure-core exposes) and
-    // sync the mesh so the pose is visible while paused. The integrator has no
-    // position setter, so on resume it will drive from its own stored pose.
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (this.usesRapier) {
+      const q = this.eulerToQuat(state.rotation[0], state.rotation[1], state.rotation[2]);
+      this.rapier?.setBodyState(
+        meshId,
+        { x: state.position[0], y: state.position[1], z: state.position[2] },
+        q,
+        { x: state.linearVelocity[0], y: state.linearVelocity[1], z: state.linearVelocity[2] },
+        { x: state.angularVelocity[0], y: state.angularVelocity[1], z: state.angularVelocity[2] },
+      );
+      // Mirror the pose onto the mesh so it's visible immediately while paused.
+      if (mesh) {
+        mesh.position.set(state.position[0], state.position[1], state.position[2]);
+        mesh.quaternion.set(q.x, q.y, q.z, q.w);
+      }
+      return;
+    }
+    // Pure-core: only the linear-velocity setter exists; sync the mesh pose too.
     this.physicsCore?.setBodyVelocity(
       meshId,
       state.linearVelocity[0],
       state.linearVelocity[1],
       state.linearVelocity[2],
     );
-    const mesh = this.meshesByMeshId.get(meshId);
     if (mesh) mesh.position.set(state.position[0], state.position[1], state.position[2]);
   }
 
   physicsStep(dt: number): void {
-    if (!this.physicsCore || this.physicsPaused) return;
+    if (this.physicsPaused) return;
+
+    if (this.usesRapier) {
+      const rapier = this.rapier;
+      if (!rapier) return;
+      // Push mesh-driven bodies' transforms into their kinematic targets first.
+      rapier.forEachBody((meshId, driven) => {
+        if (!driven) return;
+        const mesh = this.meshesByMeshId.get(meshId);
+        if (!mesh) return;
+        const q = mesh.quaternion;
+        rapier.pushKinematic(
+          meshId,
+          mesh.position.x, mesh.position.y, mesh.position.z,
+          q.x, q.y, q.z, q.w,
+        );
+      });
+      rapier.step(dt);
+      // Write physics-owned poses back to their meshes.
+      rapier.forEachBody((meshId, driven) => {
+        if (driven) return;
+        const mesh = this.meshesByMeshId.get(meshId);
+        const raw = rapier.getRaw(meshId);
+        if (!mesh || !raw) return;
+        mesh.position.set(raw.t.x, raw.t.y, raw.t.z);
+        mesh.quaternion.set(raw.r.x, raw.r.y, raw.r.z, raw.r.w);
+      });
+      if (this.collidersVisible) this.updateColliderDebug();
+      return;
+    }
+
+    // Injected pure-core path.
+    if (!this.physicsCore) return;
     this.physicsCore.step(dt);
-    // Push integrated positions back to the meshes so the render loop picks
-    // them up. Static bodies still get written; it's a no-op at the mesh level.
     for (const body of this.physicsCore.bodies()) {
       const mesh = this.meshesByMeshId.get(body.meshId);
       if (!mesh) continue;
       mesh.position.set(body.posX, body.posY, body.posZ);
     }
+  }
+
+  // ─── Quaternion ↔ Euler helpers (renderer-agnostic snapshot conversion) ───
+  private _qe?: THREE.Euler;
+  private _qq?: THREE.Quaternion;
+  private quatToEuler(x: number, y: number, z: number, w: number): Vec3 {
+    const T = this.THREE;
+    if (!T) return [0, 0, 0];
+    if (!this._qe) this._qe = new T.Euler();
+    if (!this._qq) this._qq = new T.Quaternion();
+    this._qq.set(x, y, z, w);
+    this._qe.setFromQuaternion(this._qq);
+    return [this._qe.x, this._qe.y, this._qe.z];
+  }
+  private eulerToQuat(x: number, y: number, z: number): { x: number; y: number; z: number; w: number } {
+    const T = this.THREE;
+    if (!T) return { x: 0, y: 0, z: 0, w: 1 };
+    if (!this._qe) this._qe = new T.Euler();
+    if (!this._qq) this._qq = new T.Quaternion();
+    this._qe.set(x, y, z);
+    this._qq.setFromEuler(this._qe);
+    return { x: this._qq.x, y: this._qq.y, z: this._qq.z, w: this._qq.w };
+  }
+
+  /** Rebuild the Rapier collider wireframe from world.debugRender() each step. */
+  private updateColliderDebug(): void {
+    const T = this.THREE;
+    if (!T || !this.scene || !this.rapier) return;
+    const { vertices, colors } = this.rapier.debugRender();
+    if (!this.colliderDebugLines) {
+      const geom = new T.BufferGeometry();
+      const mat = new T.LineBasicMaterial({ vertexColors: true });
+      this.colliderDebugLines = new T.LineSegments(geom, mat);
+      this.colliderDebugLines.name = 'rapierColliderDebug';
+      (this.colliderDebugLines as unknown as { raycast: () => void }).raycast = () => {};
+      this.colliderDebugLines.frustumCulled = false;
+      this.scene.add(this.colliderDebugLines);
+    }
+    const geom = this.colliderDebugLines.geometry;
+    geom.setAttribute('position', new T.BufferAttribute(vertices, 3));
+    // Rapier emits RGBA colors; LineBasicMaterial vertexColors wants RGB.
+    const rgb = new Float32Array((colors.length / 4) * 3);
+    for (let i = 0, j = 0; i < colors.length; i += 4, j += 3) {
+      rgb[j] = colors[i]!; rgb[j + 1] = colors[i + 1]!; rgb[j + 2] = colors[i + 2]!;
+    }
+    geom.setAttribute('color', new T.BufferAttribute(rgb, 3));
+  }
+
+  private clearColliderDebug(): void {
+    if (!this.colliderDebugLines) return;
+    this.scene?.remove(this.colliderDebugLines);
+    this.colliderDebugLines.geometry.dispose();
+    (this.colliderDebugLines.material as THREE.Material).dispose();
+    this.colliderDebugLines = undefined;
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
@@ -995,7 +1248,7 @@ export class ThreeAdapter implements RendererAdapter {
     // Babylon's ArcRotateCamera default FOV is 0.8 rad (~45.84°). Match it so
     // the same scene framing lines up across renderers.
     const fovDeg = (0.8 * 180) / Math.PI;
-    const camera = new T.PerspectiveCamera(fovDeg, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const camera = new T.PerspectiveCamera(fovDeg, this.canvasAspect(), 0.1, 1000);
     // Position derived from spherical coords (alpha, beta, radius) around target.
     const target = spec.target;
     const { x, y, z } = sphericalToCartesian(spec.alpha, spec.beta, spec.radius, target);
@@ -1086,14 +1339,15 @@ export class ThreeAdapter implements RendererAdapter {
     return out;
   }
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
-    // Three.js is right-handed: right = forward × up, with up = (0,1,0).
+    // Three.js is right-handed: right = normalize(forward × up), up = (0,1,0).
     this.getCameraForward(h, out);
-    const fx = out[0], fy = out[1], fz = out[2];
-    // cross((fx,fy,fz), (0,1,0)) = (fy·0 - fz·1, fz·0 - fx·0, fx·1 - fy·0) = (-fz, 0, fx)
-    out[0] = -fz;
+    const fx = out[0], fz = out[2];
+    // cross((fx,fy,fz), (0,1,0)) = (-fz, 0, fx); its length is hypot(fx,fz) < 1
+    // whenever forward tilts off the XZ plane, so normalize to stay a unit axis.
+    const len = Math.hypot(fx, fz) || 1;
+    out[0] = -fz / len;
     out[1] = 0;
-    out[2] = fx;
-    void fy;
+    out[2] = fx / len;
     return out;
   }
   nudgeCameraAlpha(h: CameraHandle, delta: number): void {
@@ -1206,11 +1460,40 @@ export class ThreeAdapter implements RendererAdapter {
     if (ctrl) ctrl.enabled = enabled;
   }
 
-  pickAtScreenPoint(_x: number, _y: number, _opts?: PickOptions): PickResult | null {
-    // Raycasting against the active scene + meshes lookup is doable but not
-    // yet wired into any Three-side System; defer until needed.
-    void _x; void _y; void _opts;
-    return null;
+  pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
+    const T = this.THREE;
+    // Pick against the active render camera (first registered arc camera, else
+    // the fallback). Inputs are pixel coords relative to the canvas.
+    const firstCam = this.cameras.values().next().value;
+    const camera = firstCam?.camera ?? this.defaultCamera;
+    const canvas = this.getRenderingCanvas();
+    if (!T || !this.scene || !camera || !canvas) return null;
+
+    if (!this._tfRaycaster) this._tfRaycaster = new T.Raycaster();
+    if (!this._tfNdc) this._tfNdc = new T.Vector2();
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width || canvas.width;
+    const h = rect.height || canvas.height;
+    // Pixel → normalized device coords (origin top-left → +Y up).
+    this._tfNdc.set((x / w) * 2 - 1, -((y / h) * 2 - 1));
+    this._tfRaycaster.setFromCamera(this._tfNdc, camera);
+
+    // Map each pickable mesh back to its meshId so the predicate can filter and
+    // the result can name the hit. Debug boxes / thin fields are non-pickable
+    // (their raycast is stubbed at creation), so they never appear here.
+    const idByMesh = new Map<THREE.Object3D, string>();
+    const targets: THREE.Object3D[] = [];
+    for (const [id, mesh] of this.meshesByMeshId) {
+      if (opts?.meshPredicate && !opts.meshPredicate(id)) continue;
+      idByMesh.set(mesh, id);
+      targets.push(mesh);
+    }
+    const hits = this._tfRaycaster.intersectObjects(targets, false);
+    const hit = hits[0];
+    if (!hit) return null;
+    const meshId = idByMesh.get(hit.object);
+    if (meshId === undefined) return null;
+    return { x: hit.point.x, y: hit.point.y, z: hit.point.z, meshId };
   }
 
   attachShadowCaster(light: LightHandle, mesh: MeshHandle): ShadowCasterHandle {
@@ -1416,6 +1699,14 @@ export class ThreeAdapter implements RendererAdapter {
       const now = performance.now();
       const dt = Math.min(0.1, (now - this.lastTime) / 1000);
       this.lastTime = now;
+      // Keep the drawing buffer + camera aspect synced to the canvas each frame
+      // (Babylon's engine does this automatically; Three needs it explicit).
+      const c = this.canvas;
+      if (c && (c.clientWidth !== this._lastCanvasW || c.clientHeight !== this._lastCanvasH)) {
+        this._lastCanvasW = c.clientWidth;
+        this._lastCanvasH = c.clientHeight;
+        if (c.clientWidth > 0 && c.clientHeight > 0) this.resize();
+      }
       this.onFrame?.(dt);
       // Advance any registered animation mixers so playing clips actually
       // move. Mixers are lazily created the first time a mesh's clip is
@@ -1425,6 +1716,7 @@ export class ThreeAdapter implements RendererAdapter {
       const firstCam = this.cameras.values().next().value;
       const camera = firstCam?.camera ?? this.defaultCamera;
       if (camera) {
+        if (this.billboards.size > 0) this.updateBillboards(camera);
         this.renderer!.render(this.scene!, camera);
       }
       this.rafId = requestAnimationFrame(tick);
@@ -1471,6 +1763,14 @@ export class ThreeAdapter implements RendererAdapter {
     this.stopLoop();
     this.physicsCore?.reset();
     this.physicsCore = null;
+    this.clearColliderDebug();
+    this.rapier?.free();
+    this.rapier = null;
+    this.rapierReady = false;
+    this.rapierInitPromise = null;
+    this.pendingRapierCreates = [];
+    this.billboards.clear();
+    this.boxExtentOverrides.clear();
     this.renderer?.dispose();
     this.renderer = undefined;
     this.scene = undefined;
@@ -1489,11 +1789,38 @@ export class ThreeAdapter implements RendererAdapter {
     this.animationActions.clear();
   }
 
+  private _bbCamPos?: THREE.Vector3;
+
+  /**
+   * Orient every billboarded mesh toward `camera`. 'all' copies the camera's
+   * orientation so the mesh faces the screen plane (Babylon BILLBOARDMODE_ALL);
+   * 'y' yaws the mesh to face the camera while staying upright (BILLBOARDMODE_Y).
+   */
+  private updateBillboards(camera: THREE.PerspectiveCamera): void {
+    const T = this.THREE;
+    if (!T) return;
+    if (!this._bbCamPos) this._bbCamPos = new T.Vector3();
+    camera.getWorldPosition(this._bbCamPos);
+    for (const [h, mode] of this.billboards) {
+      const mesh = this.meshes.get(h);
+      if (!mesh) continue;
+      if (mode === 'all') {
+        mesh.quaternion.copy(camera.quaternion);
+      } else {
+        // Y-axis billboard: yaw toward the camera in the XZ plane only.
+        const dx = this._bbCamPos.x - mesh.position.x;
+        const dz = this._bbCamPos.z - mesh.position.z;
+        mesh.rotation.set(0, Math.atan2(dx, dz), 0);
+      }
+    }
+  }
+
   /** Lazily enables shadow map on the WebGLRenderer the first time a shadow-casting light is added. */
   enableShadowMap(): void {
     if (this.shadowMapEnabled || !this.renderer || !this.THREE) return;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = this.THREE.PCFSoftShadowMap;
+    // PCFShadowMap (not PCFSoftShadowMap, deprecated in three r184+).
+    this.renderer.shadowMap.type = this.THREE.PCFShadowMap;
     this.shadowMapEnabled = true;
   }
 }
@@ -1508,4 +1835,173 @@ function flattenSegments(lines: Vec3[][]): number[] {
     }
   }
   return out;
+}
+
+interface XYZ { x: number; y: number; z: number }
+interface XYZW { x: number; y: number; z: number; w: number }
+
+/**
+ * Rapier.js rigid-body world owned by ThreeAdapter — the engine-side physics
+ * backend (the role Havok plays for BabylonAdapter). Pure numbers in, pure
+ * numbers out: it never touches three.js, so the adapter handles all
+ * mesh ↔ body transform syncing and quaternion ↔ Euler conversion. Lives inside
+ * ThreeAdapter.ts (a coverage-excluded engine binding) because it can only run
+ * with the WASM module loaded; it's exercised via browser/integration smoke,
+ * not jsdom unit tests.
+ */
+class RapierPhysics {
+  private readonly R: RapierModule;
+  private world: RAPIER.World;
+  private bodies = new Map<string, {
+    body: RAPIER.RigidBody;
+    collider: RAPIER.Collider;
+    kinematic: boolean;
+    drivenByMesh: boolean;
+  }>();
+  private fixedDt = 1 / 60;
+  private accumulator = 0;
+
+  constructor(R: RapierModule, gravityY = -30) {
+    this.R = R;
+    this.world = new R.World({ x: 0, y: gravityY, z: 0 });
+    this.world.timestep = this.fixedDt;
+  }
+
+  createBody(meshId: string, opts: PhysicsBodyOpts, pos: XYZ, rot: XYZW, half: XYZ): void {
+    if (this.bodies.has(meshId)) return;
+    const R = this.R;
+    const kinematic = opts.motionType === 'kinematic';
+    const desc =
+      opts.motionType === 'static'
+        ? R.RigidBodyDesc.fixed()
+        : kinematic
+          ? R.RigidBodyDesc.kinematicPositionBased()
+          : R.RigidBodyDesc.dynamic();
+    desc.setTranslation(pos.x, pos.y, pos.z).setRotation(rot);
+    if (opts.motionType === 'dynamic') desc.setAdditionalMass(opts.mass);
+    // Match BabylonAdapter's lockRotation: suppress tumbling but keep Y turns.
+    if (opts.lockRotation) desc.enabledRotations(false, true, false);
+    const body = this.world.createRigidBody(desc);
+
+    let cd: RAPIER.ColliderDesc;
+    if (opts.shapeType === 'sphere') {
+      cd = R.ColliderDesc.ball(Math.max(half.x, half.y, half.z));
+    } else if (opts.shapeType === 'capsule') {
+      const radius = Math.max(half.x, half.z);
+      cd = R.ColliderDesc.capsule(Math.max(1e-3, half.y - radius), radius);
+    } else {
+      cd = R.ColliderDesc.cuboid(half.x, half.y, half.z);
+    }
+    // Density 0 so the body mass is exactly the additional mass set above.
+    cd.setRestitution(opts.restitution).setFriction(opts.friction).setDensity(0);
+    const collider = this.world.createCollider(cd, body);
+
+    this.bodies.set(meshId, { body, collider, kinematic, drivenByMesh: false });
+  }
+
+  destroyBody(meshId: string): void {
+    const rec = this.bodies.get(meshId);
+    if (!rec) return;
+    // Removing the body removes its attached colliders too.
+    this.world.removeRigidBody(rec.body);
+    this.bodies.delete(meshId);
+  }
+
+  setLinearVelocity(meshId: string, x: number, y: number, z: number): void {
+    this.bodies.get(meshId)?.body.setLinvel({ x, y, z }, true);
+  }
+
+  setAngularVelocity(meshId: string, x: number, y: number, z: number): void {
+    this.bodies.get(meshId)?.body.setAngvel({ x, y, z }, true);
+  }
+
+  setGravity(x: number, y: number, z: number): void {
+    this.world.gravity = { x, y, z };
+  }
+
+  resizeBoxBody(meshId: string, hx: number, hy: number, hz: number): void {
+    this.bodies.get(meshId)?.collider.setHalfExtents({ x: hx, y: hy, z: hz });
+  }
+
+  setRestitution(meshId: string, restitution: number): void {
+    this.bodies.get(meshId)?.collider.setRestitution(restitution);
+  }
+
+  setTimeStep(hz: number): void {
+    if (hz <= 0) return;
+    this.fixedDt = 1 / hz;
+    this.world.timestep = this.fixedDt;
+  }
+
+  setDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
+    const rec = this.bodies.get(meshId);
+    if (rec) rec.drivenByMesh = drivenByMesh;
+  }
+
+  pushKinematic(
+    meshId: string,
+    x: number, y: number, z: number,
+    qx: number, qy: number, qz: number, qw: number,
+  ): void {
+    const rec = this.bodies.get(meshId);
+    if (!rec) return;
+    if (rec.kinematic) {
+      rec.body.setNextKinematicTranslation({ x, y, z });
+      rec.body.setNextKinematicRotation({ x: qx, y: qy, z: qz, w: qw });
+    } else {
+      // Dynamic body driven by the mesh: teleport it into place.
+      rec.body.setTranslation({ x, y, z }, true);
+      rec.body.setRotation({ x: qx, y: qy, z: qz, w: qw }, true);
+    }
+  }
+
+  setBodyState(meshId: string, pos: XYZ, rot: XYZW, lin: XYZ, ang: XYZ): void {
+    const rec = this.bodies.get(meshId);
+    if (!rec) return;
+    rec.body.setTranslation(pos, true);
+    rec.body.setRotation(rot, true);
+    rec.body.setLinvel(lin, true);
+    rec.body.setAngvel(ang, true);
+  }
+
+  getRaw(meshId: string): { t: XYZ; r: XYZW; lv: XYZ; av: XYZ } | null {
+    const rec = this.bodies.get(meshId);
+    if (!rec) return null;
+    const t = rec.body.translation();
+    const r = rec.body.rotation();
+    const lv = rec.body.linvel();
+    const av = rec.body.angvel();
+    return {
+      t: { x: t.x, y: t.y, z: t.z },
+      r: { x: r.x, y: r.y, z: r.z, w: r.w },
+      lv: { x: lv.x, y: lv.y, z: lv.z },
+      av: { x: av.x, y: av.y, z: av.z },
+    };
+  }
+
+  forEachBody(cb: (meshId: string, drivenByMesh: boolean) => void): void {
+    for (const [meshId, rec] of this.bodies) cb(meshId, rec.drivenByMesh);
+  }
+
+  step(dt: number): void {
+    // Fixed-timestep accumulator so simulation stays stable under variable dt.
+    // Capped iterations avoid a "spiral of death" if the tab stalls.
+    this.accumulator += dt;
+    let steps = 0;
+    while (this.accumulator >= this.fixedDt && steps < 5) {
+      this.world.step();
+      this.accumulator -= this.fixedDt;
+      steps++;
+    }
+    if (steps === 5) this.accumulator = 0;
+  }
+
+  debugRender(): { vertices: Float32Array; colors: Float32Array } {
+    return this.world.debugRender();
+  }
+
+  free(): void {
+    this.world.free();
+    this.bodies.clear();
+  }
 }

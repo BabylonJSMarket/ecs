@@ -19,6 +19,7 @@ export default defineConfig({
         'src/**/index.ts',
         'src/babylon.ts',
         'src/three.ts',
+        'src/babylon-lite.ts',
         'src/testing.ts',
         // Solid debug UI — ephemeral, not unit-tested
         'src/**/*.viz.{ts,tsx}',
@@ -30,6 +31,7 @@ export default defineConfig({
         // a real Babylon/Three engine. Coverage here = unit-testable logic.
         'src/Renderer/BabylonAdapter.ts',
         'src/Renderer/ThreeAdapter.ts',
+        'src/Renderer/BabylonLiteAdapter.ts',
       ],
       // Publish guardrail: prepublishOnly runs test:coverage, so a publish
       // ABORTS if coverage regresses. lines/functions/statements held at 100;

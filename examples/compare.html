@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RendererAdapter side-by-side — Babylon · Three · Babylon Lite</title>
+
+  <!--
+    Standalone comparison harness for the three RendererAdapters that ship in
+    @babylonjsmarket/ecs. ONE buildScene() drives the shared RendererAdapter
+    interface, so every pane runs the exact same calls against a different
+    engine — the whole point of the renderer-agnostic boundary.
+
+    Run it (engines + WASM load from a CDN, so it must be served over http):
+        npm run examples        # esbuild-bundles compare.app.ts, then serves at :8080
+        open http://localhost:8080/examples/compare.html
+    The app logic lives in compare.app.ts; esbuild bundles it (with the adapter
+    source) into compare.bundle.js, leaving the engine packages external so the
+    import map below resolves them at runtime.
+
+    Notes:
+      • Babylon physics = Havok (WASM via CDN); Three physics = Rapier (WASM).
+      • Babylon Lite is WebGPU-ONLY (needs a WebGPU browser) and its physics +
+        labels are documented stubs — its bodies stay put on purpose, which is
+        exactly the divergence this page is meant to show.
+      • Each pane is independently orbitable (drag / wheel).
+  -->
+
+  <script type="importmap">
+  {
+    "imports": {
+      "@babylonjs/core": "https://esm.sh/@babylonjs/core@9.3.4",
+      "@babylonjs/core/": "https://esm.sh/@babylonjs/core@9.3.4/",
+      "@babylonjs/loaders": "https://esm.sh/@babylonjs/loaders@9.3.4",
+      "@babylonjs/loaders/": "https://esm.sh/@babylonjs/loaders@9.3.4/",
+      "@babylonjs/havok": "https://esm.sh/@babylonjs/havok@1.3.12",
+      "@babylonjs/lite": "https://esm.sh/@babylonjs/lite@1.0.1",
+      "@dimforge/rapier3d-compat": "https://esm.sh/@dimforge/rapier3d-compat@0.19.3",
+      "three": "https://esm.sh/three@0.184.0",
+      "three/addons/": "https://esm.sh/three@0.184.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: #0b0e14; color: #e6e6e6;
+      font: 14px/1.4 system-ui, sans-serif; }
+    header { padding: 10px 16px; border-bottom: 1px solid #1d2430; }
+    header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+    header p { margin: 4px 0 0; color: #8b97a7; font-size: 12px; }
+    .grid { display: flex; gap: 1px; height: calc(100vh - 58px); background: #1d2430; }
+    .pane { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+      background: #0b0e14; position: relative; }
+    .pane h2 { margin: 0; padding: 8px 12px; font-size: 13px; font-weight: 600;
+      display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #1d2430; }
+    .pane h2 .dot { width: 8px; height: 8px; border-radius: 50%; background: #3ddc84; }
+    .pane h2 .fps { margin-left: auto; font-weight: 600; font-size: 11px; color: #3ddc84;
+      font-variant-numeric: tabular-nums; }
+    .pane h2 .tag { margin-left: 10px; font-weight: 400; font-size: 11px; color: #8b97a7; }
+    canvas { flex: 1 1 auto; width: 100%; height: 100%; display: block; outline: none; }
+    .status { position: absolute; left: 0; right: 0; bottom: 0; padding: 6px 12px;
+      font-size: 11px; color: #8b97a7; background: rgba(11,14,20,.7);
+      border-top: 1px solid #1d2430; }
+    .status.error { color: #ff8c8c; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RendererAdapter — same scene, three engines</h1>
+    <p>One <code>buildScene()</code> against the shared interface. Drag to orbit each pane. Spheres fall &amp; bounce where physics is real.</p>
+  </header>
+
+  <div class="grid">
+    <div class="pane">
+      <h2><span class="dot"></span>Babylon <span class="fps" id="fps-babylon">— fps</span><span class="tag">Havok physics</span></h2>
+      <canvas id="cv-babylon"></canvas>
+      <div class="status" id="st-babylon">starting…</div>
+    </div>
+    <div class="pane">
+      <h2><span class="dot"></span>Three.js <span class="fps" id="fps-three">— fps</span><span class="tag">Rapier physics</span></h2>
+      <canvas id="cv-three"></canvas>
+      <div class="status" id="st-three">starting…</div>
+    </div>
+    <div class="pane">
+      <h2><span class="dot"></span>Babylon Lite <span class="fps" id="fps-lite">— fps</span><span class="tag">WebGPU · Havok physics</span></h2>
+      <canvas id="cv-lite"></canvas>
+      <div class="status" id="st-lite">starting…</div>
+    </div>
+  </div>
+
+  <!-- esbuild-produced bundle (compare.app.ts + adapter source; engines external). -->
+  <script type="module" src="./compare.bundle.js"></script>
+
+  <!-- Live reload when `npm run examples` (esbuild serve+watch) rebuilds. Harmless
+       under a plain static server (the EventSource just never fires). -->
+  <script>
+    try { new EventSource('/esbuild').addEventListener('change', () => location.reload()); } catch {}
+  </script>
+</body>
+</html>
