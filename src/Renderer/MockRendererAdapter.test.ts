@@ -708,7 +708,13 @@ describe('MockRendererAdapter', () => {
   });
 
   describe('skybox', () => {
-    const skySpec: SkyboxSpec = { kind: 'procedural', skyColor: [0.4, 0.7, 1.0], horizonColor: [1, 1, 1], groundColor: [0.2, 0.2, 0.2] };
+    const skySpec: SkyboxSpec = {
+      zenithColor: [0.4, 0.7, 1.0],
+      horizonColor: [1, 1, 1],
+      groundColor: [0.2, 0.2, 0.2],
+      sunColor: [1, 1, 0.9],
+      sunDirection: [0, 1, 0],
+    };
 
     it('createSkybox returns a handle and records the call', () => {
       const h = renderer.createSkybox('sky1', skySpec);
