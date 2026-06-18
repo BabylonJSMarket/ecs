@@ -127,24 +127,6 @@ export class EventBus {
   private listeners: Map<string, Set<EventCallback>> = new Map();
 
   /**
-   * Queue for events emitted while processing other events.
-   * Prevents recursive event handling from causing stack overflow.
-   */
-  private eventQueue: IEvent[] = [];
-
-  /**
-   * Current position in the event queue.
-   * Using an index instead of shift() avoids array reallocation.
-   */
-  private queueIndex = 0;
-
-  /**
-   * Flag to track if we're currently processing events.
-   * Used to determine if new events should be queued.
-   */
-  private isProcessing = false;
-
-  /**
    * Special listeners that receive ALL events (subscribed with '*').
    * Useful for debugging, logging, or event replay systems.
    */
@@ -350,25 +332,16 @@ export class EventBus {
       this._raceDetector.recordEvent(type, data);
     }
 
-    // Fast path: no wildcard listeners and not processing - skip event wrapper entirely
-    // This avoids object allocation overhead when wildcards aren't used
-    if (this.wildcardListeners.size === 0 && !this.isProcessing) {
+    // Fast path: no wildcard listeners - skip the event-wrapper allocation.
+    if (this.wildcardListeners.size === 0) {
       this.processEventDirect(type, data);
       return;
     }
 
-    // Need event wrapper for wildcard listeners or queuing
+    // Wildcard listeners need the event wrapper. A re-entrant emit during
+    // processing simply recurses through processEvent.
     const event = getPooledEvent(type, data);
-
-    // If we're already processing events, queue this one for later
-    if (this.isProcessing) {
-      this.eventQueue.push(event);
-      return;
-    }
-
-    // Process this event and any queued events it generates
     this.processEvent(event);
-    this.processQueue();
   }
 
   /**
@@ -633,9 +606,6 @@ export class EventBus {
     this.listeners.clear();
     this.wildcardListeners.clear();
     this.entityListeners.clear();
-    this.eventQueue.length = 0;
-    this.queueIndex = 0;
-    this.isProcessing = false;
     this.lastEventData.clear();
     this._frameEventKeys.clear();
   }
@@ -743,29 +713,4 @@ export class EventBus {
     });
   }
 
-  /**
-   * Process all queued events.
-   *
-   * Called after processing an event to handle any events
-   * that were emitted during that processing.
-   */
-  private processQueue(): void {
-    if (this.isProcessing || this.eventQueue.length === 0) {
-      return;
-    }
-
-    this.isProcessing = true;
-
-    // Process queue without shift() to avoid array reallocation
-    // This is more efficient than shifting elements
-    while (this.queueIndex < this.eventQueue.length) {
-      const event = this.eventQueue[this.queueIndex++];
-      this.processEvent(event);
-    }
-
-    // Reset queue for reuse
-    this.eventQueue.length = 0;
-    this.queueIndex = 0;
-    this.isProcessing = false;
-  }
 }

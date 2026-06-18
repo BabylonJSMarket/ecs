@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Component, EventBus } from '..';
+import { componentTypeId } from './Component';
 
 class TestComponent extends Component {
   value: number = 0;
@@ -174,6 +175,26 @@ describe('Component', () => {
       expect(json._enabled).toBe(false);
       expect(json.onAttachCalled).toBe(false);
       expect(json.onDetachCalled).toBe(false);
+    });
+  });
+
+  describe('componentTypeId', () => {
+    it('returns the empty string for null or undefined ctors', () => {
+      // Both sides of an identity comparison run through this helper, so a
+      // missing ctor must collapse to a stable empty id rather than throw.
+      expect(componentTypeId(null)).toBe('');
+      expect(componentTypeId(undefined)).toBe('');
+    });
+
+    it('prefers an explicit stamped componentType over the class name', () => {
+      class FooComponent extends Component {}
+      (FooComponent as unknown as { componentType: string }).componentType = 'CustomId';
+      expect(componentTypeId(FooComponent)).toBe('CustomId');
+    });
+
+    it('falls back to the class name minus a trailing "Component"', () => {
+      class HemisphericLightComponent extends Component {}
+      expect(componentTypeId(HemisphericLightComponent)).toBe('HemisphericLight');
     });
   });
 });

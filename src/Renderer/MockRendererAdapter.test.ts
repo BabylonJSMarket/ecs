@@ -50,6 +50,18 @@ describe('MockRendererAdapter', () => {
       expect(renderer.calls).toHaveLength(1);
       expect(renderer.calls[0]).toMatchObject({ method: 'init', args: [] });
     });
+
+    it('init() surfaces the passed canvas through getRenderingCanvas', async () => {
+      const fakeCanvas = {} as HTMLCanvasElement;
+      await renderer.init(fakeCanvas);
+      expect(renderer.getRenderingCanvas()).toBe(fakeCanvas);
+    });
+
+    it('init(null) leaves getRenderingCanvas null (no canvas in headless tests)', async () => {
+      await renderer.init(null as any);
+      expect(renderer.getRenderingCanvas()).toBeNull();
+      expect(renderer.calls[0]).toMatchObject({ method: 'init', args: [] });
+    });
   });
 
   describe('mesh handles', () => {
@@ -592,6 +604,27 @@ describe('MockRendererAdapter', () => {
       expect(out[0]).toBeCloseTo(0);
       expect(out[1]).toBe(0);
       expect(out[2]).toBeCloseTo(-1);
+    });
+
+    it('getCameraRight falls back to alpha=0 for an unknown camera', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      const out: Vec3 = [0, 0, 0];
+      renderer.getCameraRight(fakeHandle, out);
+      // No stored angles → alpha=0 → right = (sin0, 0, -cos0) = (0, 0, -1)
+      expect(out[0]).toBeCloseTo(0);
+      expect(out[1]).toBe(0);
+      expect(out[2]).toBeCloseTo(-1);
+    });
+
+    it('screenToWorldPoint falls back to a zero target for an unknown camera', () => {
+      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
+      const out: Vec3 = [9, 9, 9];
+      const result = renderer.screenToWorldPoint(fakeHandle, 0.5, 0.5, 10, out);
+      // No stored target → origin [0,0,0]; alpha=0 forward = (-1,0,0) * 10
+      expect(result).toBe(out);
+      expect(out[0]).toBeCloseTo(-10);
+      expect(out[1]).toBeCloseTo(0);
+      expect(out[2]).toBeCloseTo(0);
     });
 
     it('nudgeCameraAlpha / nudgeCameraRadius / nudgeCameraBeta on unknown handle record without throwing', () => {

@@ -31,6 +31,16 @@ export default defineConfig({
         'src/Renderer/BabylonAdapter.ts',
         'src/Renderer/ThreeAdapter.ts',
       ],
+      // Publish guardrail: prepublishOnly runs test:coverage, so a publish
+      // ABORTS if coverage regresses. lines/functions/statements held at 100;
+      // branches floored just below current (the remainder are documented
+      // defensive guards).
+      thresholds: {
+        lines: 100,
+        functions: 100,
+        statements: 100,
+        branches: 98,
+      },
     },
   },
 });

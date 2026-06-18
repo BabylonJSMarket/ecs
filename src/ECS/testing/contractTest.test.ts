@@ -338,6 +338,113 @@ describe('runMechanicContract', () => {
     expect(cases.find((c) => c.name.includes('merges sample input'))).toBeUndefined();
   });
 
+  it('passes the event-name-convention case for a spec that declares no events', async () => {
+    // Exercises the `spec.events?.input ?? []` / `?? output` fallbacks: with no
+    // events declared, the name list is empty and the convention check is a
+    // trivially-satisfied no-op.
+    const cases = collectCases({
+      name: 'NoEvents',
+      componentClass: GoodComponent,
+      systemClass: GoodSystem,
+    });
+    const c = findCase(cases, 'event names follow');
+    const result = await runCase(c);
+    expect(result.ok, String(result.error)).toBe(true);
+  });
+
+  it('attaches declared companion components before the mechanic component', async () => {
+    // Exercises the `spec.companions ?? []` truthy branch in the output-emit
+    // case: companions must be added to the entity so the System under test
+    // satisfies any cross-component dependency.
+    class CompanionComponent extends Component {
+      constructor(_input?: unknown) {
+        super();
+      }
+    }
+    const cases = collectCases({
+      ...goodSpec(),
+      name: 'WithCompanion',
+      companions: [CompanionComponent],
+    });
+    const c = findCase(cases, 'Emits at least one declared output');
+    const result = await runCase(c);
+    expect(result.ok, String(result.error)).toBe(true);
+  });
+
+  it('accepts adapter-level disposal as a valid handle-release strategy', async () => {
+    // Exercises the `adapterDisposed` side of the handle-balance assertion: a
+    // System that creates a handle but never disposes it per-handle is still
+    // valid because renderer.dispose() (adapter teardown) frees everything.
+    class LingerComponent extends Component {
+      constructor(_input?: unknown) {
+        super();
+      }
+    }
+    class LingerSystem extends System {
+      constructor(eventBus: EventBus) {
+        super(eventBus);
+        this.query = { required: [LingerComponent] };
+      }
+      protected onEntityAdded(): void {
+        const renderer = (this.world as unknown as { renderer?: any }).renderer;
+        // Create but deliberately never dispose per-handle.
+        renderer?.createMesh('lingering', { kind: 'box', width: 1, height: 1, depth: 1 });
+      }
+      protected onUpdate(_dt: number): void {}
+    }
+    const cases = collectCases({
+      name: 'Linger',
+      componentClass: LingerComponent,
+      systemClass: LingerSystem,
+    });
+    const c = findCase(cases, 'create/dispose balance');
+    const result = await runCase(c);
+    expect(result.ok, String(result.error)).toBe(true);
+  });
+
+  it('passes the handle-balance check for a System that creates and disposes a renderer handle', async () => {
+    // Exercises the createCount > 0 branch of the "Adapter handles" case: the
+    // System allocates a mesh when an entity is added and frees it when the
+    // entity is removed, so per-handle disposes balance the creates.
+    class MeshComponent extends Component {
+      params = { speed: 1 };
+      constructor(_input?: unknown) {
+        super();
+      }
+    }
+    class MeshOwningSystem extends System {
+      private handle: unknown;
+      constructor(eventBus: EventBus) {
+        super(eventBus);
+        this.query = { required: [MeshComponent] };
+      }
+      protected onEntityAdded(): void {
+        const renderer = (this.world as unknown as { renderer?: any }).renderer;
+        this.handle = renderer?.createMesh('contract-mesh', {
+          kind: 'box',
+          width: 1,
+          height: 1,
+          depth: 1,
+        });
+      }
+      protected onEntityRemoved(): void {
+        const renderer = (this.world as unknown as { renderer?: any }).renderer;
+        if (this.handle) renderer?.disposeMesh(this.handle);
+        this.handle = undefined;
+      }
+      protected onUpdate(_dt: number): void {}
+    }
+
+    const cases = collectCases({
+      name: 'MeshOwner',
+      componentClass: MeshComponent,
+      systemClass: MeshOwningSystem,
+    });
+    const c = findCase(cases, 'create/dispose balance');
+    const result = await runCase(c);
+    expect(result.ok, `should pass: ${String(result.error)}`).toBe(true);
+  });
+
   it('exposes a context object to setup() containing world, renderer, eventBus', () => {
     let received: { world?: unknown; renderer?: unknown; eventBus?: unknown } | null = null;
     const cases = collectCases({

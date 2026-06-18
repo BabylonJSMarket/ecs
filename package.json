@@ -44,10 +44,11 @@
     "build": "tsc -p tsconfig.build.json",
     "build:watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "bench": "npm run build && echo '\\nEventBus benchmark is real-browser only (jsdom mis-measures native events).\\nServe the package root and open the page:\\n  python3 -m http.server 8080\\n  open http://localhost:8080/src/ECS/EventBus/EventBus.bench.html\\n'",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build && npm run test"
+    "prepublishOnly": "npm run build && npm run test:coverage"
   },
   "peerDependencies": {
     "@babylonjs/core": "*",

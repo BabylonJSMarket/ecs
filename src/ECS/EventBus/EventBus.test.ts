@@ -1072,8 +1072,8 @@ describe('EventBus', () => {
     });
   });
 
-  describe('queue processing with wildcard listeners', () => {
-    it('should queue events emitted during wildcard listener processing', () => {
+  describe('re-entrant emits during wildcard listener processing', () => {
+    it('processes events re-emitted during wildcard listener processing', () => {
       const calls: string[] = [];
 
       // Add wildcard listener that emits another event
@@ -1088,11 +1088,11 @@ describe('EventBus', () => {
 
       eventBus.emit('first', {});
 
-      // Both events should be processed through the queue
+      // Both events are processed — the re-emit recurses through processEvent.
       expect(calls).toEqual(['wildcard-first', 'wildcard-second']);
     });
 
-    it('should fully execute processQueue when events are queued during processing', () => {
+    it('processes nested re-entrant emits depth-first', () => {
       const processOrder: string[] = [];
 
       // Type-specific listener that emits during processing
@@ -1117,19 +1117,20 @@ describe('EventBus', () => {
 
       eventBus.emit('start', {});
 
-      // Events are queued and processed in order after each event completes
-      // type-specific listeners run first, then wildcards, then queue is processed
+      // Each re-emit recurses synchronously through processEvent, so the order
+      // is depth-first: a type listener that re-emits fully resolves the nested
+      // event (and its wildcard) before the outer event's wildcard runs.
       expect(processOrder).toEqual([
-        'start-specific',      // start event - type listener
-        'middle-specific',     // middle queued, immediately processed - type listener
-        'end-specific',        // end queued, immediately processed - type listener
-        'wildcard-end',        // end event - wildcard listener
-        'wildcard-middle',     // middle event - wildcard listener (queued during start)
-        'wildcard-start',      // start event - wildcard listener (processed via queue)
+        'start-specific',  // start: type listener (re-emits middle)
+        'middle-specific', // middle: type listener (re-emits end)
+        'end-specific',    // end: type listener
+        'wildcard-end',    // end: wildcard (innermost finishes first)
+        'wildcard-middle', // middle: wildcard
+        'wildcard-start',  // start: wildcard (outermost finishes last)
       ]);
     });
 
-    it('should handle errors in wildcard listeners during queued processing', () => {
+    it('handles errors in wildcard listeners during re-entrant processing', () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const normalCallback = vi.fn();
 
@@ -1277,6 +1278,151 @@ describe('EventBus', () => {
       expect(order).toContain('immediate-start');
       expect(order).toContain('nested');
       expect(order).toContain('immediate-end');
+    });
+  });
+
+  describe('entity-routed listener error handling', () => {
+    it('logs and continues when an onForEntity listener throws', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const survivor = vi.fn();
+
+      eventBus.onForEntity('hit', 'hero', () => {
+        throw new Error('boom in entity listener');
+      });
+      eventBus.onForEntity('hit', 'hero', survivor);
+
+      expect(() => eventBus.emit('hit', { entityId: 'hero', dmg: 5 })).not.toThrow();
+
+      // The throwing listener was reported...
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Error in entity event listener for 'hit':",
+        expect.any(Error)
+      );
+      // ...and a sibling listener on the same (type, entityId) still ran.
+      expect(survivor).toHaveBeenCalledWith({ entityId: 'hero', dmg: 5 });
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('ring-buffer recording', () => {
+    it('is inactive by default', () => {
+      expect(eventBus.isRecording).toBe(false);
+      expect(eventBus.getRecentEvents()).toEqual([]);
+    });
+
+    it('records emitted events with type, data, frame and increasing seq', () => {
+      eventBus.enableRecording(8);
+      expect(eventBus.isRecording).toBe(true);
+
+      eventBus.startFrame(); // frame -> 1
+      eventBus.emit('player.moved', { x: 1 });
+      eventBus.emit('player.jumped', { h: 2 });
+
+      const events = eventBus.getRecentEvents();
+      expect(events).toHaveLength(2);
+      expect(events[0].type).toBe('player.moved');
+      expect(events[0].data).toEqual({ x: 1 });
+      expect(events[0].frame).toBe(1);
+      expect(events[1].type).toBe('player.jumped');
+      // seq is strictly increasing in emit order
+      expect(events[1].seq).toBe(events[0].seq + 1);
+    });
+
+    it('also records emitImmediate so hot-path emits are not lost', () => {
+      eventBus.enableRecording(4);
+      eventBus.emitImmediate('tick', { n: 1 });
+
+      const events = eventBus.getRecentEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe('tick');
+    });
+
+    it('drains only events newer than the supplied seq', () => {
+      eventBus.enableRecording(8);
+      eventBus.emit('a');
+      eventBus.emit('b');
+
+      const first = eventBus.getRecentEvents();
+      const lastSeq = first[first.length - 1].seq;
+
+      eventBus.emit('c');
+
+      const since = eventBus.getRecentEvents(lastSeq);
+      expect(since.map((e) => e.type)).toEqual(['c']);
+    });
+
+    it('overwrites the oldest slot when the buffer is full (chronological order preserved)', () => {
+      eventBus.enableRecording(3);
+      eventBus.emit('e1');
+      eventBus.emit('e2');
+      eventBus.emit('e3');
+      eventBus.emit('e4'); // wraps, evicts e1
+
+      const events = eventBus.getRecentEvents();
+      expect(events.map((e) => e.type)).toEqual(['e2', 'e3', 'e4']);
+      // still oldest-first after wrap
+      expect(events[0].seq).toBeLessThan(events[2].seq);
+    });
+
+    it('is refcounted: stays active until the last viewer disables it', () => {
+      eventBus.enableRecording(4); // viewer 1
+      eventBus.enableRecording(4); // viewer 2
+      expect(eventBus.isRecording).toBe(true);
+
+      eventBus.disableRecording(); // viewer 1 leaves
+      expect(eventBus.isRecording).toBe(true);
+
+      eventBus.disableRecording(); // last viewer leaves
+      expect(eventBus.isRecording).toBe(false);
+      expect(eventBus.getRecentEvents()).toEqual([]);
+    });
+
+    it('disableRecording is a safe no-op when recording was never enabled', () => {
+      expect(() => eventBus.disableRecording()).not.toThrow();
+      expect(eventBus.isRecording).toBe(false);
+    });
+
+    it('grows capacity when a later viewer requests a larger buffer', () => {
+      eventBus.enableRecording(2);
+      eventBus.emit('a');
+      eventBus.emit('b');
+
+      // A larger request re-allocates the buffer (prior contents are dropped),
+      // but recording stays active and the new, larger capacity takes effect.
+      eventBus.enableRecording(4);
+      expect(eventBus.isRecording).toBe(true);
+
+      eventBus.emit('c');
+      eventBus.emit('d');
+      eventBus.emit('e');
+      eventBus.emit('f'); // exactly fills the grown capacity-4 buffer
+
+      const events = eventBus.getRecentEvents();
+      // Capacity is now 4 (not the original 2): all four post-grow events fit
+      // without eviction — proof the larger request took effect.
+      expect(events.map((e) => e.type)).toEqual(['c', 'd', 'e', 'f']);
+    });
+
+    it('does not shrink when a later viewer requests a smaller buffer', () => {
+      eventBus.enableRecording(5);
+      eventBus.enableRecording(2); // smaller request is ignored; capacity stays 5
+
+      eventBus.emit('a');
+      eventBus.emit('b');
+      eventBus.emit('c'); // would evict 'a' if capacity had shrunk to 2
+
+      const events = eventBus.getRecentEvents();
+      expect(events.map((e) => e.type)).toEqual(['a', 'b', 'c']);
+    });
+
+    it('clamps a non-positive requested capacity to at least one slot', () => {
+      eventBus.enableRecording(0);
+      expect(eventBus.isRecording).toBe(true);
+
+      eventBus.emit('only');
+      const events = eventBus.getRecentEvents();
+      expect(events.map((e) => e.type)).toEqual(['only']);
     });
   });
 });

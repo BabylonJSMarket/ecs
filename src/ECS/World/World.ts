@@ -73,18 +73,33 @@ interface EntityPoolRuntime {
   active: Entity[];
 }
 
-function isDev(): boolean {
-  try {
-    const env = (import.meta as unknown as { env?: { DEV?: boolean } }).env;
-    if (env && typeof env.DEV === 'boolean') return env.DEV;
-  } catch { /* no import.meta in this runtime */ }
-  try {
-    const proc = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process;
-    if (proc && proc.env) {
-      return proc.env.NODE_ENV !== 'production';
-    }
-  } catch { /* no process */ }
+/**
+ * Pure dev-mode resolution. Prefers a bundler's `import.meta.env.DEV` flag;
+ * falls back to `process.env.NODE_ENV`; defaults to dev when neither is
+ * available (the safer default — race detection on rather than silently off).
+ * Exported for testing; production callers use {@link isDev}.
+ */
+export function resolveIsDev(
+  importMetaEnv: { DEV?: boolean } | undefined,
+  proc: { env?: { NODE_ENV?: string } } | undefined,
+): boolean {
+  if (importMetaEnv && typeof importMetaEnv.DEV === 'boolean') return importMetaEnv.DEV;
+  if (proc && proc.env) {
+    return proc.env.NODE_ENV !== 'production';
+  }
   return true;
+}
+
+function isDev(): boolean {
+  let env: { DEV?: boolean } | undefined;
+  try {
+    env = (import.meta as unknown as { env?: { DEV?: boolean } }).env;
+  } catch { /* no import.meta in this runtime */ }
+  let proc: { env?: { NODE_ENV?: string } } | undefined;
+  try {
+    proc = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process;
+  } catch { /* no process */ }
+  return resolveIsDev(env, proc);
 }
 
 /**
@@ -553,11 +568,15 @@ export class World {
    * `renderer.dispose()`), not parked.
    */
   removeAllEntities(): void {
-    this.pools.clear();
-    this.entityPoolName.clear();
-    // Convert to array to avoid mutation during iteration
+    // Convert to array to avoid mutation during iteration. destroyEntity does
+    // the per-entity pool-bookkeeping cleanup (entityPoolName + pool runtime
+    // arrays) while the pool maps are still intact, so pooled entities are
+    // force-destroyed on this path rather than parked.
     const entitiesToRemove = Array.from(this.entities.values());
     entitiesToRemove.forEach(entity => this.destroyEntity(entity));
+    // Drop the (now-empty) pool registries last so the world is fully reset.
+    this.pools.clear();
+    this.entityPoolName.clear();
   }
 
   /**

@@ -123,4 +123,18 @@ describe('World entity pools', () => {
     // Pool is cleared too — acquiring now yields nothing.
     expect(world.acquire('mob')).toBeNull();
   });
+
+  it('registerPool is idempotent — a second call with the same name is ignored', () => {
+    world.registerPool('mob', { size: 2, build: buildPooled });
+    // Re-registering with a different size must not re-allocate or grow.
+    world.registerPool('mob', { size: 10, build: buildPooled });
+    const pooled = world.getEntities().filter((e) => e.has(PooledComponent));
+    expect(pooled.length).toBe(2);
+  });
+
+  it('acquire returns null when a size-0 pool is exhausted (no entity to recycle)', () => {
+    world.registerPool('empty', { size: 0, build: buildPooled });
+    // No free entities and no active ones to recycle.
+    expect(world.acquire('empty')).toBeNull();
+  });
 });

@@ -612,6 +612,10 @@ describe('SceneLoader', () => {
       const component = new SimpleComponent({ value: 42, name: 'test-component' });
       // Delete toJSON to force fallback serialization path
       (component as any).toJSON = undefined;
+      // Assign a function as an *own enumerable* property — Object.entries()
+      // sees this (unlike a prototype method), exercising the function-skip
+      // branch in the default serializer.
+      (component as any).callback = () => 'live behaviour, not data';
       entity.add(component);
 
       const sceneData = sceneLoader.serializeWorld(world, 'Test');
@@ -624,8 +628,10 @@ describe('SceneLoader', () => {
       // Should NOT include private properties (starting with _)
       expect(componentData._privateField).toBeUndefined();
 
-      // Should NOT include methods
+      // Should NOT include methods — neither prototype methods nor an
+      // own-enumerable function property survive serialization.
       expect(componentData.doSomething).toBeUndefined();
+      expect(componentData.callback).toBeUndefined();
     });
   });
 
@@ -657,6 +663,24 @@ describe('SceneLoader', () => {
       expect(handler).toHaveBeenCalledWith({
         url: '/test.json',
         error: 'Network error',
+      });
+    });
+
+    it('stringifies a non-Error rejection in the ERROR event', async () => {
+      const handler = vi.fn();
+      eventBus.on(SceneLoaderEvents.ERROR, handler);
+
+      // A thrown non-Error (e.g. a bare string) must still produce a usable
+      // error string rather than "[object Object]"/undefined.
+      global.fetch = vi.fn().mockRejectedValue('plain string failure');
+
+      await expect(sceneLoader.loadSceneFromUrl('/test.json')).rejects.toBe(
+        'plain string failure'
+      );
+
+      expect(handler).toHaveBeenCalledWith({
+        url: '/test.json',
+        error: 'plain string failure',
       });
     });
 

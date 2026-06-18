@@ -948,6 +948,268 @@ describe('SaveLoadSystem', () => {
       expect(handler).not.toHaveBeenCalled();
     });
   });
+
+  describe('onEntityRemoved', () => {
+    it('should clear the active component when the save manager entity is removed', () => {
+      // Component is found during initialization
+      expect((system as any).component).toBeInstanceOf(SaveLoadComponent);
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      // Remove the entity holding the active SaveLoadComponent
+      world.removeEntity(saveManager);
+      world.update(0);
+
+      // Component reference should be cleared
+      expect((system as any).component).toBeNull();
+
+      // Subsequent operations now behave as "no component"
+      expect(system.getSlotNames()).toEqual([]);
+
+      const result = system.saveToSlot('slot1');
+      expect(result).toBe(false);
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'No SaveLoadComponent or World available',
+      });
+    });
+
+    it('should not clear the component when a different entity is removed', () => {
+      const other = world.createEntity('otherSaveManager');
+      other.add(new SaveLoadComponent({ storageKey: 'other' }));
+      world.update(0);
+
+      const activeComponent = (system as any).component;
+
+      // Removing the secondary entity (not the active component holder) keeps the component
+      world.removeEntity(other);
+      world.update(0);
+
+      expect((system as any).component).toBe(activeComponent);
+    });
+  });
+
+  describe('no-component no-ops', () => {
+    let orphanBus: EventBus;
+    let orphan: SaveLoadSystem;
+
+    beforeEach(() => {
+      // Clear calls made by the outer beforeEach's world.initialize()
+      // (which runs the active system's loadFromLocalStorage()), so these
+      // assertions reflect only the orphan system's behaviour.
+      vi.clearAllMocks();
+
+      // A system that was never added to a world keeps component === null
+      orphanBus = new EventBus();
+      orphan = new SaveLoadSystem(orphanBus);
+    });
+
+    it('autoSave returns false without a component', () => {
+      const handler = vi.fn();
+      orphanBus.on(SaveLoadEvents.AUTO_SAVE, handler);
+
+      expect(orphan.autoSave()).toBe(false);
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('deleteSlot returns false without a component', () => {
+      expect(orphan.deleteSlot('x')).toBe(false);
+    });
+
+    it('loadFromSlot errors and returns false without a component/world', () => {
+      const errorHandler = vi.fn();
+      orphanBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      expect(orphan.loadFromSlot('slot1')).toBe(false);
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'No SaveLoadComponent or World available',
+      });
+    });
+
+    it('getSlotNames returns [] without a component', () => {
+      expect(orphan.getSlotNames()).toEqual([]);
+    });
+
+    it('importFromJSON returns false without a component', () => {
+      const validJson = JSON.stringify({
+        name: 'a',
+        timestamp: 0,
+        sceneData: { name: 'a', entities: {} },
+      });
+      expect(orphan.importFromJSON(validJson)).toBe(false);
+    });
+
+    it('saveToLocalStorage is a no-op without a component', () => {
+      expect(() => orphan.saveToLocalStorage()).not.toThrow();
+      expect(localStorageMock.setItem).not.toHaveBeenCalled();
+    });
+
+    it('loadFromLocalStorage is a no-op without a component', () => {
+      expect(() => orphan.loadFromLocalStorage()).not.toThrow();
+      expect(localStorageMock.getItem).not.toHaveBeenCalled();
+    });
+
+    it('clearLocalStorage is a no-op without a component', () => {
+      expect(() => orphan.clearLocalStorage()).not.toThrow();
+      expect(localStorageMock.removeItem).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('non-Error thrown values', () => {
+    beforeEach(() => {
+      world.createEntity('test').add(new PositionComponent({ x: 1, y: 2, z: 3 }));
+    });
+
+    it('saveToSlot stringifies a non-Error thrown by serializeWorld', () => {
+      const original = sceneLoader.serializeWorld.bind(sceneLoader);
+      sceneLoader.serializeWorld = vi.fn(() => {
+        throw 'boom string';
+      });
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      const result = system.saveToSlot('slot1');
+
+      expect(result).toBe(false);
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to save: boom string',
+      });
+
+      sceneLoader.serializeWorld = original;
+    });
+
+    it('loadFromSlot stringifies a non-Error thrown by loadSceneFromData', () => {
+      system.saveToSlot('slot1');
+
+      const original = sceneLoader.loadSceneFromData.bind(sceneLoader);
+      sceneLoader.loadSceneFromData = vi.fn(() => {
+        throw 'corrupt';
+      });
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      const result = system.loadFromSlot('slot1');
+
+      expect(result).toBe(false);
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to load: corrupt',
+      });
+
+      sceneLoader.loadSceneFromData = original;
+    });
+
+    it('saveToLocalStorage stringifies a non-Error when saving the slot index', () => {
+      system.saveToSlot('slot1');
+
+      // Index save (first setItem in saveToLocalStorage) throws a non-Error
+      localStorageMock.setItem.mockImplementationOnce(() => {
+        throw 'quota';
+      });
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      system.saveToLocalStorage();
+
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to save slot index: quota',
+      });
+    });
+
+    it('saveSlotToLocalStorage stringifies a non-Error', () => {
+      // saveToSlot -> saveSlotToLocalStorage -> setItem throws a non-Error
+      localStorageMock.setItem.mockImplementationOnce(() => {
+        throw 'quota';
+      });
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      system.saveToSlot('slot1');
+
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to save slot to localStorage: quota',
+      });
+    });
+
+    it('importFromJSON stringifies a non-Error thrown while storing the slot', () => {
+      const component = (system as any).component as SaveLoadComponent;
+      // Force the slots.set() call inside importFromJSON's try block to throw
+      // a non-Error, exercising the String(error) fallback branch.
+      const slotsSet = component.slots.set.bind(component.slots);
+      component.slots.set = vi.fn(() => {
+        throw 'corrupt-store';
+      }) as any;
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      const validJson = JSON.stringify({
+        name: 'imported',
+        timestamp: 0,
+        sceneData: { name: 'imported', entities: {} },
+      });
+      const result = system.importFromJSON(validJson);
+
+      expect(result).toBe(false);
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to import JSON: corrupt-store',
+      });
+
+      component.slots.set = slotsSet as any;
+    });
+
+    it('loadFromLocalStorage stringifies a non-Error', () => {
+      localStorageMock.getItem.mockImplementationOnce(() => {
+        throw 'security';
+      });
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      system.loadFromLocalStorage();
+
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to load from localStorage: security',
+      });
+    });
+
+    it('loadSlotFromLocalStorage stringifies a non-Error', () => {
+      // Index read succeeds, the per-slot read throws a non-Error
+      localStorageMock.getItem.mockImplementation((key: string) => {
+        if (key === 'test.slots') return JSON.stringify(['boom']);
+        throw 'security';
+      });
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      system.loadFromLocalStorage();
+
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to load slot from localStorage: security',
+      });
+    });
+
+    it('removeSlotFromLocalStorage stringifies a non-Error', () => {
+      system.saveToSlot('slot1');
+
+      localStorageMock.removeItem.mockImplementationOnce(() => {
+        throw 'security';
+      });
+
+      const errorHandler = vi.fn();
+      eventBus.on(SaveLoadEvents.ERROR, errorHandler);
+
+      system.deleteSlot('slot1');
+
+      expect(errorHandler).toHaveBeenCalledWith({
+        error: 'Failed to remove slot from localStorage: security',
+      });
+    });
+  });
 });
 
 describe('SaveLoadEvents', () => {

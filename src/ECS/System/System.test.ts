@@ -83,6 +83,27 @@ describe('System', () => {
       expect(callback).not.toHaveBeenCalled();
     });
 
+    it('emits an enabled event when re-enabled after being disabled', () => {
+      const enabledCb = vi.fn();
+      eventBus.on('system.TestSystem.enabled', enabledCb);
+
+      system.enabled = false; // disable first so the next set is a real change
+      system.enabled = true;  // re-enable -> 'enabled' event
+
+      expect(enabledCb).toHaveBeenCalledWith({ system });
+    });
+
+    it('toggling enabled does not throw before an eventBus is attached', () => {
+      // A System can be constructed without an eventBus; it is injected later
+      // (constructor injection or World.addSystem). Toggling enabled in that
+      // window must no-op on the emit rather than throw.
+      const detached = new TestSystem(undefined as unknown as EventBus);
+      expect(() => {
+        detached.enabled = false;
+      }).not.toThrow();
+      expect(detached.enabled).toBe(false);
+    });
+
     it('should have priority 0 by default', () => {
       expect(system.priority).toBe(0);
     });

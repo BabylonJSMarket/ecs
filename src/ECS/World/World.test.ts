@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { World, Entity, System, Component, EventBus } from '..';
+import { resolveIsDev } from './World';
 
 class TestComponent extends Component {
   value: number = 0;
@@ -725,6 +726,36 @@ describe('World', () => {
 
       // Frame should have been incremented before the event was emitted
       expect(frameAtUpdateStart).toBe(1);
+    });
+  });
+
+  describe('resolveIsDev (dev-mode detection used to default detectRaces)', () => {
+    it('uses import.meta.env.DEV when it is a boolean (true)', () => {
+      expect(resolveIsDev({ DEV: true }, undefined)).toBe(true);
+    });
+
+    it('uses import.meta.env.DEV when it is a boolean (false)', () => {
+      // Even with a non-production NODE_ENV present, the bundler flag wins.
+      expect(resolveIsDev({ DEV: false }, { env: { NODE_ENV: 'development' } })).toBe(false);
+    });
+
+    it('falls back to process.env.NODE_ENV when no import.meta flag', () => {
+      expect(resolveIsDev(undefined, { env: { NODE_ENV: 'production' } })).toBe(false);
+      expect(resolveIsDev(undefined, { env: { NODE_ENV: 'development' } })).toBe(true);
+      // Undefined NODE_ENV is treated as non-production (dev default).
+      expect(resolveIsDev(undefined, { env: {} })).toBe(true);
+    });
+
+    it('ignores a non-boolean DEV and falls through to process', () => {
+      expect(
+        resolveIsDev({ DEV: undefined }, { env: { NODE_ENV: 'production' } }),
+      ).toBe(false);
+    });
+
+    it('defaults to dev when neither env source is available', () => {
+      expect(resolveIsDev(undefined, undefined)).toBe(true);
+      // A process object with no env also collapses to the dev default.
+      expect(resolveIsDev(undefined, {})).toBe(true);
     });
   });
 });

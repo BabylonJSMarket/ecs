@@ -212,6 +212,41 @@ describe('withRaceTracking', () => {
     expect(spy.mock.calls[0][0]).toMatch(/^anon:\d+$/);
   });
 
+  it('reuses the same anon: id for repeated writes to the same untagged handle', () => {
+    const { detector, adapter } = setup();
+    const spy = vi.spyOn(detector, 'recordHandleWrite');
+    const wrapped = withRaceTracking(adapter, detector);
+    const untaggedHandle = {} as MeshHandle;
+
+    wrapped.setMeshPosition(untaggedHandle, 0, 0, 0);
+    wrapped.setMeshRotation(untaggedHandle, 0, 0, 0); // second write hits the WeakMap cache
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    const firstId = spy.mock.calls[0][0];
+    const secondId = spy.mock.calls[1][0];
+    expect(secondId).toBe(firstId); // stable id, not a fresh anon:N
+  });
+
+  it('stringifies a primitive first arg as a prim: id (setAnimationWeight takes a string meshId)', () => {
+    const { detector, wrapped } = setup();
+    const spy = vi.spyOn(detector, 'recordHandleWrite');
+    // setAnimationWeight is a `set*` mutator whose first arg is the mesh id
+    // (a string), not an opaque handle object.
+    wrapped.setAnimationWeight('hero', 'walk', 0.5);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith('prim:hero', 'setAnimationWeight');
+  });
+
+  it('returns non-function properties of the underlying adapter untouched', () => {
+    const { adapter, wrapped } = setup();
+    // MockRendererAdapter exposes a `calls` array (a data property, not a
+    // method). The Proxy must pass it through without wrapping/binding.
+    const wrappedCalls = (wrapped as unknown as { calls: typeof adapter.calls }).calls;
+    expect(wrappedCalls).toBe(adapter.calls);
+    wrapped.resize();
+    expect(wrappedCalls.some((c) => c.method === 'resize')).toBe(true);
+  });
+
   it('preserves `this` correctly on non-mutating forwarded calls (resize)', () => {
     // resize() is a non-mutator; the Proxy binds it to the underlying adapter.
     // If `this` were wrong, MockRendererAdapter.record would throw.

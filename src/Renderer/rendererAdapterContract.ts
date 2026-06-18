@@ -87,11 +87,14 @@ export function runRendererAdapterContract(
       // Adapters MUST tolerate dispose even if the suite didn't init().
       // We swallow throws here so a broken `dispose()` shows up as the
       // explicit lifecycle test below rather than every test failing.
+      // Defensive teardown — the throwing-dispose path is covered there, not here.
+      /* v8 ignore start */
       try {
         adapter.dispose();
       } catch {
         /* swallow */
       }
+      /* v8 ignore stop */
     });
 
     // ---------------------------------------------------------------------
