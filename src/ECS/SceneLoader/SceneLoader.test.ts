@@ -310,6 +310,86 @@ describe('SceneLoader', () => {
       expect(result.systems.length).toBe(0);
     });
 
+    it('should create systems WITHOUT creating entities when createEntities is false', () => {
+      // Systems-only pass: every system the scene uses is created (so the caller
+      // can add + initialize them BEFORE any entity exists), but no entity is
+      // created in the world and no entity is returned.
+      const result = sceneLoader.instantiateScene('GameScene', world, {
+        createEntities: false,
+      });
+
+      // Velocity has a registered MovementSystem; that system is still derived
+      // from the scene data even though no entity was created.
+      expect(result.systems.some(s => s instanceof MovementSystem)).toBe(true);
+      // No entities created or returned.
+      expect(result.entities.size).toBe(0);
+      expect(world.getEntityCount()).toBe(0);
+      expect(result.worldEntity).toBeUndefined();
+    });
+
+    it('createEntities:false emits no entity/component events', () => {
+      const entityHandler = vi.fn();
+      const componentHandler = vi.fn();
+      eventBus.on(SceneLoaderEvents.ENTITY_CREATED, entityHandler);
+      eventBus.on(SceneLoaderEvents.COMPONENT_LOADED, componentHandler);
+
+      sceneLoader.instantiateScene('GameScene', world, { createEntities: false });
+
+      expect(entityHandler).not.toHaveBeenCalled();
+      expect(componentHandler).not.toHaveBeenCalled();
+    });
+
+    it('two-phase order: systems-only pass then entity pass delivers one-shot onEntityAdded events', () => {
+      // Regression for the DirectionalLight → shadow-caster wiring bug. A system
+      // emits a one-shot event from onEntityAdded; another system subscribes in
+      // onInitialize. Phase 1 creates + initializes both systems (no entities);
+      // phase 2 creates the entities. The consumer must receive the event even
+      // though it is emitted during entity creation.
+      class EmitterComponent extends Component {}
+      class ConsumerComponent extends Component {}
+
+      let received: unknown;
+
+      class EmitterSystem extends System {
+        protected query = { required: [EmitterComponent] };
+        protected onEntityAdded(): void {
+          this.eventBus.emit('thing.created', { handle: 42 });
+        }
+        protected onUpdate(): void {}
+      }
+      class ConsumerSystem extends System {
+        protected query = { required: [ConsumerComponent] };
+        protected onInitialize(): void {
+          this.listen<{ handle: unknown }>('thing.created', d => { received = d.handle; });
+        }
+        protected onUpdate(): void {}
+      }
+
+      const bus = new EventBus();
+      const loader = new SceneLoader(bus);
+      const w = new World({ eventBus: bus });
+      loader.registerComponent('Emitter', EmitterComponent, EmitterSystem);
+      loader.registerComponent('Consumer', ConsumerComponent, ConsumerSystem);
+
+      // Consumer entity listed FIRST, emitter LAST — order must not matter.
+      loader.loadSceneFromData({
+        name: 'TwoPhase',
+        entities: {
+          consumer: { components: { Consumer: {} } },
+          emitter: { components: { Emitter: {} } },
+        },
+      });
+
+      // Phase 1: systems only.
+      const { systems } = loader.instantiateScene('TwoPhase', w, { createEntities: false });
+      for (const s of systems) w.addSystem(s);
+      w.initialize();
+      // Phase 2: entities only.
+      loader.instantiateScene('TwoPhase', w, { createSystems: false });
+
+      expect(received).toBe(42);
+    });
+
     it('should emit ENTITY_CREATED events', () => {
       const handler = vi.fn();
       eventBus.on(SceneLoaderEvents.ENTITY_CREATED, handler);

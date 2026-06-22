@@ -341,6 +341,16 @@ export class SceneLoader {
     options: {
       /** Whether to auto-create systems for components (default: true) */
       createSystems?: boolean;
+      /**
+       * Whether to create the scene's entities (default: true). Pass `false`
+       * to run a **systems-only** pass: the systems for every component used in
+       * the scene are created (so the caller can add+initialize them) without
+       * creating any entities yet. This enables the two-phase load order
+       * (add+subscribe all systems, THEN create entities) so one-shot
+       * lifecycle events fired from an entity's `onEntityAdded` reach every
+       * already-subscribed system regardless of entity/system order.
+       */
+      createEntities?: boolean;
       /** Override the world entity name from scene data */
       worldEntityName?: string;
     } = {}
@@ -365,53 +375,63 @@ export class SceneLoader {
     // Determine world entity name from options or scene data
     const worldEntityName = options.worldEntityName ?? sceneData.worldEntity;
 
-    // Create entities from scene data
-    for (const [entityName, entityData] of Object.entries(sceneData.entities)) {
-      // Create entity in the World
-      const entity = world.createEntity(entityName);
-      entities.set(entityName, entity);
-
-      // Track if this is the designated world entity
-      if (entityName === worldEntityName) {
-        worldEntity = entity;
-      }
-
-      // Add tags from scene data
-      if (entityData.tags) {
-        for (const tag of entityData.tags) {
-          entity.addTag(tag);
-        }
-      }
-
-      // Add components from scene data
-      for (const [componentType, componentData] of Object.entries(entityData.components)) {
-        const entry = this.componentRegistry.get(componentType);
-
-        if (!entry) {
-          console.warn(`Component not registered: ${componentType}`);
-          continue;
-        }
-
-        // Process component data (handle any necessary conversions)
-        const processedData = this.processComponentData(componentData);
-
-        // Create component instance with scene data
-        const component = new entry.component(processedData);
-        entity.add(component);
+    // Which components does this scene reference? Computed from the scene data
+    // directly (not as a side effect of entity creation) so a systems-only pass
+    // (`createEntities: false`) still knows which systems to create.
+    for (const entityData of Object.values(sceneData.entities)) {
+      for (const componentType of Object.keys(entityData.components)) {
         usedComponents.add(componentType);
+      }
+    }
 
-        this.eventBus.emit(SceneLoaderEvents.COMPONENT_LOADED, {
+    // Create entities from scene data (skipped on a systems-only pass).
+    if (options.createEntities !== false) {
+      for (const [entityName, entityData] of Object.entries(sceneData.entities)) {
+        // Create entity in the World
+        const entity = world.createEntity(entityName);
+        entities.set(entityName, entity);
+
+        // Track if this is the designated world entity
+        if (entityName === worldEntityName) {
+          worldEntity = entity;
+        }
+
+        // Add tags from scene data
+        if (entityData.tags) {
+          for (const tag of entityData.tags) {
+            entity.addTag(tag);
+          }
+        }
+
+        // Add components from scene data
+        for (const [componentType, componentData] of Object.entries(entityData.components)) {
+          const entry = this.componentRegistry.get(componentType);
+
+          if (!entry) {
+            console.warn(`Component not registered: ${componentType}`);
+            continue;
+          }
+
+          // Process component data (handle any necessary conversions)
+          const processedData = this.processComponentData(componentData);
+
+          // Create component instance with scene data
+          const component = new entry.component(processedData);
+          entity.add(component);
+
+          this.eventBus.emit(SceneLoaderEvents.COMPONENT_LOADED, {
+            entityId: entity.id,
+            entityName,
+            componentType,
+          });
+        }
+
+        this.eventBus.emit(SceneLoaderEvents.ENTITY_CREATED, {
           entityId: entity.id,
           entityName,
-          componentType,
+          componentCount: Object.keys(entityData.components).length,
         });
       }
-
-      this.eventBus.emit(SceneLoaderEvents.ENTITY_CREATED, {
-        entityId: entity.id,
-        entityName,
-        componentCount: Object.keys(entityData.components).length,
-      });
     }
 
     // Auto-create systems for components that have them registered
