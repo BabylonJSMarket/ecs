@@ -28,6 +28,13 @@ export interface PrimitiveSpec {
   kind: 'box' | 'sphere' | 'cylinder' | 'capsule' | 'ground' | 'torus' | 'disc' | 'plane' | 'tube';
   width?: number;
   height?: number;
+  /**
+   * Second in-plane dimension of a `ground` (its Z size). A ground is a
+   * horizontal XZ plane sized `width` (X) × `depth` (Z). Authors may write
+   * `depth` OR `height` for this Z dimension — both are honored, and `depth`
+   * wins when both are given. (`height` is the natural word for many authors;
+   * accepting it stops a `{ width, height }` ground from collapsing to a strip.)
+   */
   depth?: number;
   diameter?: number;
   diameterTop?: number;

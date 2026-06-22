@@ -294,9 +294,12 @@ export class ThreeAdapter implements RendererAdapter {
         // PlaneGeometry is built on the XY plane; rotate it into XZ and bake
         // the transform so the System's setMeshRotation(0,0,0) doesn't
         // clobber it. Babylon's CreateGround is already horizontal.
+        // A ground is a horizontal XZ plane: width→X, depth (or height as a
+        // fallback) →Z; depth wins when both are given. The PlaneGeometry's
+        // second dimension becomes Z after the rotateX below.
         geometry = new T.PlaneGeometry(
           prim.width ?? 10,
-          prim.depth ?? 10,
+          prim.depth ?? prim.height ?? 10,
           prim.subdivisions ?? 1,
           prim.subdivisions ?? 1,
         );

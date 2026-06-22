@@ -184,6 +184,45 @@ export function runRendererAdapterContract(
         expect(() => adapter.createMesh('other', prim, mat)).not.toThrow();
       });
 
+      it('ground honors `height` as its Z size when `depth` is absent, and `depth` wins when both are given', () => {
+        // Regression: a `ground` is a horizontal XZ plane — width→X, depth→Z.
+        // Authors naturally reach for `height` for the second dimension, so the
+        // adapters fall back `depth ?? height ?? 10`. Before that, a square
+        // floor written as { width: 60, height: 60 } silently collapsed to a
+        // 60×1 strip (`height` ignored) — the bug that bit the poker scene.
+        const span = (
+          h: ReturnType<RendererAdapter['createMesh']>,
+        ): { x: number; z: number } | null => {
+          const ext = adapter.getMeshBoundingBoxExtents(h);
+          if (!ext) return null; // Mock has no real geometry — nothing to assert.
+          return { x: ext.max[0] - ext.min[0], z: ext.max[2] - ext.min[2] };
+        };
+
+        // height-only → honored as the Z dimension (not collapsed to a strip).
+        const square = adapter.createMesh('floor', { kind: 'ground', width: 60, height: 60 }, mat);
+        const sq = span(square);
+        if (sq) {
+          expect(sq.x).toBeCloseTo(60, 3);
+          expect(sq.z).toBeCloseTo(60, 3); // would be ~1 (the default) if `height` were ignored
+        }
+
+        // both given → depth wins over height (and over width on Z).
+        const both = adapter.createMesh('floor2', { kind: 'ground', width: 8, depth: 4, height: 99 }, mat);
+        const bo = span(both);
+        if (bo) {
+          expect(bo.x).toBeCloseTo(8, 3);
+          expect(bo.z).toBeCloseTo(4, 3); // depth, not the 99 from height
+        }
+
+        // neither given → default 10×10 (keeps the existing fallback).
+        const bare = adapter.createMesh('floor3', { kind: 'ground' }, mat);
+        const ba = span(bare);
+        if (ba) {
+          expect(ba.x).toBeCloseTo(10, 3);
+          expect(ba.z).toBeCloseTo(10, 3);
+        }
+      });
+
       it('createMesh accepts a `tube` primitive (open-ended cylinder shell)', () => {
         // Silo walls: an uncapped vertical cylinder shell, base-pivoted. Both
         // the thin-shell (no thickness) and walled (thickness) forms must

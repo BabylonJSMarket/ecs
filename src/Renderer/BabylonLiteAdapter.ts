@@ -202,9 +202,11 @@ export class BabylonLiteAdapter implements RendererAdapter {
         });
         break;
       case 'ground':
+        // A ground is a horizontal XZ plane: width→X, depth (or height as a
+        // fallback) →Z; depth wins when both are given.
         mesh = BL.createGround(engine, {
           width: prim.width ?? 10,
-          height: prim.depth ?? 10,
+          height: prim.depth ?? prim.height ?? 10,
           subdivisions: prim.subdivisions,
         });
         break;

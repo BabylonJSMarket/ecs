@@ -87,6 +87,27 @@ function notImplemented(method: string): never {
   throw new Error(`BabylonAdapter.${method}: not implemented yet`);
 }
 
+/**
+ * Babylon's "hardware scaling level" is the inverse of the device pixel ratio:
+ * the backing render buffer is `cssPixels / level` on each axis, so a value of
+ * `1 / dpr` makes a 2× (retina) display render at its full physical resolution
+ * instead of being upscaled from 1× CSS pixels (which is what makes card art
+ * and text look soft). Clamp the ratio to a sane window: floor at 1 so a
+ * fractional/sub-1 DPR never *upscales* the buffer past native, and cap at 3 so
+ * a freak DPR can't blow the render target up to a perf-killing size. A missing
+ * / zero DPR (headless, some test envs) collapses to level 1 (no scaling).
+ */
+export function hardwareScalingLevelForDpr(dpr: number | undefined): number {
+  if (!dpr || !Number.isFinite(dpr) || dpr <= 0) return 1;
+  const clamped = Math.min(3, Math.max(1, dpr));
+  return 1 / clamped;
+}
+
+/** Read the current display's device pixel ratio, guarding for headless. */
+function currentDevicePixelRatio(): number {
+  return typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+}
+
 export class BabylonAdapter implements RendererAdapter {
   readonly kind = 'babylon' as const;
 
@@ -185,10 +206,20 @@ export class BabylonAdapter implements RendererAdapter {
   private lastTime = 0;
 
   async init(canvas: HTMLCanvasElement, opts: RendererInitOptions = {}): Promise<void> {
+    // `adaptToDeviceRatio: true` (both the options flag and the 4th ctor arg)
+    // tells Babylon to size the WebGL backing buffer to the device's physical
+    // pixels. Without it the buffer stays at 1× CSS pixels and a 2×/retina
+    // display upscales every texture and glyph — the "soft cards" symptom.
     this.engine = new Engine(canvas, opts.antialias ?? true, {
       deterministicLockstep: true,
       lockstepMaxSteps: 4,
-    });
+      adaptToDeviceRatio: true,
+    }, true);
+    // Be explicit as well as relying on the flag: pin the hardware-scaling
+    // level to 1/dpr so the backing store matches physical pixels exactly, and
+    // re-apply it on every resize (DPR can change when a window moves between a
+    // retina and a non-retina monitor).
+    this.applyDeviceScaling();
     this.scene = new Scene(this.engine);
     // Match glTF / Three.js so imported assets and coordinate math agree.
     // Without this, a scene authored in RH would be Z-mirrored under Babylon.
@@ -260,9 +291,13 @@ export class BabylonAdapter implements RendererAdapter {
         }, scene);
         break;
       case 'ground':
+        // A ground is a horizontal XZ plane: width→X, depth (or height as a
+        // fallback) →Z. Authors write either `depth` or `height` for the second
+        // dimension; depth wins when both are given (Babylon names this Z axis
+        // `height` in CreateGround, hence the field name on the right).
         mesh = MeshBuilder.CreateGround(`${id}_ground`, {
           width: prim.width ?? 10,
-          height: prim.depth ?? 10,
+          height: prim.depth ?? prim.height ?? 10,
           subdivisions: prim.subdivisions ?? 1,
         }, scene);
         break;
@@ -636,6 +671,12 @@ export class BabylonAdapter implements RendererAdapter {
     const cached = this.texturesByKey.get(key);
     if (cached) return cached;
     const tex = new Texture(url, this.scene);
+    // Cards lie nearly flat on the table, so their faces are sampled at a steep
+    // grazing angle — exactly where isotropic mip sampling goes blurry.
+    // Trilinear (Babylon's default) + anisotropic filtering keeps the pips and
+    // art crisp at this oblique view; 4 is a sane quality/perf default.
+    tex.updateSamplingMode(Texture.TRILINEAR_SAMPLINGMODE);
+    tex.anisotropicFilteringLevel = 4;
     if (opts?.flipU) tex.uScale = -1; // mirror horizontally
     if (opts?.rotate) tex.wAng = opts.rotate; // rotate about center
     // Babylon textures are srgb-gamma by default; honor an explicit linear ask
@@ -1045,6 +1086,9 @@ export class BabylonAdapter implements RendererAdapter {
       const t = new Texture(url, scene);
       t.uScale = uScale;
       t.vScale = vScale;
+      // Tiled surfaces (floors, walls) are also viewed at grazing angles;
+      // anisotropic filtering stops the tiling from smearing into the distance.
+      t.anisotropicFilteringLevel = 4;
       return t;
     };
     if (mat.albedoTexture) pbr.albedoTexture = tex(mat.albedoTexture);
@@ -1913,8 +1957,20 @@ export class BabylonAdapter implements RendererAdapter {
     this.onFrame = undefined;
   }
 
+  /**
+   * Pin the engine's hardware-scaling level to `1 / devicePixelRatio` so the
+   * WebGL backing buffer renders at the display's physical resolution. Called
+   * at init and after every resize, since a window dragged between a retina and
+   * a standard monitor changes `devicePixelRatio` live.
+   */
+  private applyDeviceScaling(): void {
+    if (!this.engine) return;
+    this.engine.setHardwareScalingLevel(hardwareScalingLevelForDpr(currentDevicePixelRatio()));
+  }
+
   resize(): void {
     if (!this.engine) return;
+    this.applyDeviceScaling();
     this.engine.resize();
     // Resizing the WebGL drawing buffer clears it. Paint a fresh frame
     // synchronously so the compositor never picks up the cleared buffer
