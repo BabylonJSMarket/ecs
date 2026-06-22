@@ -39,6 +39,7 @@ import {
   PhysicsViewer,
   HavokPlugin,
   BoundingInfo,
+  VertexData,
 } from '@babylonjs/core';
 import type { AssetContainer, InstantiatedEntries, TransformNode } from '@babylonjs/core';
 import '@babylonjs/loaders';
@@ -74,6 +75,9 @@ import type {
   EnvironmentTextureOpts,
   ThinFieldHandle,
   ThinFieldSpec,
+  TextureHandle,
+  TextureLoadOpts,
+  CardMeshSpec,
   Vec3,
 } from './types';
 import type { Color } from './types';
@@ -150,6 +154,24 @@ export class BabylonAdapter implements RendererAdapter {
    * instance in setThinFieldInstances.
    */
   private thinFields = new Map<ThinFieldHandle, { master: Mesh; buffer: Float32Array; baseScale: number }>();
+  /**
+   * Loaded 2D textures, deduped by the caller's key so a card deck reuses one
+   * Texture per card id / back design (see loadTexture). The handle map lets
+   * disposeTexture release by handle.
+   */
+  private textures = new Map<TextureHandle, Texture>();
+  private texturesByKey = new Map<string, TextureHandle>();
+  /**
+   * Card meshes built by createCardMesh: the PBR material, its rounded-rect
+   * alpha mask, and the front/back face textures. setMeshFaceTexture swaps the
+   * albedo (the flip) while keeping the corner mask as the opacity texture.
+   */
+  private cards = new Map<MeshHandle, {
+    material: PBRMaterial;
+    cornerMask: DynamicTexture;
+    front?: Texture;
+    back?: Texture;
+  }>();
   // Reused per instance-matrix compose so a sweep over thousands of slots never
   // allocates. Shared across all fields — setThinFieldInstances is synchronous.
   private readonly _tfScale = new Vector3();
@@ -605,6 +627,162 @@ export class BabylonAdapter implements RendererAdapter {
     out[1] = this._tfRay.origin.y + this._tfRay.direction.y * distance;
     out[2] = this._tfRay.origin.z + this._tfRay.direction.z * distance;
     return out;
+  }
+
+  // ─── Textures & cards ───
+  loadTexture(key: string, url: string, opts?: TextureLoadOpts): TextureHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.loadTexture: call init() first');
+    // Dedupe by key — a repeat call returns the same handle (and ignores opts).
+    const cached = this.texturesByKey.get(key);
+    if (cached) return cached;
+    const tex = new Texture(url, this.scene);
+    if (opts?.flipU) tex.uScale = -1; // mirror horizontally
+    if (opts?.rotate) tex.wAng = opts.rotate; // rotate about center
+    // Babylon textures are srgb-gamma by default; honor an explicit linear ask
+    // by clearing the gamma flag (srgb=true is the default, so it's a no-op).
+    if (opts?.srgb === false) tex.gammaSpace = false;
+    const handle = this.makeHandle<TextureHandle>('texture', key);
+    this.textures.set(handle, tex);
+    this.texturesByKey.set(key, handle);
+    return handle;
+  }
+
+  preloadTexture(url: string): Promise<void> {
+    if (!this.scene) return Promise.resolve();
+    const tex = new Texture(url, this.scene);
+    if (tex.isReady()) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      tex.onLoadObservable.addOnce(() => resolve());
+    });
+  }
+
+  createCardMesh(id: string, spec: CardMeshSpec): MeshHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createCardMesh: call init() first');
+    const scene = this.scene;
+    const w = spec.width;
+    const h = spec.height;
+    const subs = spec.subdivisions ?? 16;
+
+    // A ground is a horizontal quad; we bow it along its width (X) into a
+    // shallow parabola so flipped cards curl. Bow=0 leaves it flat.
+    const mesh = MeshBuilder.CreateGround(`${id}_card`, {
+      width: w, height: h, subdivisions: subs, updatable: true,
+    }, scene);
+
+    const bow = spec.bow ?? 0;
+    if (bow !== 0) {
+      const pos = mesh.getVerticesData('position');
+      if (pos) {
+        const p = Array.from(pos);
+        for (let k = 0; k < p.length; k += 3) {
+          const nx = p[k]! / (w * 0.5);
+          p[k + 1] = bow * (1 - nx * nx);
+        }
+        mesh.updateVerticesData('position', p);
+        const idx = mesh.getIndices()!;
+        const nrm = new Array(p.length).fill(0);
+        VertexData.ComputeNormals(p, idx, nrm);
+        mesh.updateVerticesData('normal', nrm);
+        mesh.refreshBoundingInfo();
+      }
+    }
+
+    // Rounded-corner alpha mask generated INSIDE the adapter (reusing the
+    // DynamicTexture getContext canvas pattern from drawLabelText) so no canvas
+    // escapes the component.
+    const cornerMask = this.buildCardCornerMask(`${id}_cardMask`, w, h, spec.cornerRadius, scene);
+
+    const material = new PBRMaterial(`${id}_cardMat`, scene);
+    material.opacityTexture = cornerMask;
+    material.transparencyMode = 1; // ALPHA_TEST
+    material.alphaCutOff = 0.5;
+    material.roughness = 0.85;
+    material.metallic = 0;
+    material.backFaceCulling = false;
+    material.twoSidedLighting = true;
+    mesh.material = material;
+    mesh.isPickable = true;
+
+    const handle = this.makeHandle<MeshHandle>('card', id);
+    this.meshes.set(handle, mesh);
+    this.meshesByMeshId.set(id, mesh);
+
+    const front = spec.front ? this.textures.get(spec.front) : undefined;
+    const back = spec.back ? this.textures.get(spec.back) : undefined;
+    this.cards.set(handle, { material, cornerMask, front, back });
+    // Show the front face by default if supplied.
+    if (front) material.albedoTexture = front;
+    return handle;
+  }
+
+  /** Build a rounded-rect alpha mask as a DynamicTexture (canvas stays inside). */
+  private buildCardCornerMask(
+    name: string,
+    w: number,
+    h: number,
+    cornerRadius: number | undefined,
+    scene: Scene,
+  ): DynamicTexture {
+    const tw = 256;
+    const th = Math.round((tw * h) / w);
+    const dt = new DynamicTexture(name, { width: tw, height: th }, scene, false);
+    dt.hasAlpha = true;
+    const ctx = dt.getContext() as CanvasRenderingContext2D;
+    // cornerRadius is a fraction of the shorter side; default ~8%.
+    const r = Math.max(1, Math.round(Math.min(tw, th) * (cornerRadius ?? 0.08)));
+    ctx.clearRect(0, 0, tw, th);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(r, 0);
+    ctx.lineTo(tw - r, 0);
+    ctx.quadraticCurveTo(tw, 0, tw, r);
+    ctx.lineTo(tw, th - r);
+    ctx.quadraticCurveTo(tw, th, tw - r, th);
+    ctx.lineTo(r, th);
+    ctx.quadraticCurveTo(0, th, 0, th - r);
+    ctx.lineTo(0, r);
+    ctx.quadraticCurveTo(0, 0, r, 0);
+    ctx.closePath();
+    ctx.fill();
+    dt.update();
+    return dt;
+  }
+
+  setMeshFaceTexture(h: MeshHandle, side: 'front' | 'back', tex: TextureHandle): void {
+    const card = this.cards.get(h);
+    const texture = this.textures.get(tex);
+    if (!card || !texture) return;
+    if (side === 'front') card.front = texture;
+    else card.back = texture;
+    // Apply as the visible albedo; the corner mask stays the opacity texture.
+    card.material.albedoTexture = texture;
+    card.material.useAlphaFromAlbedoTexture = false;
+    card.material.opacityTexture = card.cornerMask;
+  }
+
+  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
+    const mesh = this.meshes.get(h);
+    const mat = mesh?.material;
+    if (mat instanceof PBRMaterial) mat.albedoColor = new Color3(r, g, b);
+  }
+
+  disposeTexture(h: TextureHandle): void {
+    const tex = this.textures.get(h);
+    if (!tex) return;
+    tex.dispose();
+    this.textures.delete(h);
+    for (const [key, handle] of this.texturesByKey) {
+      if (handle === h) {
+        this.texturesByKey.delete(key);
+        break;
+      }
+    }
+  }
+
+  getAspectRatio(): number {
+    if (!this.engine) return 1;
+    const h = this.engine.getRenderHeight();
+    return h > 0 ? this.engine.getRenderWidth() / h : 1;
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
@@ -1763,6 +1941,11 @@ export class BabylonAdapter implements RendererAdapter {
     this.engine = undefined;
     for (const field of this.thinFields.values()) field.master.dispose();
     this.thinFields.clear();
+    for (const tex of this.textures.values()) tex.dispose();
+    this.textures.clear();
+    this.texturesByKey.clear();
+    for (const card of this.cards.values()) card.cornerMask.dispose();
+    this.cards.clear();
     this.lines.clear();
     this.meshes.clear();
     this.meshesByMeshId.clear();

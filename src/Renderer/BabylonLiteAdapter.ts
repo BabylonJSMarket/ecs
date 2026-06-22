@@ -59,6 +59,9 @@ import type {
   SkyboxSpec,
   ThinFieldHandle,
   ThinFieldSpec,
+  TextureHandle,
+  TextureLoadOpts,
+  CardMeshSpec,
   Vec3,
 } from './types';
 
@@ -108,6 +111,16 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private instantiatedModelRoots = new Map<string, LiteMesh>();
   /** Thin-instance fields: master mesh + stored normalization scale. */
   private thinFields = new Map<ThinFieldHandle, { mesh: LiteMesh; baseScale: number }>();
+  /**
+   * Texture handles, deduped by key. Babylon Lite's preview build doesn't wire a
+   * URL→Texture2D loader through this adapter (see applyMaterialSpec), so the
+   * handle is a provisional STUB that still dedupes by key and never throws —
+   * matching the label/sky stubs. Card faces track which handle is assigned so
+   * the surface is structurally correct once Lite's texture loader lands.
+   */
+  private texturesByKey = new Map<string, TextureHandle>();
+  /** Card meshes: the master mesh plus the assigned front/back texture handles. */
+  private cards = new Map<MeshHandle, { mesh: LiteMesh; front?: TextureHandle; back?: TextureHandle }>();
   /** Custom local-space bounding boxes declared via setMeshBoundingBoxExtents. */
   private boxExtents = new Map<MeshHandle, { min: Vec3; max: Vec3 }>();
   /**
@@ -554,6 +567,99 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const cw = inv[3]! * x + inv[7]! * y + inv[11]! * z + inv[15]!;
     const iw = cw !== 0 ? 1 / cw : 1;
     return [cx * iw, cy * iw, cz * iw];
+  }
+
+  // ─── Textures & cards ───
+  // Babylon Lite's preview build doesn't expose a URL→texture loader through
+  // this adapter (see applyMaterialSpec), so texture LOADING is a documented
+  // stub: loadTexture dedupes by key and returns a tracked handle, but no GPU
+  // texture is created and setMeshFaceTexture can't swap an albedo map yet. The
+  // card MESH itself (bowed, rounded silhouette best-effort) is built for real.
+  loadTexture(key: string, url: string, opts?: TextureLoadOpts): TextureHandle {
+    void url;
+    void opts;
+    const cached = this.texturesByKey.get(key);
+    if (cached) return cached;
+    const handle = this.makeHandle<TextureHandle>('texture', key);
+    this.texturesByKey.set(key, handle);
+    return handle;
+  }
+
+  preloadTexture(url: string): Promise<void> {
+    // No texture I/O wired in this preview adapter — resolve immediately so the
+    // deal animation never hangs. Provisional: await a real load once Lite's
+    // texture loader is confirmed.
+    void url;
+    return Promise.resolve();
+  }
+
+  createCardMesh(id: string, spec: CardMeshSpec): MeshHandle {
+    const engine = this.requireEngine();
+    const scene = this.requireScene();
+    // A ground is a flat horizontal quad; bow it along its width (X). The
+    // rounded-corner alpha mask (a DynamicTexture in Babylon, a CanvasTexture in
+    // Three) can't be generated here — Lite has no canvas/dynamic-texture path in
+    // this preview — so the card renders as a square-cornered bowed quad.
+    const mesh = BL.createGround(engine, {
+      width: spec.width,
+      height: spec.height,
+      subdivisions: spec.subdivisions ?? 16,
+    });
+    mesh.name = id;
+
+    const bow = spec.bow ?? 0;
+    if (bow !== 0) {
+      // Lite exposes no in-place vertex-buffer mutation in this preview (see
+      // replaceMeshGeometry), so the parabolic bow can't be baked into the
+      // geometry; the flat quad is the provisional fallback.
+      void bow;
+    }
+
+    const std = BL.createStandardMaterial();
+    std.alpha = 1;
+    mesh.material = std;
+    BL.addToScene(scene, mesh);
+
+    const handle = this.makeHandle<MeshHandle>('card', id);
+    this.meshes.set(handle, mesh);
+    this.meshesByMeshId.set(id, mesh);
+    this.cards.set(handle, { mesh, front: spec.front, back: spec.back });
+    return handle;
+  }
+
+  setMeshFaceTexture(h: MeshHandle, side: 'front' | 'back', tex: TextureHandle): void {
+    // Track the assignment so the surface is structurally correct; applying it
+    // to the material needs Lite's texture loader, which isn't wired here.
+    const card = this.cards.get(h);
+    if (!card) return;
+    if (side === 'front') card.front = tex;
+    else card.back = tex;
+  }
+
+  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    const m = mesh.material as Partial<BLNS.StandardMaterialProps & BLNS.PbrMaterialProps>;
+    if (m.baseColorFactor) m.baseColorFactor = [r, g, b, m.baseColorFactor[3] ?? 1];
+    else if (m.diffuseColor) m.diffuseColor = [r, g, b];
+  }
+
+  disposeTexture(h: TextureHandle): void {
+    // Lite exposes no per-texture dispose; drop the dedupe entry that minted it.
+    for (const [key, handle] of this.texturesByKey) {
+      if (handle === h) {
+        this.texturesByKey.delete(key);
+        break;
+      }
+    }
+  }
+
+  getAspectRatio(): number {
+    const c = this.canvas;
+    if (!c) return 1;
+    const w = c.clientWidth || c.width || 0;
+    const hgt = c.clientHeight || c.height || 0;
+    return hgt > 0 ? w / hgt : 1;
   }
 
   // ─── Lights ───
@@ -1292,6 +1398,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.modelTemplates.clear();
     this.instantiatedModelRoots.clear();
     this.thinFields.clear();
+    this.texturesByKey.clear();
+    this.cards.clear();
     this.boxExtents.clear();
     this.pivotOffsets.clear();
   }

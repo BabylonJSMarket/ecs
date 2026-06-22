@@ -22,6 +22,7 @@ export type LabelHandle = { readonly __label: unique symbol };
 export type SkyboxHandle = { readonly __skybox: unique symbol };
 export type LineHandle = { readonly __line: unique symbol };
 export type ThinFieldHandle = { readonly __thinField: unique symbol };
+export type TextureHandle = { readonly __texture: unique symbol };
 
 export interface PrimitiveSpec {
   kind: 'box' | 'sphere' | 'cylinder' | 'capsule' | 'ground' | 'torus' | 'disc' | 'plane' | 'tube';
@@ -287,6 +288,72 @@ export interface PbrMaterialSpec {
   environmentIntensity?: number;
 }
 
+/**
+ * Options for {@link RendererAdapter.loadTexture}. All optional; adapters apply
+ * only what's provided. These map onto each engine's UV/orientation/color-space
+ * knobs so a card front/back can be loaded and oriented without the component
+ * ever touching `@babylonjs/*` or `three`.
+ */
+export interface TextureLoadOpts {
+  /**
+   * Mirror the texture horizontally. Babylon: `uScale = -1`; Three:
+   * `repeat.x = -1` (with the wrap mode set to allow the negative repeat).
+   * Card FRONTS are loaded flipped so the printed face reads correctly on the
+   * concave side of a bowed quad.
+   */
+  flipU?: boolean;
+  /**
+   * Rotate the texture about its center, in radians. Babylon: `wAng`; Three:
+   * `rotation` + a `(0.5, 0.5)` center. Card BACKS are rotated π so the back
+   * pattern is upright when the card is face-down.
+   */
+  rotate?: number;
+  /**
+   * Treat the source as sRGB-encoded color data (albedo). Babylon textures are
+   * sRGB by default; Three needs `colorSpace = SRGBColorSpace` set explicitly,
+   * or the image renders washed out. Default behavior is engine-native.
+   */
+  srgb?: boolean;
+}
+
+/**
+ * Spec for {@link RendererAdapter.createCardMesh}: a double-faced, optionally
+ * parabolically-bowed, rounded-corner card quad. The rounded-rect ALPHA MASK is
+ * generated INSIDE the adapter (no canvas escapes the component), and front/back
+ * face albedo textures may be supplied now or attached later via
+ * {@link RendererAdapter.setMeshFaceTexture}. The returned mesh is registered in
+ * the adapter's normal mesh registry, so `setMeshPosition`/`setMeshRotation`/
+ * `setMeshScale`/`setMeshVisible`, `attachShadowCaster`, `replaceMeshGeometry`
+ * and `pickAtScreenPoint` all address it like any other mesh.
+ */
+export interface CardMeshSpec {
+  /** Card width in world units (the shorter side for a poker card). */
+  width: number;
+  /** Card height in world units (the taller side). */
+  height: number;
+  /**
+   * Quad subdivisions per axis. Higher = smoother bow. Default 16 (matches the
+   * cardToss deck). Ignored visually when `bow` is 0/omitted but still sets the
+   * tessellation of the underlying plane.
+   */
+  subdivisions?: number;
+  /**
+   * Radius (in alpha-mask texels' proportion of the card) of the rounded
+   * corners drawn into the generated alpha mask. Default a gentle rounding.
+   */
+  cornerRadius?: number;
+  /**
+   * Peak height of the parabolic bow along the width axis (Y rise at the
+   * center vs. the edges). 0/omitted → a flat quad. The cardToss deck uses a
+   * shallow 0.06 bow so flipped cards stack with a slight curl.
+   */
+  bow?: number;
+  /** Initial front-face albedo. May be set later with `setMeshFaceTexture`. */
+  front?: TextureHandle;
+  /** Initial back-face albedo. May be set later with `setMeshFaceTexture`. */
+  back?: TextureHandle;
+}
+
 export interface RendererAdapter {
   readonly kind: 'babylon' | 'three' | 'babylon-lite';
 
@@ -410,6 +477,54 @@ export interface RendererAdapter {
    * width/height are read from the adapter internally.
    */
   screenToWorldPoint(camera: CameraHandle, nx: number, ny: number, distance: number, out: Vec3): Vec3;
+
+  // ─── Textures & cards ───
+  /**
+   * Load a 2D texture from an app-resolved `url`, deduped by `key`: a second
+   * call with the SAME key returns the SAME handle (and ignores `opts`),
+   * letting a card deck reuse one texture per card id / per back design without
+   * the component caching engine objects. Babylon: `new Texture(url, scene)`,
+   * `flipU → uScale = -1`, `rotate → wAng`. Three: `TextureLoader`,
+   * `flipU → repeat.x = -1`, `rotate → rotation` (+ center), `srgb → colorSpace`.
+   * Adapters without a texture pipeline record the load and return a
+   * key-deduped handle. The component never imports an engine texture type.
+   */
+  loadTexture(key: string, url: string, opts?: TextureLoadOpts): TextureHandle;
+  /**
+   * Eagerly load `url` and resolve once the GPU texture is ready (or
+   * immediately if already cached). Used by the deal animation to wait for the
+   * card-back image before the first card flies. Adapters that load
+   * synchronously / have no real I/O resolve immediately.
+   */
+  preloadTexture(url: string): Promise<void>;
+  /**
+   * Build a double-faced, optionally-bowed, rounded-corner card quad (see
+   * {@link CardMeshSpec}) registered under `id` in the mesh registry, and
+   * return its {@link MeshHandle}. The rounded-rect alpha mask is generated
+   * inside the adapter; no canvas crosses the boundary. Front/back albedo may
+   * be supplied in the spec or attached later with `setMeshFaceTexture`.
+   */
+  createCardMesh(id: string, spec: CardMeshSpec): MeshHandle;
+  /**
+   * Swap a card face's albedo texture at runtime — the flip. `side` selects the
+   * front (concave, printed face) or back (convex, card-back design). No-op on
+   * an unknown mesh handle. Adapters without per-face material control no-op.
+   */
+  setMeshFaceTexture(h: MeshHandle, side: 'front' | 'back', tex: TextureHandle): void;
+  /**
+   * Tint a mesh's albedo/base color (the table-felt hue-shift). Distinct from
+   * `setMeshColor`, which drives the flat `StandardMaterial` diffuse path;
+   * this addresses the PBR albedo so a textured surface re-tints correctly.
+   * No-op on an unknown handle.
+   */
+  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void;
+  /** Release a loaded texture and drop it from the dedupe cache. Idempotent. */
+  disposeTexture(h: TextureHandle): void;
+  /**
+   * Aspect ratio (width / height) of the rendering surface, for responsive
+   * camera framing. Returns 1 when no canvas/engine is available yet.
+   */
+  getAspectRatio(): number;
 
   createDirectionalLight(id: string, spec: DirectionalLightSpec): LightHandle;
   createHemisphericLight(id: string, spec: HemisphericLightSpec): LightHandle;

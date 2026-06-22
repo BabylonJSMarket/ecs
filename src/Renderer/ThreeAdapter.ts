@@ -51,6 +51,9 @@ import type {
   PbrMaterialSpec,
   ThinFieldHandle,
   ThinFieldSpec,
+  TextureHandle,
+  TextureLoadOpts,
+  CardMeshSpec,
   Vec3,
 } from './types';
 import type { Color } from './types';
@@ -164,6 +167,19 @@ export class ThreeAdapter implements RendererAdapter {
    * per instance in setThinFieldInstances.
    */
   private thinFields = new Map<ThinFieldHandle, { mesh: THREE.InstancedMesh; baseScale: number }>();
+  /** Loaded textures deduped by the caller's key (see loadTexture). */
+  private textures = new Map<TextureHandle, THREE.Texture>();
+  private texturesByKey = new Map<string, TextureHandle>();
+  /**
+   * Card meshes built by createCardMesh: the standard material, its rounded-rect
+   * alpha map, and the front/back face textures swapped on the flip.
+   */
+  private cards = new Map<MeshHandle, {
+    material: THREE.MeshStandardMaterial;
+    cornerMask: THREE.CanvasTexture;
+    front?: THREE.Texture;
+    back?: THREE.Texture;
+  }>();
   // Reused per instance-matrix compose so a sweep over thousands of slots never
   // allocates. Created lazily once THREE is available.
   private _tfPos?: THREE.Vector3;
@@ -712,6 +728,154 @@ export class ThreeAdapter implements RendererAdapter {
     out[1] = ray.origin.y + ray.direction.y * distance;
     out[2] = ray.origin.z + ray.direction.z * distance;
     return out;
+  }
+
+  // ─── Textures & cards ───
+  loadTexture(key: string, url: string, opts?: TextureLoadOpts): TextureHandle {
+    const T = this.requireThree();
+    const cached = this.texturesByKey.get(key);
+    if (cached) return cached;
+    const tex = new T.TextureLoader().load(url);
+    if (opts?.flipU) {
+      // Mirror horizontally: a negative repeat needs a wrap mode that tiles.
+      tex.wrapS = T.RepeatWrapping;
+      tex.repeat.x = -1;
+    }
+    if (opts?.rotate) {
+      tex.center.set(0.5, 0.5); // rotate about the texture center
+      tex.rotation = opts.rotate;
+    }
+    if (opts?.srgb) tex.colorSpace = T.SRGBColorSpace;
+    const handle = this.makeHandle<TextureHandle>('texture', key);
+    this.textures.set(handle, tex);
+    this.texturesByKey.set(key, handle);
+    return handle;
+  }
+
+  preloadTexture(url: string): Promise<void> {
+    const T = this.THREE;
+    if (!T) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      new T.TextureLoader().load(
+        url,
+        () => resolve(),
+        undefined,
+        () => resolve(), // resolve on error too — the deal shouldn't hang
+      );
+    });
+  }
+
+  createCardMesh(id: string, spec: CardMeshSpec): MeshHandle {
+    const T = this.requireThree();
+    if (!this.scene) throw new Error('ThreeAdapter.createCardMesh: call init() first');
+    const w = spec.width;
+    const h = spec.height;
+    const subs = spec.subdivisions ?? 16;
+
+    // Plane on the XZ plane (like a Babylon ground), bowed along its width (X).
+    const geometry = new T.PlaneGeometry(w, h, subs, subs);
+    geometry.rotateX(-Math.PI / 2);
+    const bow = spec.bow ?? 0;
+    if (bow !== 0) {
+      const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
+      for (let i = 0; i < posAttr.count; i++) {
+        const x = posAttr.getX(i);
+        const nx = x / (w * 0.5);
+        posAttr.setY(i, bow * (1 - nx * nx));
+      }
+      posAttr.needsUpdate = true;
+      geometry.computeVertexNormals();
+    }
+
+    const cornerMask = this.buildCardCornerMask(w, h, spec.cornerRadius);
+    const material = new T.MeshStandardMaterial({
+      alphaMap: cornerMask,
+      transparent: true,
+      alphaTest: 0.5,
+      roughness: 0.85,
+      metalness: 0,
+      side: T.DoubleSide,
+    });
+    const mesh = new T.Mesh(geometry, material);
+    mesh.name = id;
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+
+    const handle = this.makeHandle<MeshHandle>('card', id);
+    this.meshes.set(handle, mesh);
+    this.meshesByMeshId.set(id, mesh);
+
+    const front = spec.front ? this.textures.get(spec.front) : undefined;
+    const back = spec.back ? this.textures.get(spec.back) : undefined;
+    this.cards.set(handle, { material, cornerMask, front, back });
+    if (front) {
+      material.map = front;
+      material.needsUpdate = true;
+    }
+    return handle;
+  }
+
+  /** Build a rounded-rect alpha mask on an off-DOM canvas → CanvasTexture. */
+  private buildCardCornerMask(w: number, h: number, cornerRadius: number | undefined): THREE.CanvasTexture {
+    const T = this.requireThree();
+    const tw = 256;
+    const th = Math.round((tw * h) / w);
+    const canvas = document.createElement('canvas');
+    canvas.width = tw;
+    canvas.height = th;
+    const ctx = canvas.getContext('2d')!;
+    const r = Math.max(1, Math.round(Math.min(tw, th) * (cornerRadius ?? 0.08)));
+    ctx.clearRect(0, 0, tw, th);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(r, 0);
+    ctx.lineTo(tw - r, 0);
+    ctx.quadraticCurveTo(tw, 0, tw, r);
+    ctx.lineTo(tw, th - r);
+    ctx.quadraticCurveTo(tw, th, tw - r, th);
+    ctx.lineTo(r, th);
+    ctx.quadraticCurveTo(0, th, 0, th - r);
+    ctx.lineTo(0, r);
+    ctx.quadraticCurveTo(0, 0, r, 0);
+    ctx.closePath();
+    ctx.fill();
+    const tex = new T.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  setMeshFaceTexture(h: MeshHandle, side: 'front' | 'back', tex: TextureHandle): void {
+    const card = this.cards.get(h);
+    const texture = this.textures.get(tex);
+    if (!card || !texture) return;
+    if (side === 'front') card.front = texture;
+    else card.back = texture;
+    card.material.map = texture;
+    card.material.needsUpdate = true;
+  }
+
+  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
+    const T = this.THREE;
+    const mesh = this.meshes.get(h);
+    const mat = mesh?.material as THREE.MeshStandardMaterial | THREE.MeshPhongMaterial | undefined;
+    if (mat?.color && T) mat.color.setRGB(r, g, b, T.SRGBColorSpace);
+  }
+
+  disposeTexture(h: TextureHandle): void {
+    const tex = this.textures.get(h);
+    if (!tex) return;
+    tex.dispose();
+    this.textures.delete(h);
+    for (const [key, handle] of this.texturesByKey) {
+      if (handle === h) {
+        this.texturesByKey.delete(key);
+        break;
+      }
+    }
+  }
+
+  getAspectRatio(): number {
+    return this.canvasAspect();
   }
 
   /**
@@ -1779,6 +1943,11 @@ export class ThreeAdapter implements RendererAdapter {
       field.mesh.dispose();
     }
     this.thinFields.clear();
+    for (const tex of this.textures.values()) tex.dispose();
+    this.textures.clear();
+    this.texturesByKey.clear();
+    for (const card of this.cards.values()) card.cornerMask.dispose();
+    this.cards.clear();
     this.lines.clear();
     this.meshes.clear();
     this.meshesByMeshId.clear();

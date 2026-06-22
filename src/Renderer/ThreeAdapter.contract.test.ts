@@ -42,6 +42,7 @@ runRendererAdapterContract('Three (headless)', () => new ThreeAdapter(), {
   skipLabels: true,
   skipThinField: true,
   skipMeshLoad: true, // needs a real GLB fetch; covered by the browser demo
+  skipTextureLoad: true, // needs a real image fetch; covered by the browser demo
   setup(adapter) {
     // Wire the public engine fields + the private renderer/controls scaffolding
     // that init() would normally build from a real WebGL canvas.

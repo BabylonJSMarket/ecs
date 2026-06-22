@@ -20,6 +20,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type {
   ArcCameraSpec,
+  CardMeshSpec,
   DirectionalLightSpec,
   HemisphericLightSpec,
   LabelSpec,
@@ -60,6 +61,14 @@ export interface RendererAdapterContractOptions {
    * comparison demo instead.
    */
   skipMeshLoad?: boolean;
+  /**
+   * Engine adapters can't fetch a real image headlessly, so the `loadTexture`
+   * round-trip + dedupe assertion is gated behind this flag. The card
+   * create/set-face/dispose smoke sequence still runs on EVERY adapter (no real
+   * fetch needed — front/back default to undefined). The Mock adapter (no I/O —
+   * it key-dedupes a synthesized handle) runs the load assertion. Default false.
+   */
+  skipTextureLoad?: boolean;
   /**
    * Optional async setup hook called once per test (after the factory). Use
    * it to drive `adapter.init(canvas)` if the adapter is engine-coupled.
@@ -583,6 +592,133 @@ export function runRendererAdapterContract(
         });
       });
     }
+
+    // ---------------------------------------------------------------------
+    // Textures & cards — the renderer-agnostic poker-card surface.
+    //
+    // `setMeshAlbedoColor` / `getAspectRatio` / `disposeTexture` need neither a
+    // real 2D drawing context nor a fetch, so they run on EVERY adapter. The
+    // card-mesh sequence (createCardMesh generates a rounded-rect alpha mask via
+    // DynamicTexture/CanvasTexture) and `preloadTexture` (a real image fetch) DO
+    // — those are gated behind `skipLabels`, the existing "no real canvas/IO"
+    // flag (engine adapters under jsdom set it; Mock + Lite-stub run the full
+    // sequence). The loadTexture round-trip + dedupe is gated behind
+    // skipTextureLoad (engine adapters can't fetch; Mock runs it).
+    // ---------------------------------------------------------------------
+    describe('textures & cards', () => {
+      const cardSpec: CardMeshSpec = {
+        width: 1.4,
+        height: 2.0,
+        subdivisions: 16,
+        cornerRadius: 0.08,
+        bow: 0.06,
+      };
+
+      it('setMeshAlbedoColor tints a mesh without throwing', () => {
+        const floor = adapter.createMesh('felt', { kind: 'ground', width: 10, depth: 10 });
+        expect(() => adapter.setMeshAlbedoColor(floor, 0.02, 0.5, 0.06)).not.toThrow();
+        // An unknown handle is a safe no-op too.
+        const ghost = adapter.createMesh('ghost', { kind: 'box' });
+        adapter.disposeMesh(ghost);
+        expect(() => adapter.setMeshAlbedoColor(ghost, 1, 1, 1)).not.toThrow();
+      });
+
+      it('disposeTexture is idempotent on an unknown handle', () => {
+        // Releasing a handle that was never minted (or already released) must not
+        // throw — exercised here without a real load so every adapter runs it.
+        const bogus = adapter.createMesh('decoy_tex', { kind: 'box' }) as unknown as Parameters<RendererAdapter['disposeTexture']>[0];
+        expect(() => {
+          adapter.disposeTexture(bogus);
+          adapter.disposeTexture(bogus);
+        }).not.toThrow();
+      });
+
+      it('getAspectRatio returns a positive finite number', () => {
+        const a = adapter.getAspectRatio();
+        expect(Number.isFinite(a)).toBe(true);
+        expect(a).toBeGreaterThan(0);
+      });
+
+      // Card-mesh creation generates an alpha mask on a real 2D canvas, and
+      // preloadTexture fetches an image — both unavailable in the headless
+      // engine envs, so they share the skipLabels gate.
+      if (!options.skipLabels) {
+        it('createCardMesh returns a handle that the standard mesh ops accept', () => {
+          const h = adapter.createCardMesh('card0', cardSpec);
+          expect(h).toBeDefined();
+          // Registered like any mesh: transform / visibility ops and dispose
+          // must all be smoke-safe on the returned handle.
+          expect(() => {
+            adapter.setMeshPosition(h, 0, 0.02, -8);
+            adapter.setMeshRotation(h, 0, 0.3, Math.PI);
+            adapter.setMeshScale(h, 1, 1, 1);
+            adapter.setMeshVisible(h, false);
+            adapter.setMeshVisible(h, true);
+            adapter.disposeMesh(h);
+          }).not.toThrow();
+        });
+
+        it('createCardMesh round-trips its world position like any mesh', () => {
+          const h = adapter.createCardMesh('card1', cardSpec);
+          adapter.setMeshPosition(h, 2, 0.02, -3);
+          const out: Vec3 = [0, 0, 0];
+          adapter.getMeshWorldPosition(h, out);
+          expect(out[0]).toBeCloseTo(2, 4);
+          expect(out[2]).toBeCloseTo(-3, 4);
+        });
+
+        it('createCardMesh accepts a flat (no-bow) minimal spec', () => {
+          // bow / cornerRadius / subdivisions are all optional; a minimal spec
+          // must build a usable card (defaults applied inside the adapter).
+          let h: ReturnType<RendererAdapter['createCardMesh']> | undefined;
+          expect(() => {
+            h = adapter.createCardMesh('card_flat', { width: 1, height: 1.4 });
+          }).not.toThrow();
+          expect(h).toBeDefined();
+          expect(() => adapter.disposeMesh(h!)).not.toThrow();
+        });
+
+        it('setMeshFaceTexture swaps a face albedo; both sides + a flip are safe', () => {
+          const front = adapter.loadTexture('cardFront', '/test/AS.webp', { flipU: true, srgb: true });
+          const back = adapter.loadTexture('cardBack', '/test/back-1.webp', { rotate: Math.PI });
+          const h = adapter.createCardMesh('card2', { ...cardSpec, front, back });
+          expect(() => {
+            adapter.setMeshFaceTexture(h, 'front', front);
+            adapter.setMeshFaceTexture(h, 'back', back);
+            adapter.setMeshFaceTexture(h, 'front', back); // re-swap (the flip)
+          }).not.toThrow();
+        });
+
+        it('setMeshFaceTexture no-ops on a non-card mesh handle', () => {
+          const tex = adapter.loadTexture('lone', '/test/x.webp');
+          const decoy = adapter.createMesh('decoy', { kind: 'box' });
+          // A plain mesh handle (no card record) must be tolerated, not throw.
+          expect(() => adapter.setMeshFaceTexture(decoy, 'front', tex)).not.toThrow();
+        });
+
+        it('disposeTexture releases a loaded texture idempotently', () => {
+          const tex = adapter.loadTexture('disposable', '/test/y.webp');
+          expect(() => {
+            adapter.disposeTexture(tex);
+            adapter.disposeTexture(tex);
+          }).not.toThrow();
+        });
+
+        it('preloadTexture resolves', async () => {
+          await expect(adapter.preloadTexture('/test/back-1.webp')).resolves.toBeUndefined();
+        });
+      }
+
+      if (!options.skipTextureLoad) {
+        it('loadTexture dedupes by key: same key → same handle, new key → new handle', () => {
+          const a = adapter.loadTexture('AS', '/test/AS.webp', { flipU: true });
+          const again = adapter.loadTexture('AS', '/test/AS.webp');
+          const other = adapter.loadTexture('KH', '/test/KH.webp');
+          expect(again).toBe(a); // dedupe hit (opts on the repeat call ignored)
+          expect(other).not.toBe(a); // distinct key → distinct handle
+        });
+      }
+    });
 
     // ---------------------------------------------------------------------
     // Physics (opt-out for adapters with no physics integrator)

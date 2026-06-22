@@ -30,6 +30,7 @@ runRendererAdapterContract(
     skipLabels: true,
     skipThinField: true,
     skipMeshLoad: true, // needs a real GLB fetch; covered by the browser demo
+    skipTextureLoad: true, // needs a real image fetch; covered by the browser demo
     setup(adapter) {
       // Bypass init() — it builds a `new Engine(canvas, ...)` that needs
       // a real WebGL context. NullEngine is a Babylon Engine subclass

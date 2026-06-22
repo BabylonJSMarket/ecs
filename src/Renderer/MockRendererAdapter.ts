@@ -36,6 +36,9 @@ import type {
   PbrMaterialSpec,
   ThinFieldHandle,
   ThinFieldSpec,
+  TextureHandle,
+  TextureLoadOpts,
+  CardMeshSpec,
   Vec3,
 } from './types';
 import type { Color } from './types';
@@ -193,6 +196,66 @@ export class MockRendererAdapter implements RendererAdapter {
     out[2] = t[2] + fwd[2] * distance;
     this.record('screenToWorldPoint', camera, nx, ny, distance);
     return out;
+  }
+
+  // ─── Textures & cards ───
+  /**
+   * Texture dedupe cache keyed by the caller's `key`, mirroring the engine
+   * adapters: a repeat `loadTexture(key, …)` returns the same handle. Tests can
+   * assert the cache size + the per-card-mesh face assignments.
+   */
+  textures = new Map<string, TextureHandle>();
+  /** Per-card-mesh recorded face textures, so tests can assert flips. */
+  cardFaces = new Map<MeshHandle, { front?: TextureHandle; back?: TextureHandle }>();
+  /** Albedo tints recorded by setMeshAlbedoColor. */
+  meshAlbedoColors = new Map<MeshHandle, Color>();
+  /** Aspect ratio surfaced by getAspectRatio; tests can override. */
+  aspectRatio = 16 / 9;
+
+  loadTexture(key: string, url: string, opts?: TextureLoadOpts): TextureHandle {
+    this.record('loadTexture', key, url, opts);
+    // Dedupe by key: a second call with the same key returns the same handle
+    // (and ignores opts), matching the engine adapters' cache semantics.
+    const existing = this.textures.get(key);
+    if (existing) return existing;
+    const h = makeHandle<TextureHandle>('texture', key);
+    this.textures.set(key, h);
+    return h;
+  }
+  async preloadTexture(url: string): Promise<void> {
+    // No real I/O in the mock — record the request and resolve immediately.
+    this.record('preloadTexture', url);
+  }
+  createCardMesh(id: string, spec: CardMeshSpec): MeshHandle {
+    const h = makeHandle<MeshHandle>('card', id);
+    this.cardFaces.set(h, { front: spec.front, back: spec.back });
+    this.record('createCardMesh', id, spec);
+    return h;
+  }
+  setMeshFaceTexture(h: MeshHandle, side: 'front' | 'back', tex: TextureHandle): void {
+    this.record('setMeshFaceTexture', h, side, tex);
+    const faces = this.cardFaces.get(h);
+    if (!faces) return;
+    if (side === 'front') faces.front = tex;
+    else faces.back = tex;
+  }
+  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
+    this.meshAlbedoColors.set(h, [r, g, b]);
+    this.record('setMeshAlbedoColor', h, r, g, b);
+  }
+  disposeTexture(h: TextureHandle): void {
+    this.record('disposeTexture', h);
+    // Idempotent: drop whichever cache entry minted this handle (if any still does).
+    for (const [key, handle] of this.textures) {
+      if (handle === h) {
+        this.textures.delete(key);
+        break;
+      }
+    }
+  }
+  getAspectRatio(): number {
+    this.record('getAspectRatio');
+    return this.aspectRatio;
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
