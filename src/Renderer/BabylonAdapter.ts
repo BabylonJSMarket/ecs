@@ -1756,8 +1756,12 @@ export class BabylonAdapter implements RendererAdapter {
     }
 
     if (opts.lockRotation) {
-      // Clamp X/Z inertia so tumbling is suppressed but Y-axis turns still work.
-      aggregate.body.setMassProperties({ inertia: new Vector3(0.001, 1, 0.001) });
+      // Lock X/Z tumbling (so an upright capsule character can't be knocked over
+      // by a collision) while leaving Y-axis turning free. Havok treats a ZERO
+      // inertia component as a fully locked axis; a small non-zero value (the
+      // old 0.001) is the opposite — near-zero rotational inertia, i.e. it tips
+      // over from the slightest contact. Y stays at 1 so faceMotion yaw works.
+      aggregate.body.setMassProperties({ inertia: new Vector3(0, 1, 0) });
       aggregate.body.setAngularDamping(10);
     }
 
