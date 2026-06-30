@@ -178,6 +178,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return this.canvas;
   }
 
+  setClearColor(r: number, g: number, b: number, a = 1): void {
+    if (this.scene) this.scene.clearColor = { r, g, b, a };
+  }
+
   private requireEngine(): BLNS.EngineContext {
     if (!this.engine) throw new Error('BabylonLiteAdapter: call init() first');
     return this.engine;
@@ -811,6 +815,15 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return { alpha: entry.camera.alpha, beta: entry.camera.beta, radius: entry.camera.radius };
   }
   getCameraForward(h: CameraHandle, out: Vec3): Vec3 {
+    // A free 6-DOF perspective camera carries a full orientation quaternion; its
+    // forward is `q · (+Z)` — the canonical convention (identity → +Z) the
+    // contract locks. (setCameraPose already aims this camera that way.)
+    const persp = this.perspectiveCameras.get(h);
+    if (persp) {
+      const f = this.rotateVecByQuat(persp.orientation, 0, 0, 1);
+      out[0] = f[0]; out[1] = f[1]; out[2] = f[2];
+      return out;
+    }
     const entry = this.cameras.get(h);
     if (!entry) {
       out[0] = 0;

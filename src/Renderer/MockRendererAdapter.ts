@@ -103,6 +103,13 @@ export class MockRendererAdapter implements RendererAdapter {
     return this.canvas;
   }
 
+  /** Last scene clear color applied (RGBA), surfaced for assertions. */
+  clearColor: [number, number, number, number] = [0, 0, 0, 1];
+  setClearColor(r: number, g: number, b: number, a = 1): void {
+    this.clearColor = [r, g, b, a];
+    this.record('setClearColor', r, g, b, a);
+  }
+
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle {
     const h = makeHandle<MeshHandle>('mesh', id);
     this.record('createMesh', id, prim, mat);
@@ -326,6 +333,16 @@ export class MockRendererAdapter implements RendererAdapter {
     return this.cameraAngles.get(h) ?? { alpha: 0, beta: 0, radius: 0 };
   }
   getCameraForward(h: CameraHandle, out: Vec3): Vec3 {
+    // A free 6-DOF perspective camera carries a full orientation quaternion, so
+    // its forward is `q · (+Z)` — the canonical convention (identity → +Z) the
+    // contract locks across every adapter. Resolve it FIRST; fall through to the
+    // arc-camera alpha derivation (and the alpha=0 unknown-handle default).
+    const persp = this.perspectiveCameras.get(h);
+    if (persp) {
+      const f = rotateByQuat([0, 0, 1], persp.orientation);
+      out[0] = f[0]; out[1] = f[1]; out[2] = f[2];
+      return out;
+    }
     const a = this.cameraAngles.get(h);
     const alpha = a?.alpha ?? 0;
     out[0] = -Math.cos(alpha);

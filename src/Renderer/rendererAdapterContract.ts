@@ -75,14 +75,14 @@ export interface RendererAdapterContractOptions {
   /**
    * Engine adapters can't run a meaningful screen projection in the headless
    * test env (Babylon's NullEngine reports a zero-size viewport; Three under
-   * jsdom has no real canvas) — and Babylon/BabylonLite vs Three disagree on the
-   * identity-camera forward axis (+Z vs −Z), so a fixed in-front/behind point
-   * isn't engine-agnostic. Set this to skip the NUMERIC `worldToScreen`
-   * assertions (in-front projection + behind→false). The Mock adapter (a
+   * jsdom has no real canvas), so a fixed pixel-projection isn't comparable.
+   * Set this to skip the NUMERIC `worldToScreen` assertions (in-front projection
+   * + behind→false + the center/right/up basis check). The Mock adapter (a
    * deterministic Babylon-convention pinhole) runs the full battery as the
-   * reference; engines still run a no-throw smoke check. The pose round-trip and
-   * floating-origin round-trip are NOT gated — every adapter runs those. Default
-   * false.
+   * reference; engines still run a no-throw smoke check. The camera-FORWARD
+   * convention (identity → +Z) IS locked on every adapter via the ungated
+   * getCameraForward case (no viewport needed); the pose round-trip and
+   * floating-origin round-trip are likewise NOT gated. Default false.
    */
   skipProjection?: boolean;
   /**
@@ -137,6 +137,14 @@ export function runRendererAdapterContract(
       it('exposes a non-empty `kind` string', () => {
         expect(typeof adapter.kind).toBe('string');
         expect(adapter.kind.length).toBeGreaterThan(0);
+      });
+
+      it('setClearColor applies a scene background without throwing (3- and 4-arg)', () => {
+        // The SceneLoader routes a scene's top-level clearColor through here.
+        expect(() => {
+          adapter.setClearColor(0.01, 0.012, 0.04, 1);
+          adapter.setClearColor(0.2, 0.2, 0.3);
+        }).not.toThrow();
       });
     });
 
@@ -532,6 +540,21 @@ export function runRendererAdapterContract(
         expect(Math.abs(dot)).toBeCloseTo(1, 4);
       });
 
+      it('an identity-orientation perspective camera looks down +Z (canonical forward)', () => {
+        // THE convention lock, ungated so it runs on EVERY adapter (no viewport
+        // needed): identity orientation → camera forward = +Z, right +X, up +Y
+        // (Babylon-LH / Mock reference). A chase camera trailing a +Z-facing ship
+        // and sharing its orientation therefore looks FORWARD, toward the ship —
+        // not away from it. (Engines that natively look down −Z must compensate.)
+        const h = adapter.createPerspectiveCamera('fwd', persp);
+        adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+        const fwd: Vec3 = [0, 0, 0];
+        adapter.getCameraForward(h, fwd);
+        expect(fwd[2]).toBeGreaterThan(0.99); // points +Z
+        expect(Math.abs(fwd[0])).toBeLessThan(0.02);
+        expect(Math.abs(fwd[1])).toBeLessThan(0.02);
+      });
+
       if (!options.skipProjection) {
         it('worldToScreen projects an in-front point to finite pixels and returns true', () => {
           const h = adapter.createPerspectiveCamera('hud', persp);
@@ -543,6 +566,22 @@ export function runRendererAdapterContract(
           expect(visible).toBe(true);
           expect(Number.isFinite(out.x)).toBe(true);
           expect(Number.isFinite(out.y)).toBe(true);
+        });
+
+        it('worldToScreen lands a straight-ahead +Z point near screen center, with +X right and +Y up', () => {
+          // Confirms the FULL canonical basis through the projection: a point dead
+          // ahead (0,0,10) maps near center; nudging it +X moves it right (larger
+          // pixel-x); nudging +Y moves it up (smaller pixel-y).
+          const h = adapter.createPerspectiveCamera('center', persp);
+          adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+          const center: ScreenPoint = { x: NaN, y: NaN };
+          const right: ScreenPoint = { x: NaN, y: NaN };
+          const up: ScreenPoint = { x: NaN, y: NaN };
+          expect(adapter.worldToScreen(0, 0, 10, center)).toBe(true);
+          expect(adapter.worldToScreen(2, 0, 10, right)).toBe(true);
+          expect(adapter.worldToScreen(0, 2, 10, up)).toBe(true);
+          expect(right.x).toBeGreaterThan(center.x); // +X world → screen-right
+          expect(up.y).toBeLessThan(center.y); // +Y world → screen-up (smaller pixel-y)
         });
 
         it('worldToScreen returns false for a point behind the camera and leaves `out` untouched', () => {

@@ -433,6 +433,15 @@ export interface RendererAdapter {
    */
   getRenderingCanvas(): HTMLCanvasElement | null;
 
+  /**
+   * Set the scene background / clear color (linear RGB, `a` default 1). This is
+   * the runtime equivalent of {@link RendererInitOptions.clearColor} — the
+   * SceneLoader applies a scene's top-level `clearColor` through it AFTER init,
+   * so a scene authored with a dark-space background shows that color instead of
+   * the engine default. Safe to call before init (no-op until the scene exists).
+   */
+  setClearColor(r: number, g: number, b: number, a?: number): void;
+
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle;
   /**
    * Asynchronously load a 3D model (glTF/GLB) from `spec.url` and register it

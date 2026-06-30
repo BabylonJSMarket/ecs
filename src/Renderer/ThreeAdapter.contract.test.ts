@@ -43,11 +43,12 @@ runRendererAdapterContract('Three (headless)', () => new ThreeAdapter(), {
   skipThinField: true,
   skipMeshLoad: true, // needs a real GLB fetch; covered by the browser demo
   skipTextureLoad: true, // needs a real image fetch; covered by the browser demo
-  // jsdom has no real canvas/size, and Three's identity-camera forward is −Z
-  // (vs the Mock/Babylon +Z convention), so the numeric worldToScreen
-  // in-front/behind assertions aren't engine-agnostic here. The pose round-trip
-  // and floating-origin round-trip still run; worldToScreen runs as a no-throw
-  // smoke check. Numeric projection is covered by the browser comparison demo.
+  // jsdom has no real canvas/size, so the numeric worldToScreen pixel
+  // assertions can't run here; worldToScreen runs as a no-throw smoke check and
+  // numeric projection is covered by the browser comparison demo. The pose
+  // round-trip, floating-origin round-trip, AND the camera-forward convention
+  // (identity → +Z — the ThreeAdapter applies a +Y look-flip so its free camera
+  // matches the Mock/Babylon convention instead of Three's native −Z) all run.
   skipProjection: true,
   setup(adapter) {
     // Wire the public engine fields + the private renderer/controls scaffolding

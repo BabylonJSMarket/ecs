@@ -166,6 +166,30 @@ export class BabylonAdapter implements RendererAdapter {
    */
   private perspectiveCameras = new Map<CameraHandle, UniversalCamera>();
   /**
+   * The CANONICAL orientation last handed to {@link createPerspectiveCamera} /
+   * {@link setCameraPose}, stored verbatim per handle so {@link getCameraPose}
+   * round-trips it losslessly. The quaternion baked onto the Babylon camera is
+   * `q ⊗ PERSP_LOOK_FLIP` (see below), so we cannot recover the input `q` from
+   * `camera.rotationQuaternion` alone.
+   */
+  private perspectiveOrientations = new Map<CameraHandle, Quaternion>();
+  /**
+   * 180° rotation about +Y, post-multiplied onto a free perspective camera's
+   * orientation. The CANONICAL convention is "identity orientation → camera
+   * looks down +Z" (Mock / Babylon-LH; locked by the contract). But this scene
+   * is RIGHT-HANDED (`useRightHandedSystem = true`, for glTF agreement), and a
+   * Babylon free camera there looks down its LOCAL −Z — so an identity
+   * `rotationQuaternion` aims −Z, AWAY from a ship at +Z (the chase-camera bug).
+   * Post-multiplying this flip makes the rendered forward = `q · (+Z)` and the
+   * rendered up = `q · (+Y)` for ANY orientation, so the camera looks where the
+   * canonical quaternion says (verified for roll/pitch/yaw), and BabylonLite /
+   * Three / Mock all agree.
+   */
+  private readonly perspLookFlip = new Quaternion(0, 1, 0, 0);
+  /** Canonical +Z axis (never mutated) + scratch, for deriving camera forward. */
+  private readonly _zAxisCanon = new Vector3(0, 0, 1);
+  private readonly _fwdScratch = new Vector3();
+  /**
    * Tracked floating-origin offset (Phase-1: contract-only / dormant). Babylon
    * has no built-in floating-origin field, so we store the value `setOriginOffset`
    * records and hand it back from `getOriginOffset`. No active per-frame rebase
@@ -274,6 +298,10 @@ export class BabylonAdapter implements RendererAdapter {
 
   getRenderingCanvas(): HTMLCanvasElement | null {
     return this.engine?.getRenderingCanvas() ?? null;
+  }
+
+  setClearColor(r: number, g: number, b: number, a = 1): void {
+    if (this.scene) this.scene.clearColor = new Color4(r, g, b, a);
   }
 
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle {
@@ -1290,6 +1318,18 @@ export class BabylonAdapter implements RendererAdapter {
     return { alpha: cam.alpha, beta: cam.beta, radius: cam.radius };
   }
   getCameraForward(h: CameraHandle, out: Vec3): Vec3 {
+    // Free 6-DOF perspective camera: forward = `q · (+Z)` from the CANONICAL
+    // orientation we stored (the +Y look-flip baked onto rotationQuaternion makes
+    // the RENDER look exactly this way — proven for roll/pitch/yaw). Derive it
+    // straight from the quaternion so the result is correct even before the first
+    // view-matrix recompute (getTarget() is stale until then), and so identity →
+    // +Z, the convention the contract locks.
+    const stored = this.perspectiveOrientations.get(h);
+    if (stored) {
+      this._zAxisCanon.rotateByQuaternionToRef(stored, this._fwdScratch);
+      out[0] = this._fwdScratch.x; out[1] = this._fwdScratch.y; out[2] = this._fwdScratch.z;
+      return out;
+    }
     const cam = this.cameras.get(h);
     if (!cam) {
       out[0] = 0; out[1] = 0; out[2] = -1;
@@ -1393,13 +1433,18 @@ export class BabylonAdapter implements RendererAdapter {
     // built-in inertial smoothing so the pose isn't lagged/lerped behind input.
     camera.inertia = 0;
     // Orientation lives on the quaternion — never Euler — so loops and rolls
-    // reach the renderer without a gimbal-flipping quat→Euler round-trip.
+    // reach the renderer without a gimbal-flipping quat→Euler round-trip. The
+    // canonical orientation `q` is post-flipped 180° about +Y so the camera
+    // renders looking down +Z at identity (see {@link perspLookFlip}); the
+    // verbatim `q` is remembered for the lossless getCameraPose round-trip.
     const q = spec.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
-    camera.rotationQuaternion = new Quaternion(q.x, q.y, q.z, q.w);
+    const handle = this.makeHandle<CameraHandle>('perspCamera', id);
+    const stored = new Quaternion(q.x, q.y, q.z, q.w);
+    this.perspectiveOrientations.set(handle, stored);
+    camera.rotationQuaternion = stored.multiply(this.perspLookFlip);
     // Make it the active camera (same as createArcCamera) so worldToScreen and
     // scene.render target it.
     this.scene.activeCamera = camera;
-    const handle = this.makeHandle<CameraHandle>('perspCamera', id);
     this.perspectiveCameras.set(handle, camera);
     return handle;
   }
@@ -1408,15 +1453,14 @@ export class BabylonAdapter implements RendererAdapter {
     const camera = this.perspectiveCameras.get(h);
     if (!camera) return;
     camera.position.set(position[0], position[1], position[2]);
-    // Write straight into the quaternion (creating it once if a caller posed a
-    // camera that somehow lost it) — no Euler conversion, so a rolling chase cam
-    // never gimbal-flips.
-    (camera.rotationQuaternion ??= new Quaternion()).copyFromFloats(
-      orientation.x,
-      orientation.y,
-      orientation.z,
-      orientation.w,
-    );
+    // Remember the canonical orientation verbatim (for getCameraPose), then bake
+    // `q ⊗ PERSP_LOOK_FLIP` onto the Babylon camera so the rendered forward is
+    // `q · (+Z)` — looking +Z at identity, toward a ship the camera trails. No
+    // Euler conversion, so a rolling chase cam never gimbal-flips.
+    let stored = this.perspectiveOrientations.get(h);
+    if (!stored) { stored = new Quaternion(); this.perspectiveOrientations.set(h, stored); }
+    stored.copyFromFloats(orientation.x, orientation.y, orientation.z, orientation.w);
+    stored.multiplyToRef(this.perspLookFlip, (camera.rotationQuaternion ??= new Quaternion()));
   }
 
   getCameraPose(h: CameraHandle, outPosition: Vec3, outOrientation: QuaternionSpec): void {
@@ -1426,10 +1470,12 @@ export class BabylonAdapter implements RendererAdapter {
     outPosition[0] = p.x;
     outPosition[1] = p.y;
     outPosition[2] = p.z;
-    // Babylon may hold the sign-flipped twin (q and −q are the same rotation);
-    // the contract compares up to sign, so hand back whatever it stores. Fall
-    // back to deriving one from the Euler rotation if a quaternion was cleared.
-    const q = camera.rotationQuaternion ?? Quaternion.FromEulerVector(camera.rotation);
+    // Hand back the CANONICAL orientation we stored verbatim — NOT the baked
+    // `rotationQuaternion` (which carries the +Y look-flip). Falls back to the
+    // baked/Euler form only for a camera posed before this map existed.
+    const q = this.perspectiveOrientations.get(h)
+      ?? camera.rotationQuaternion
+      ?? Quaternion.FromEulerVector(camera.rotation);
     outOrientation.x = q.x;
     outOrientation.y = q.y;
     outOrientation.z = q.z;
@@ -2159,6 +2205,7 @@ export class BabylonAdapter implements RendererAdapter {
     this.lights.clear();
     this.cameras.clear();
     this.perspectiveCameras.clear();
+    this.perspectiveOrientations.clear();
     this.originOffset[0] = this.originOffset[1] = this.originOffset[2] = 0;
     this.largeWorldEnabled = false;
     this.shadowGenerators.clear();

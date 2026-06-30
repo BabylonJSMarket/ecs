@@ -54,6 +54,12 @@ export interface SceneData {
   gameTitle?: string;
   /** Display title for this scene/level */
   sceneTitle?: string;
+  /**
+   * Scene background / clear color as linear RGBA (a defaults to 1). Applied to
+   * the active renderer on instantiation via `renderer.setClearColor`, so a
+   * scene can declare e.g. a dark-space `[0.01, 0.012, 0.04, 1]` background.
+   */
+  clearColor?: [number, number, number] | [number, number, number, number];
   /** Mechanic guide slug — renders Examples/mechanics/{slug}.mdx in the side panel */
   guide?: string;
   /** Entity ID to use as the "world" entity (for global components) */
@@ -382,6 +388,14 @@ export class SceneLoader {
       for (const componentType of Object.keys(entityData.components)) {
         usedComponents.add(componentType);
       }
+    }
+
+    // Apply the scene's background color to the active renderer (once, on the
+    // entity-creating pass — not the systems-only pass). The engine otherwise
+    // shows its own default clear color instead of the scene's authored one.
+    if (options.createEntities !== false && sceneData.clearColor && world.renderer) {
+      const [r, g, b, a = 1] = sceneData.clearColor;
+      world.renderer.setClearColor(r, g, b, a);
     }
 
     // Create entities from scene data (skipped on a systems-only pass).

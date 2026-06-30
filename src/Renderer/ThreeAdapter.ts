@@ -96,7 +96,16 @@ export class ThreeAdapter implements RendererAdapter {
   /** Parallel meshId → mesh lookup used by the physics adapter methods. */
   private meshesByMeshId = new Map<string, THREE.Mesh>();
   private lights = new Map<LightHandle, THREE.Light>();
-  private cameras = new Map<CameraHandle, { camera: THREE.PerspectiveCamera; controls?: unknown }>();
+  private cameras = new Map<CameraHandle, { camera: THREE.PerspectiveCamera; controls?: unknown; orientation?: { x: number; y: number; z: number; w: number } }>();
+  /**
+   * 180° rotation about +Y, lazily built from `this.THREE`. Post-multiplied onto
+   * a free perspective camera's quaternion so it renders looking down +Z at
+   * identity. Three cameras natively look down their LOCAL −Z; the canonical
+   * convention (Mock / Babylon-LH, locked by the contract) is identity → +Z, so
+   * the chase camera trails a +Z-facing ship and looks toward it. The flip makes
+   * `getWorldDirection` = `q · (+Z)` for any orientation.
+   */
+  private _perspLookFlip?: THREE.Quaternion;
   private shadowCasters = new Map<ShadowCasterHandle, { light: LightHandle; mesh: MeshHandle }>();
   private labels = new Map<LabelHandle, {
     sprite: THREE.Sprite;
@@ -255,6 +264,12 @@ export class ThreeAdapter implements RendererAdapter {
 
   getRenderingCanvas(): HTMLCanvasElement | null {
     return this.renderer?.domElement ?? this.canvas ?? null;
+  }
+
+  setClearColor(r: number, g: number, b: number, a = 1): void {
+    if (this.renderer && this.THREE) {
+      this.renderer.setClearColor(new this.THREE.Color(r, g, b), a);
+    }
   }
 
   createMesh(id: string, prim: PrimitiveSpec, mat?: MaterialSpec): MeshHandle {
@@ -1498,6 +1513,15 @@ export class ThreeAdapter implements RendererAdapter {
       out[0] = 0; out[1] = 0; out[2] = -1;
       return out;
     }
+    // A free 6-DOF perspective camera (no OrbitControls) is posed directly: its
+    // rendered look direction is `getWorldDirection` (Three's local −Z, world).
+    // After the +Y look-flip baked in setCameraPose, an identity-orientation
+    // camera reports forward = +Z — the canonical convention the contract locks.
+    if (!entry.controls && this.THREE) {
+      const d = entry.camera.getWorldDirection(this._wtsVec ??= new this.THREE.Vector3());
+      out[0] = d.x; out[1] = d.y; out[2] = d.z;
+      return out;
+    }
     const ctrl = entry.controls as { target: THREE.Vector3 } | undefined;
     const tx = ctrl?.target.x ?? 0;
     const ty = ctrl?.target.y ?? 0;
@@ -1667,18 +1691,26 @@ export class ThreeAdapter implements RendererAdapter {
       spec.far,
     );
     if (spec.position) camera.position.set(spec.position[0], spec.position[1], spec.position[2]);
-    if (spec.orientation) {
-      const q = spec.orientation;
-      camera.quaternion.set(q.x, q.y, q.z, q.w);
-    }
-    camera.updateMatrixWorld();
+    const orientation = spec.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
     // Free camera: NO OrbitControls — it's posed directly each frame via
     // setCameraPose. The absent `controls` is also how the pose setters tell a
     // free camera apart from an arc camera in the shared `cameras` registry.
     const handle = this.makeHandle<CameraHandle>('perspCamera', id);
-    this.cameras.set(handle, { camera });
+    this.cameras.set(handle, { camera, orientation: { x: 0, y: 0, z: 0, w: 1 } });
     this.activePerspectiveCamera = handle;
+    this.setCameraPose(handle, spec.position ?? [0, 0, 0], orientation);
     return handle;
+  }
+
+  /** 180°-about-+Y quaternion, lazily built once `this.THREE` exists. */
+  private perspLookFlip(): THREE.Quaternion {
+    if (!this._perspLookFlip) {
+      this._perspLookFlip = new this.THREE!.Quaternion().setFromAxisAngle(
+        new this.THREE!.Vector3(0, 1, 0),
+        Math.PI,
+      );
+    }
+    return this._perspLookFlip;
   }
 
   setCameraPose(h: CameraHandle, position: Vec3, orientation: Quaternion): void {
@@ -1687,9 +1719,18 @@ export class ThreeAdapter implements RendererAdapter {
     // are driven by orbit/target, not a direct pose).
     if (!entry || entry.controls) return;
     entry.camera.position.set(position[0], position[1], position[2]);
-    // Quaternion applied directly — no quat→Euler round-trip, so loops and rolls
-    // reach the renderer without gimbal flips. Three keeps it exactly as given.
-    entry.camera.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+    // Remember the CANONICAL orientation verbatim (for getCameraPose), then bake
+    // `q ⊗ yaw180` onto the camera so its rendered forward is `q · (+Z)` — looking
+    // +Z at identity, the canonical convention. No quat→Euler round-trip, so
+    // loops and rolls reach the renderer without gimbal flips.
+    (entry.orientation ??= { x: 0, y: 0, z: 0, w: 1 });
+    entry.orientation.x = orientation.x;
+    entry.orientation.y = orientation.y;
+    entry.orientation.z = orientation.z;
+    entry.orientation.w = orientation.w;
+    entry.camera.quaternion
+      .set(orientation.x, orientation.y, orientation.z, orientation.w)
+      .multiply(this.perspLookFlip());
     entry.camera.updateMatrixWorld();
   }
 
@@ -1700,12 +1741,14 @@ export class ThreeAdapter implements RendererAdapter {
     outPosition[0] = cam.position.x;
     outPosition[1] = cam.position.y;
     outPosition[2] = cam.position.z;
-    // Three stores the quaternion as set — possibly the sign-flipped twin of the
-    // input (q and −q are the same rotation).
-    outOrientation.x = cam.quaternion.x;
-    outOrientation.y = cam.quaternion.y;
-    outOrientation.z = cam.quaternion.z;
-    outOrientation.w = cam.quaternion.w;
+    // Hand back the canonical orientation stored verbatim — NOT the baked
+    // quaternion (which carries the +Y look-flip). Falls back to the raw camera
+    // quaternion only for an entry created before this map existed.
+    const q = entry.orientation ?? cam.quaternion;
+    outOrientation.x = q.x;
+    outOrientation.y = q.y;
+    outOrientation.z = q.z;
+    outOrientation.w = q.w;
   }
 
   worldToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
