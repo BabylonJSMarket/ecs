@@ -59,6 +59,18 @@ import type {
   Quaternion,
   ScreenPoint,
   Vec3,
+  // Phase-3 (Wingman) visual capabilities.
+  ProceduralMeshSpec,
+  DynamicTextureSpec,
+  ParticleBurstSpec,
+  ParticleEmitterSpec,
+  ParticleEmitterHandle,
+  GlowSpec,
+  BloomSpec,
+  MeshRenderOptions,
+  SunSpec,
+  Color4,
+  ModelFitSpec,
 } from './types';
 import type { Color } from './types';
 
@@ -81,6 +93,68 @@ function sphericalToCartesian(alpha: number, beta: number, radius: number, targe
     y: target[1] + radius * Math.cos(beta),
     z: target[2] + radius * sinBeta * Math.sin(alpha),
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase-3 (Wingman) shared pure math. These are ENGINE-FREE so the displaced
+// rock geometry the adapter tessellates and the surface point
+// `sampleProceduralSurface` reports come from ONE function — collision/occlusion
+// code and the renderer therefore agree on a single silhouette. The hash + octave
+// field are byte-identical to MockRendererAdapter's reference so the same seed
+// yields the same rock on every engine (Babylon/Three/Mock).
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Deterministic [0,1) hash of three integers — the Wingman asteroid noise source. */
+function rockHash3(a: number, b: number, c: number): number {
+  let n = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+}
+
+/** The three seeded-noise rock shapes share one radial displacement field. */
+function isRockShape(shape: ProceduralMeshSpec['shape']): boolean {
+  return shape === 'asteroid' || shape === 'oil-blob' || shape === 'asteroid-drop';
+}
+
+/**
+ * Displace a (need-not-be-unit) direction onto the seeded rock surface, writing
+ * the object-local point into `out`. Non-rock shapes (ship/missile/waypoint) have
+ * no radial field, so `out` is returned untouched. Identical to the Mock
+ * reference — same `(seed, dir)` ⇒ same point, on every adapter.
+ */
+function sampleRockSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3 {
+  if (!isRockShape(spec.shape)) return out;
+  const seed = spec.seed ?? 1;
+  const radius = spec.size[0];
+  const len = Math.hypot(dirX, dirY, dirZ) || 1;
+  const nx = dirX / len, ny = dirY / len, nz = dirZ / len;
+  // Deterministic multi-octave displacement keyed by seed + quantized direction.
+  // Quantizing maps the same vertex direction to the same offset on every run,
+  // so coincident icosphere vertices stay welded (no surface cracks).
+  let amp = 0.5;
+  let freq = 2;
+  let disp = 0;
+  for (let o = 0; o < 4; o++) {
+    const qx = Math.round(nx * freq * 8);
+    const qy = Math.round(ny * freq * 8);
+    const qz = Math.round(nz * freq * 8);
+    disp += (rockHash3(qx + seed, qy + seed * 31, qz + seed * 131) - 0.5) * amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  let r = radius * (1 + disp * 0.5); // silhouette varies ±~25%
+  // Optional cut-axis carve: flatten the cap on the far side of the plane.
+  if (spec.cutAxis && spec.cutDepth && spec.cutDepth > 0) {
+    const [cx, cy, cz] = spec.cutAxis;
+    const cl = Math.hypot(cx, cy, cz) || 1;
+    const proj = (nx * cx + ny * cy + nz * cz) / cl; // -1..1 along the cut normal
+    const threshold = 1 - spec.cutDepth;
+    if (proj > threshold) r = Math.min(r, radius * threshold);
+  }
+  out[0] = nx * r;
+  out[1] = ny * r;
+  out[2] = nz * r;
+  return out;
 }
 
 export class ThreeAdapter implements RendererAdapter {
@@ -203,6 +277,47 @@ export class ThreeAdapter implements RendererAdapter {
   private _tfRaycaster?: THREE.Raycaster;
   private _tfNdc?: THREE.Vector2;
   private _tfUpY?: THREE.Vector3;
+
+  // ─── Phase-3 (Wingman) state ───
+  /**
+   * Dynamic textures (CPU pixel buffer → DataTexture) deduped by the caller's
+   * key. The texture object itself lives in the shared `textures` map so the
+   * particle systems and `disposeTexture` resolve a handle uniformly, whether it
+   * came from `loadTexture` or `createDynamicTexture`.
+   */
+  private dynamicTexturesByKey = new Map<string, TextureHandle>();
+  /**
+   * Live particle systems (one-shot bursts + continuous emitters), advanced by
+   * the CPU integrator each render tick. Bursts auto-remove once every particle
+   * has died; emitters live until `disposeParticleEmitter`.
+   */
+  private particleRuntimes = new Set<ParticleRuntime>();
+  /** Continuous emitters addressable by handle for reposition / dispose. */
+  private particleEmitters = new Map<ParticleEmitterHandle, ParticleRuntime>();
+  /** Selective-glow config + whitelist, and HDR bloom config (approximated by a shared bloom pass). */
+  private glowSpec: GlowSpec | null = null;
+  private bloomSpec: BloomSpec | null = null;
+  private glowMeshes = new Set<MeshHandle>();
+  /**
+   * The post-process composer (RenderPass → UnrealBloomPass → OutputPass), built
+   * lazily once a real WebGLRenderer + the three/addons postprocessing bundle are
+   * available. Stays undefined under the headless contract (the stub renderer is
+   * rejected by `ensureComposer`'s capability guard), so glow/bloom are pure
+   * config bookkeeping there.
+   */
+  private composer?: { render(): void; setSize(w: number, h: number): void; dispose?(): void };
+  private bloomPass?: { strength: number; threshold: number; radius: number };
+  private composerPending = false;
+  /** Skybox-style meshes re-seated at the active camera each frame (infiniteDistance). */
+  private infiniteDistanceMeshes = new Set<THREE.Object3D>();
+  /**
+   * Camera-following sun: a DirectionalLight plus an emissive disc parked at a
+   * fixed offset from the active camera (so it reads as an infinitely distant
+   * star). Null until `createSun`; `getSunWorldPosition` reads the disc's world
+   * position.
+   */
+  private sun?: { light: THREE.DirectionalLight; disc: THREE.Mesh; direction: Vec3; distance: number };
+  private _sunVec?: THREE.Vector3;
 
   async init(canvas: HTMLCanvasElement, opts: RendererInitOptions = {}): Promise<void> {
     // Vite's import-analysis plugin resolves bare literal dynamic imports at
@@ -1279,9 +1394,17 @@ export class ThreeAdapter implements RendererAdapter {
     }
     const root = template.root.clone(true);
     root.name = id;
-    if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
-    if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
-    if (spec?.scale !== undefined) root.scale.setScalar(spec.scale);
+    if (spec?.fit) {
+      // Auto-fit a displayed ship GLB: measure the natural hierarchy (root still
+      // at clone-identity), normalize its longest HORIZONTAL extent to fitLength,
+      // then apply facing + offset so the nose points +Z. fitLength overrides the
+      // fixed scale multiplier.
+      this.applyModelFit(root, spec.fit, spec);
+    } else {
+      if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
+      if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+      if (spec?.scale !== undefined) root.scale.setScalar(spec.scale);
+    }
     root.visible = false; // start parked; setModelVisible reveals it
     this.scene.add(root);
     this.instantiatedModelRoots.set(id, root);
@@ -1300,6 +1423,38 @@ export class ThreeAdapter implements RendererAdapter {
       }
     }
     return handle;
+  }
+
+  /**
+   * Measure-and-normalize a loaded GLB hierarchy per {@link ModelFitSpec}: filter
+   * to the wanted body, scale its longest horizontal extent to `fitLength`, and
+   * apply yaw/pitch + yOffset so it faces +Z. Mirrors the Wingman BabylonRenderer's
+   * `setupShipGlb` fit-up. (Phase 3 just DISPLAYS — no blow-apart proxy.)
+   */
+  private applyModelFit(root: THREE.Object3D, fit: ModelFitSpec, spec?: ModelInstantiateSpec): void {
+    const T = this.THREE;
+    if (!T) return;
+    // meshNameFilter: one GLB can hold several bodies (freighter = TrainCar +
+    // TrainEngine) — keep only meshes whose name includes the substring.
+    if (fit.meshNameFilter) {
+      const filter = fit.meshNameFilter;
+      let anyMatch = false;
+      root.traverse((o) => { if ((o as THREE.Mesh).isMesh && o.name.includes(filter)) anyMatch = true; });
+      if (anyMatch) {
+        const drop: THREE.Object3D[] = [];
+        root.traverse((o) => { if ((o as THREE.Mesh).isMesh && !o.name.includes(filter)) drop.push(o); });
+        for (const o of drop) o.parent?.remove(o);
+      }
+    }
+    // Natural hierarchy size (root is at clone-identity here, so the bbox isn't
+    // contaminated by our own fit transform).
+    const size = new T.Box3().setFromObject(root).getSize(new T.Vector3());
+    const longest = Math.max(size.x, size.z, 1e-4); // longest HORIZONTAL extent
+    const scale = fit.fitLength !== undefined ? fit.fitLength / longest : (spec?.scale ?? 1);
+    root.scale.setScalar(scale);
+    root.rotation.set(fit.pitch ?? 0, fit.yaw ?? 0, 0);
+    const p = spec?.position ?? [0, 0, 0];
+    root.position.set(p[0], p[1] + (fit.yOffset ?? 0), p[2]);
   }
 
   setModelVisible(h: MeshHandle, visible: boolean): void {
@@ -1845,6 +2000,9 @@ export class ThreeAdapter implements RendererAdapter {
     const targets: THREE.Object3D[] = [];
     for (const [id, mesh] of this.meshesByMeshId) {
       if (opts?.meshPredicate && !opts.meshPredicate(id)) continue;
+      // Honor the per-mesh pickable flag set via setMeshRenderingOptions
+      // (decals / HUD widgets opt out of ray picks).
+      if (mesh.userData?.pickable === false) continue;
       idByMesh.set(mesh, id);
       targets.push(mesh);
     }
@@ -2048,6 +2206,598 @@ export class ThreeAdapter implements RendererAdapter {
     this.findAnimationAction(meshId, clipName)?.setEffectiveTimeScale(speed);
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // Phase-3 (Wingman) visual capabilities.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ─── Procedural seeded geometry ───
+  createProceduralMesh(id: string, spec: ProceduralMeshSpec, mat?: MaterialSpec): MeshHandle {
+    const T = this.requireThree();
+    const scene = this.scene!;
+    const isRock = isRockShape(spec.shape);
+    const geometry = isRock ? this.buildRockGeometry(T, spec) : this.buildShipGeometry(T, spec);
+
+    const col = spec.color ?? mat?.diffuse ?? [0.5, 0.5, 0.5];
+    const emissive = spec.emissive ?? 0;
+    const material = new T.MeshStandardMaterial({
+      color: this.toSRGB(col),
+      roughness: isRock ? 0.95 : 0.55,
+      metalness: isRock ? 0.05 : 0.25,
+      emissive: emissive > 0 ? this.toSRGB(col) : new T.Color(0, 0, 0),
+      emissiveIntensity: emissive,
+    });
+
+    const mesh = new T.Mesh(geometry, material);
+    mesh.name = id;
+    mesh.castShadow = true;
+    mesh.receiveShadow = isRock;
+    scene.add(mesh);
+
+    const handle = this.makeHandle<MeshHandle>('procMesh', id);
+    this.meshes.set(handle, mesh);
+    this.meshesByMeshId.set(id, mesh);
+    return handle;
+  }
+
+  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3 {
+    // Pure, engine-free shared math — usable before init(). Non-rock shapes leave
+    // `out` untouched (they have no radial surface field).
+    return sampleRockSurface(spec, dirX, dirY, dirZ, out);
+  }
+
+  /**
+   * Build a seeded rock by displacing every vertex of a unit icosphere with the
+   * SAME pure field `sampleProceduralSurface` exposes, so the rendered silhouette
+   * and the sampled surface agree byte-for-byte. Three is right-handed (matching
+   * the locked convention), so there's no winding flip. computeVertexNormals after
+   * the displacement re-lights the faceted rock correctly.
+   */
+  private buildRockGeometry(T: typeof THREE, spec: ProceduralMeshSpec): THREE.BufferGeometry {
+    // Map Babylon's edge-split `subdivisions` (triangles ≈ 20·N²) onto Three's
+    // icosahedron `detail` (triangles = 20·4^detail ⇒ N = 2^detail).
+    const subdivisions = spec.subdivisions ?? 14;
+    const detail = Math.max(1, Math.min(5, Math.round(Math.log2(Math.max(2, subdivisions)))));
+    const geo = new T.IcosahedronGeometry(1, detail);
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    const out: Vec3 = [0, 0, 0];
+    for (let i = 0; i < pos.count; i++) {
+      sampleRockSurface(spec, pos.getX(i), pos.getY(i), pos.getZ(i), out);
+      pos.setXYZ(i, out[0], out[1], out[2]);
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
+  /**
+   * Build a named ship/missile/waypoint silhouette as ONE merged BufferGeometry
+   * from welded primitive groups. Every shape is `+Z` forward, `+Y` up (the locked
+   * handedness). `size` is `[width, height, length]`.
+   */
+  private buildShipGeometry(T: typeof THREE, spec: ProceduralMeshSpec): THREE.BufferGeometry {
+    const W = spec.size[0] || 1;
+    const H = spec.size[1] || 0.5;
+    const L = spec.size[2] || 2;
+    const parts: THREE.BufferGeometry[] = [];
+    const box = (sx: number, sy: number, sz: number, tx = 0, ty = 0, tz = 0) => {
+      const g = new T.BoxGeometry(sx, sy, sz); g.translate(tx, ty, tz); return g;
+    };
+    // Cylinder/cone along +Z (Three builds them along +Y; rotateX(+90°) maps +Y→+Z).
+    const cylZ = (r: number, len: number, tz = 0) => {
+      const g = new T.CylinderGeometry(r, r, len, 12); g.rotateX(Math.PI / 2); g.translate(0, 0, tz); return g;
+    };
+    const coneZ = (r: number, len: number, tz = 0) => {
+      const g = new T.ConeGeometry(r, len, 12); g.rotateX(Math.PI / 2); g.translate(0, 0, tz); return g;
+    };
+    switch (spec.shape) {
+      case 'spaceplane':
+      case 'kilrathi': {
+        const wing = spec.shape === 'kilrathi' ? 0.85 : 1; // kilrathi = swept/stubbier
+        parts.push(cylZ(W * 0.16, L * 0.7, 0));                  // fuselage
+        parts.push(coneZ(W * 0.16, L * 0.32, L * 0.5));          // nose at +Z
+        parts.push(box(W, H * 0.18, L * 0.34 * wing, 0, 0, -L * 0.05)); // wings
+        parts.push(box(W * 0.08, H * 0.55, L * 0.18, 0, H * 0.3, -L * 0.4)); // tail fin
+        break;
+      }
+      case 'freighter-head': {
+        parts.push(box(W, H, L * 0.8));                          // locomotive body
+        parts.push(box(W * 0.6, H * 0.7, L * 0.3, 0, H * 0.2, L * 0.45)); // cockpit nub
+        break;
+      }
+      case 'freighter-car':
+        parts.push(box(W, H, L));                                // long container car
+        break;
+      case 'missile':
+        parts.push(cylZ(W * 0.4, L * 0.8, -L * 0.1));            // body
+        parts.push(coneZ(W * 0.4, L * 0.3, L * 0.45));           // nose cone +Z
+        parts.push(box(W * 1.2, H * 0.05, L * 0.12, 0, 0, -L * 0.4)); // tail fins
+        break;
+      case 'waypoint':
+        parts.push(new T.TorusGeometry(W * 0.5, W * 0.06, 12, 32)); // gate ring (faces +Z)
+        break;
+      default:
+        parts.push(box(W, H, L));
+    }
+    return mergeGeometriesPure(T, parts);
+  }
+
+  // ─── Runtime dynamic textures (CPU pixel buffer → DataTexture) ───
+  createDynamicTexture(key: string, spec: DynamicTextureSpec): TextureHandle {
+    const T = this.requireThree();
+    const cached = this.dynamicTexturesByKey.get(key);
+    if (cached) return cached;
+    const tex = new T.DataTexture(spec.pixels, spec.width, spec.height, T.RGBAFormat, T.UnsignedByteType);
+    tex.colorSpace = spec.srgb ? T.SRGBColorSpace : T.LinearSRGBColorSpace;
+    const wrap =
+      spec.wrap === 'clamp' ? T.ClampToEdgeWrapping :
+      spec.wrap === 'mirror' ? T.MirroredRepeatWrapping :
+      T.RepeatWrapping;
+    tex.wrapS = wrap;
+    tex.wrapT = wrap;
+    if (spec.uScale !== undefined || spec.vScale !== undefined) {
+      tex.repeat.set(spec.uScale ?? 1, spec.vScale ?? 1);
+    }
+    // DataTextures default to no mipmaps; keep it simple (no POT-warning paths).
+    tex.minFilter = T.LinearFilter;
+    tex.magFilter = T.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    const handle = this.makeHandle<TextureHandle>('dynTex', key);
+    this.textures.set(handle, tex);
+    this.dynamicTexturesByKey.set(key, handle);
+    return handle;
+  }
+
+  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
+    const tex = this.textures.get(h) as THREE.DataTexture | undefined;
+    if (!tex || !tex.image) return;
+    (tex.image as { data: Uint8ClampedArray | Uint8Array }).data = pixels;
+    tex.needsUpdate = true;
+  }
+
+  // ─── Particle systems (THREE.Points pool + CPU integrator) ───
+  createParticleBurst(spec: ParticleBurstSpec): void {
+    const T = this.requireThree();
+    const tex = this.textures.get(spec.texture);
+    const rt = this.createParticleRuntime(T, {
+      capacity: Math.max(1, spec.count),
+      texture: tex,
+      blend: spec.blend ?? 'add',
+      position: spec.position,
+      emitRadius: spec.emitRadius,
+      emitRadiusRange: spec.emitRadiusRange ?? 1,
+      minSize: spec.minSize, maxSize: spec.maxSize,
+      minLifeTime: spec.minLifeTime, maxLifeTime: spec.maxLifeTime,
+      minEmitPower: spec.minEmitPower, maxEmitPower: spec.maxEmitPower,
+      color1: spec.color1, color2: spec.color2, colorDead: spec.colorDead,
+      gravity: spec.gravity ?? [0, 0, 0],
+    });
+    rt.continuous = false;
+    rt.duration = spec.duration ?? 0.06;
+    // One-shot: emit the whole count now (Babylon's manualEmitCount).
+    for (let i = 0; i < spec.count; i++) this.spawnParticle(rt);
+    this.particleRuntimes.add(rt);
+  }
+
+  createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
+    const T = this.requireThree();
+    const tex = this.textures.get(spec.texture);
+    const rt = this.createParticleRuntime(T, {
+      capacity: spec.capacity,
+      texture: tex,
+      blend: spec.blend ?? 'add',
+      position: spec.position,
+      emitRadius: spec.emitRadius,
+      emitRadiusRange: spec.emitRadiusRange ?? 0.2,
+      minSize: spec.minSize, maxSize: spec.maxSize,
+      minLifeTime: spec.minLifeTime, maxLifeTime: spec.maxLifeTime,
+      minEmitPower: spec.minEmitPower, maxEmitPower: spec.maxEmitPower,
+      color1: spec.color1, color2: spec.color2, colorDead: spec.colorDead,
+      gravity: spec.gravity ?? [0, 0, 0],
+    });
+    rt.continuous = true;
+    rt.followCamera = !!spec.followCamera;
+    rt.emitRate = spec.emitRate;
+    // Pre-warm so the field is already populated on frame 1 (Babylon preWarmCycles).
+    const cycles = spec.preWarmCycles ?? 0;
+    for (let c = 0; c < cycles; c++) this.advanceParticleRuntime(rt, 1 / 60, undefined);
+    const handle = this.makeHandle<ParticleEmitterHandle>('emitter', id);
+    this.particleRuntimes.add(rt);
+    this.particleEmitters.set(handle, rt);
+    return handle;
+  }
+
+  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
+    const rt = this.particleEmitters.get(h);
+    if (!rt) return;
+    rt.position = [x, y, z];
+    // followCamera overrides this each frame; otherwise it sticks.
+    if (!rt.followCamera) rt.points.position.set(x, y, z);
+  }
+
+  disposeParticleEmitter(h: ParticleEmitterHandle): void {
+    const rt = this.particleEmitters.get(h);
+    if (!rt) return; // idempotent
+    this.disposeParticleRuntime(rt);
+    this.particleEmitters.delete(h);
+  }
+
+  /** Allocate a Points pool + custom additive material; the integrator fills it. */
+  private createParticleRuntime(
+    T: typeof THREE,
+    o: {
+      capacity: number; texture?: THREE.Texture; blend: 'add' | 'standard' | 'multiply';
+      position?: Vec3; emitRadius: number; emitRadiusRange: number;
+      minSize: number; maxSize: number; minLifeTime: number; maxLifeTime: number;
+      minEmitPower: number; maxEmitPower: number;
+      color1: Color4; color2: Color4; colorDead: Color4; gravity: Vec3;
+    },
+  ): ParticleRuntime {
+    const capacity = Math.max(1, o.capacity);
+    const geometry = new T.BufferGeometry();
+    const positions = new Float32Array(capacity * 3);
+    const colors = new Float32Array(capacity * 3);
+    const sizes = new Float32Array(capacity);
+    const posAttr = new T.Float32BufferAttribute(positions, 3);
+    const colAttr = new T.Float32BufferAttribute(colors, 3);
+    const sizeAttr = new T.Float32BufferAttribute(sizes, 1);
+    posAttr.setUsage(T.DynamicDrawUsage);
+    colAttr.setUsage(T.DynamicDrawUsage);
+    sizeAttr.setUsage(T.DynamicDrawUsage);
+    geometry.setAttribute('position', posAttr);
+    geometry.setAttribute('pcolor', colAttr);
+    geometry.setAttribute('psize', sizeAttr);
+    geometry.setDrawRange(0, 0);
+    geometry.boundingSphere = new T.Sphere(new T.Vector3(), 1e7); // never frustum-cull
+
+    const blending =
+      o.blend === 'standard' ? T.NormalBlending :
+      o.blend === 'multiply' ? T.MultiplyBlending :
+      T.AdditiveBlending;
+    const material = new T.ShaderMaterial({
+      uniforms: { map: { value: o.texture ?? null }, useMap: { value: o.texture ? 1 : 0 } },
+      vertexShader: PARTICLE_VERT,
+      fragmentShader: PARTICLE_FRAG,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending,
+    });
+
+    const points = new T.Points(geometry, material);
+    points.name = 'particles';
+    points.frustumCulled = false;
+    (points as unknown as { raycast: () => void }).raycast = () => {};
+    const pos = o.position ?? [0, 0, 0];
+    points.position.set(pos[0], pos[1], pos[2]);
+    this.scene!.add(points);
+
+    const slots: ParticleSlot[] = new Array(capacity);
+    for (let i = 0; i < capacity; i++) {
+      slots[i] = { px: 0, py: 0, pz: 0, vx: 0, vy: 0, vz: 0, age: 0, life: 0, size: 0, active: false };
+    }
+    return {
+      points, geometry, material, posAttr, colAttr, sizeAttr,
+      positions, colors, sizes, slots,
+      continuous: false, followCamera: false, emitRate: 0, emitAccumulator: 0,
+      age: 0, duration: undefined, position: [pos[0], pos[1], pos[2]],
+      emitRadius: o.emitRadius, emitRadiusRange: o.emitRadiusRange,
+      minSize: o.minSize, maxSize: o.maxSize, minLifeTime: o.minLifeTime, maxLifeTime: o.maxLifeTime,
+      minEmitPower: o.minEmitPower, maxEmitPower: o.maxEmitPower,
+      color1: o.color1, color2: o.color2, colorDead: o.colorDead, gravity: o.gravity,
+    };
+  }
+
+  /** Activate one dead slot from a sphere emitter; returns false when full. */
+  private spawnParticle(rt: ParticleRuntime): boolean {
+    let slot: ParticleSlot | undefined;
+    for (let i = 0; i < rt.slots.length; i++) {
+      if (!rt.slots[i]!.active) { slot = rt.slots[i]; break; }
+    }
+    if (!slot) return false;
+    // Random unit direction on a sphere (emitRadiusRange biases toward an outer
+    // shell as it → 1; a thin inner core as it → 0).
+    const u = Math.random() * 2 - 1;
+    const th = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const dx = s * Math.cos(th), dy = s * Math.sin(th), dz = u;
+    const rFrac = 1 - Math.random() * (1 - rt.emitRadiusRange);
+    const r = rt.emitRadius * rFrac;
+    slot.px = dx * r; slot.py = dy * r; slot.pz = dz * r; // LOCAL to the Points origin
+    const power = rt.minEmitPower + Math.random() * (rt.maxEmitPower - rt.minEmitPower);
+    slot.vx = dx * power; slot.vy = dy * power; slot.vz = dz * power;
+    slot.life = rt.minLifeTime + Math.random() * (rt.maxLifeTime - rt.minLifeTime);
+    slot.size = rt.minSize + Math.random() * (rt.maxSize - rt.minSize);
+    slot.age = 0;
+    slot.active = true;
+    return true;
+  }
+
+  private _pcol: Color4 = [0, 0, 0, 0];
+  /** Advance one particle system by `dt`, repacking live particles into the GPU buffers. */
+  private advanceParticleRuntime(rt: ParticleRuntime, dt: number, camera?: THREE.PerspectiveCamera): void {
+    if (rt.followCamera && camera) rt.points.position.copy(camera.position);
+    if (rt.continuous) {
+      rt.emitAccumulator += rt.emitRate * dt;
+      while (rt.emitAccumulator >= 1) {
+        rt.emitAccumulator -= 1;
+        if (!this.spawnParticle(rt)) { rt.emitAccumulator = 0; break; }
+      }
+    }
+    let live = 0;
+    const col = this._pcol;
+    for (let i = 0; i < rt.slots.length; i++) {
+      const sl = rt.slots[i]!;
+      if (!sl.active) continue;
+      sl.age += dt;
+      if (sl.age >= sl.life) { sl.active = false; continue; }
+      sl.vx += rt.gravity[0] * dt; sl.vy += rt.gravity[1] * dt; sl.vz += rt.gravity[2] * dt;
+      sl.px += sl.vx * dt; sl.py += sl.vy * dt; sl.pz += sl.vz * dt;
+      // Two-segment color-over-life lerp: color1 → color2 → colorDead.
+      lerpColor4(rt.color1, rt.color2, rt.colorDead, sl.age / sl.life, col);
+      const a = col[3];
+      const j3 = live * 3;
+      rt.positions[j3] = sl.px; rt.positions[j3 + 1] = sl.py; rt.positions[j3 + 2] = sl.pz;
+      // Pre-multiply by alpha so additive blending fades correctly without a
+      // per-vertex alpha channel.
+      rt.colors[j3] = col[0] * a; rt.colors[j3 + 1] = col[1] * a; rt.colors[j3 + 2] = col[2] * a;
+      rt.sizes[live] = sl.size;
+      live++;
+    }
+    rt.geometry.setDrawRange(0, live);
+    rt.posAttr.needsUpdate = true;
+    rt.colAttr.needsUpdate = true;
+    rt.sizeAttr.needsUpdate = true;
+    if (!rt.continuous) {
+      rt.age += dt;
+      // Auto-dispose a one-shot burst once every particle has died.
+      if (live === 0 && rt.age > 0) this.disposeParticleRuntime(rt);
+    }
+  }
+
+  private updateParticles(dt: number, camera: THREE.PerspectiveCamera): void {
+    // Snapshot first: advanceParticleRuntime can dispose (mutating the set).
+    for (const rt of [...this.particleRuntimes]) this.advanceParticleRuntime(rt, dt, camera);
+  }
+
+  private disposeParticleRuntime(rt: ParticleRuntime): void {
+    this.scene?.remove(rt.points);
+    rt.geometry.dispose();
+    rt.material.dispose();
+    this.particleRuntimes.delete(rt);
+  }
+
+  // ─── Post-process glow / bloom + emissive + render ordering ───
+  setGlowLayer(spec: GlowSpec | null): void {
+    this.glowSpec = spec;
+    if (!spec) {
+      for (const h of this.glowMeshes) this.meshes.get(h)?.layers.disable(BLOOM_LAYER);
+      this.glowMeshes.clear();
+    }
+    this.refreshComposer();
+  }
+
+  addGlowMesh(h: MeshHandle): void {
+    if (!this.glowSpec) return; // no-op when the glow layer is disabled
+    this.glowMeshes.add(h);
+    this.meshes.get(h)?.layers.enable(BLOOM_LAYER);
+  }
+
+  removeGlowMesh(h: MeshHandle): void {
+    this.glowMeshes.delete(h);
+    this.meshes.get(h)?.layers.disable(BLOOM_LAYER);
+  }
+
+  setBloom(spec: BloomSpec | null): void {
+    this.bloomSpec = spec;
+    this.refreshComposer();
+  }
+
+  /**
+   * Reconcile the post-process composer with the current glow/bloom config.
+   * Selective glow is APPROXIMATED by the same UnrealBloom pass (the whitelist is
+   * tracked via {@link BLOOM_LAYER} for a future selective-bloom mask); both
+   * `glowSpec` and `bloomSpec` drive one bloom pass. Building the composer is
+   * lazy + capability-guarded, so headless callers (the contract) just bookkeep.
+   */
+  private refreshComposer(): void {
+    if (this.bloomSpec || this.glowSpec) {
+      void this.ensureComposer();
+    } else {
+      this.disposeComposer();
+    }
+    if (this.bloomPass) {
+      this.bloomPass.strength = this.bloomSpec?.weight ?? this.glowSpec?.intensity ?? 0.8;
+      if (this.bloomSpec?.threshold !== undefined) this.bloomPass.threshold = this.bloomSpec.threshold;
+      if (this.bloomSpec?.scale !== undefined) this.bloomPass.radius = this.bloomSpec.scale;
+    }
+  }
+
+  private async ensureComposer(): Promise<void> {
+    if (this.composer || this.composerPending) return;
+    const T = this.THREE;
+    // Only a real WebGLRenderer (not the headless contract stub) exposes these —
+    // bail otherwise so glow/bloom stay pure config bookkeeping in tests.
+    const r = this.renderer as unknown as { getSize?: unknown; getPixelRatio?: unknown } | undefined;
+    if (!T || !this.scene || !r || typeof r.getSize !== 'function' || typeof r.getPixelRatio !== 'function') {
+      return;
+    }
+    this.composerPending = true;
+    try {
+      const ecSpec = 'three/addons/postprocessing/EffectComposer.js';
+      const rpSpec = 'three/addons/postprocessing/RenderPass.js';
+      const ubSpec = 'three/addons/postprocessing/UnrealBloomPass.js';
+      const opSpec = 'three/addons/postprocessing/OutputPass.js';
+      const [ec, rp, ub, op] = await Promise.all([
+        import(/* @vite-ignore */ ecSpec) as Promise<{ EffectComposer: new (r: unknown) => { addPass(p: unknown): void; render(): void; setSize(w: number, h: number): void; dispose(): void } }>,
+        import(/* @vite-ignore */ rpSpec) as Promise<{ RenderPass: new (s: unknown, c: unknown) => unknown }>,
+        import(/* @vite-ignore */ ubSpec) as Promise<{ UnrealBloomPass: new (res: unknown, strength: number, radius: number, threshold: number) => { strength: number; threshold: number; radius: number } }>,
+        import(/* @vite-ignore */ opSpec) as Promise<{ OutputPass: new () => unknown }>,
+      ]);
+      const size = (this.renderer as unknown as { getSize(v: THREE.Vector2): THREE.Vector2 }).getSize(new T.Vector2());
+      const composer = new ec.EffectComposer(this.renderer);
+      composer.addPass(new rp.RenderPass(this.scene, this.renderCamera()));
+      const strength = this.bloomSpec?.weight ?? this.glowSpec?.intensity ?? 0.8;
+      const bloom = new ub.UnrealBloomPass(
+        new T.Vector2(size.x || 1, size.y || 1),
+        strength,
+        this.bloomSpec?.scale ?? 0.4,
+        this.bloomSpec?.threshold ?? 0.85,
+      );
+      composer.addPass(bloom);
+      composer.addPass(new op.OutputPass());
+      this.composer = composer;
+      this.bloomPass = bloom;
+    } catch (err) {
+      // Addons unavailable (or a non-GL renderer) — fall back to direct rendering.
+      console.warn('[ThreeAdapter] bloom composer unavailable; rendering without post-process', err);
+    } finally {
+      this.composerPending = false;
+    }
+  }
+
+  private disposeComposer(): void {
+    this.composer?.dispose?.();
+    this.composer = undefined;
+    this.bloomPass = undefined;
+  }
+
+  setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (!mesh) return; // unknown id → no-op
+    const apply = (m: THREE.Material): void => {
+      const anyMat = m as unknown as {
+        isMeshBasicMaterial?: boolean;
+        color?: THREE.Color;
+        emissive?: THREE.Color;
+        emissiveIntensity?: number;
+        needsUpdate?: boolean;
+      };
+      if (anyMat.isMeshBasicMaterial || !anyMat.emissive) {
+        // Unlit material (sun disc, waypoint gate): treat the value as a literal,
+        // clamped color so bloom + tonemap don't blow it to white.
+        anyMat.color?.setRGB(clamp01(r), clamp01(g), clamp01(b));
+      } else {
+        // Lit material: emissive overpowers lighting at the given intensity.
+        anyMat.emissive.setRGB(r, g, b);
+        anyMat.emissiveIntensity = intensity;
+      }
+      anyMat.needsUpdate = true;
+    };
+    const mat = mesh.material;
+    if (Array.isArray(mat)) mat.forEach(apply);
+    else if (mat) apply(mat);
+  }
+
+  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    // renderingGroupId → renderOrder (higher draws later/on top); Three has no
+    // separate render groups, but renderOrder gives the same layering.
+    if (opts.renderingGroupId !== undefined) mesh.renderOrder = opts.renderingGroupId;
+    const applyMat = (m: THREE.Material): void => {
+      const anyMat = m as unknown as { depthWrite?: boolean; fog?: boolean; needsUpdate?: boolean };
+      if (opts.disableDepthWrite !== undefined) anyMat.depthWrite = !opts.disableDepthWrite;
+      if (opts.applyFog !== undefined && 'fog' in anyMat) anyMat.fog = opts.applyFog;
+      anyMat.needsUpdate = true;
+    };
+    const mat = mesh.material;
+    if (Array.isArray(mat)) mat.forEach(applyMat);
+    else if (mat) applyMat(mat);
+    // Three has no infiniteDistance flag — re-seat the mesh at the camera each
+    // frame instead (skybox dome that never parallaxes).
+    if (opts.infiniteDistance !== undefined) {
+      if (opts.infiniteDistance) { this.infiniteDistanceMeshes.add(mesh); mesh.frustumCulled = false; }
+      else this.infiniteDistanceMeshes.delete(mesh);
+    }
+    // pickable → a userData flag honored by pickAtScreenPoint's target filter.
+    if (opts.pickable !== undefined) mesh.userData.pickable = opts.pickable;
+  }
+
+  private updateInfiniteDistance(camera: THREE.PerspectiveCamera): void {
+    for (const mesh of this.infiniteDistanceMeshes) mesh.position.copy(camera.position);
+  }
+
+  // ─── Camera-following sun + directional-light query ───
+  createSun(id: string, spec: SunSpec): LightHandle {
+    const T = this.requireThree();
+    const scene = this.scene!;
+    // Directional light whose rays TRAVEL along spec.direction (it sits up-sun).
+    const light = new T.DirectionalLight(this.toSRGB(spec.diffuse), spec.intensity);
+    light.name = `Sun_${id}`;
+    const dl = Math.hypot(spec.direction[0], spec.direction[1], spec.direction[2]) || 1;
+    const dir: Vec3 = [spec.direction[0] / dl, spec.direction[1] / dl, spec.direction[2] / dl];
+    scene.add(light);
+    scene.add(light.target);
+
+    if (spec.shadow?.enabled) {
+      this.enableShadowMap();
+      light.castShadow = true;
+      light.shadow.mapSize.set(spec.shadow.mapSize, spec.shadow.mapSize);
+      if (spec.shadow.bias !== undefined) light.shadow.bias = spec.shadow.bias;
+      if (spec.shadow.normalBias !== undefined) light.shadow.normalBias = spec.shadow.normalBias;
+      // Wide orthographic frustum so big rocks cast across the field.
+      const cam = light.shadow.camera;
+      const ext = Math.max(50, spec.distance / 20);
+      cam.left = -ext; cam.right = ext; cam.top = ext; cam.bottom = -ext;
+      cam.near = 0.5; cam.far = spec.distance * 2;
+      cam.updateProjectionMatrix();
+      // Three has no shadow `darkness`/`forceBackFacesOnly`; closest analogues:
+      if (spec.shadow.forceBackFacesOnly) light.shadow.bias = light.shadow.bias || -0.0008;
+    }
+
+    // Emissive disc parked at `camera − direction*distance` so it reads as an
+    // infinitely-distant star (unlit, never fogged, drawn after geometry).
+    const discDiameter = spec.discDiameter ?? 90;
+    const dc = spec.discColor ?? [10, 9, 7];
+    const discMat = new T.MeshBasicMaterial({
+      color: new T.Color(dc[0], dc[1], dc[2]), // HDR (raw, no sRGB clamp) to clear bloom
+      depthWrite: false,
+      fog: false,
+    });
+    const disc = new T.Mesh(new T.SphereGeometry(discDiameter / 2, 24, 24), discMat);
+    disc.name = `SunDisc_${id}`;
+    disc.frustumCulled = false;
+    disc.renderOrder = 1;
+    (disc as unknown as { raycast: () => void }).raycast = () => {};
+    scene.add(disc);
+
+    this.sun = { light, disc, direction: dir, distance: spec.distance };
+    this.positionSunDisc(this.renderCamera());
+
+    const handle = this.makeHandle<LightHandle>('sun', id);
+    this.lights.set(handle, light);
+    return handle;
+  }
+
+  getSunWorldPosition(out: Vec3): Vec3 | null {
+    if (!this.sun || !this.THREE) return null;
+    const v = this.sun.disc.getWorldPosition(this._sunVec ??= new this.THREE.Vector3());
+    out[0] = v.x; out[1] = v.y; out[2] = v.z;
+    return out;
+  }
+
+  /** Re-seat the sun disc + light up-sun of the active camera (parallax-free). */
+  private positionSunDisc(camera?: THREE.PerspectiveCamera): void {
+    if (!this.sun) return;
+    const cam = camera ?? this.renderCamera();
+    const cx = cam?.position.x ?? 0, cy = cam?.position.y ?? 0, cz = cam?.position.z ?? 0;
+    const { direction: d, distance: dist } = this.sun;
+    this.sun.disc.position.set(cx - d[0] * dist, cy - d[1] * dist, cz - d[2] * dist);
+    // Park the directional light up-sun of the camera and aim it at the camera so
+    // its ortho shadow frustum tracks the scene around the player.
+    this.sun.light.position.set(cx - d[0] * dist * 0.5, cy - d[1] * dist * 0.5, cz - d[2] * dist * 0.5);
+    this.sun.light.target.position.set(cx, cy, cz);
+  }
+
+  /** sRGB-tagged color (matches how scene-JSON numbers are authored). */
+  private toSRGB(rgb: Color): THREE.Color {
+    const T = this.THREE!;
+    return new T.Color().setRGB(rgb[0], rgb[1], rgb[2], T.SRGBColorSpace);
+  }
+
   startLoop(onFrame: (dtSeconds: number) => void): void {
     if (!this.renderer || !this.scene) {
       throw new Error('ThreeAdapter.startLoop: call init() first');
@@ -2077,7 +2827,14 @@ export class ThreeAdapter implements RendererAdapter {
       const camera = this.renderCamera();
       if (camera) {
         if (this.billboards.size > 0) this.updateBillboards(camera);
-        this.renderer!.render(this.scene!, camera);
+        // Phase-3: keep the camera-anchored sun + skybox-style meshes parked on
+        // the camera, advance the CPU particle integrator, then draw — through
+        // the bloom composer when one is live, else straight to the canvas.
+        if (this.sun) this.positionSunDisc(camera);
+        if (this.infiniteDistanceMeshes.size > 0) this.updateInfiniteDistance(camera);
+        if (this.particleRuntimes.size > 0) this.updateParticles(dt, camera);
+        if (this.composer) this.composer.render();
+        else this.renderer!.render(this.scene!, camera);
       }
       this.rafId = requestAnimationFrame(tick);
     };
@@ -2100,6 +2857,7 @@ export class ThreeAdapter implements RendererAdapter {
     // `false` keeps the canvas CSS size intact (set by the grid layout); only
     // the drawing buffer resizes.
     this.renderer.setSize(w, h, false);
+    this.composer?.setSize(w, h);
     const aspect = w / h;
     for (const { camera } of this.cameras.values()) {
       camera.aspect = aspect;
@@ -2114,7 +2872,10 @@ export class ThreeAdapter implements RendererAdapter {
     // between the resize and the next rAF tick.
     if (this.scene) {
       const camera = this.renderCamera();
-      if (camera) this.renderer.render(this.scene, camera);
+      if (camera) {
+        if (this.composer) this.composer.render();
+        else this.renderer.render(this.scene, camera);
+      }
     }
   }
 
@@ -2130,6 +2891,28 @@ export class ThreeAdapter implements RendererAdapter {
     this.pendingRapierCreates = [];
     this.billboards.clear();
     this.boxExtentOverrides.clear();
+    // ─── Phase-3 teardown (while the scene still exists) ───
+    for (const rt of this.particleRuntimes) {
+      this.scene?.remove(rt.points);
+      rt.geometry.dispose();
+      rt.material.dispose();
+    }
+    this.particleRuntimes.clear();
+    this.particleEmitters.clear();
+    this.disposeComposer();
+    this.glowMeshes.clear();
+    this.glowSpec = null;
+    this.bloomSpec = null;
+    this.infiniteDistanceMeshes.clear();
+    if (this.sun) {
+      this.scene?.remove(this.sun.light);
+      this.scene?.remove(this.sun.light.target);
+      this.scene?.remove(this.sun.disc);
+      this.sun.disc.geometry.dispose();
+      (this.sun.disc.material as THREE.Material).dispose();
+      this.sun = undefined;
+    }
+    this.dynamicTexturesByKey.clear();
     this.renderer?.dispose();
     this.renderer = undefined;
     this.scene = undefined;
@@ -2199,6 +2982,130 @@ function flattenSegments(lines: Vec3[][]): number[] {
     }
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase-3 module-level helpers, constants, shaders + particle runtime types.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Three layer index used to mark glow-whitelisted meshes (selective-bloom mask). */
+const BLOOM_LAYER = 1;
+
+/** Clamp a scalar to [0,1]. */
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * Two-segment color-over-life lerp `c1 → c2 → dead` at `t∈[0,1]`, written into
+ * `out` (RGBA). The first half blends start→mid, the second half mid→dead — the
+ * Wingman fire/energy color ramp.
+ */
+function lerpColor4(c1: Color4, c2: Color4, dead: Color4, t: number, out: Color4): Color4 {
+  let a: Color4, b: Color4, f: number;
+  if (t < 0.5) { a = c1; b = c2; f = t * 2; }
+  else { a = c2; b = dead; f = (t - 0.5) * 2; }
+  out[0] = a[0] + (b[0] - a[0]) * f;
+  out[1] = a[1] + (b[1] - a[1]) * f;
+  out[2] = a[2] + (b[2] - a[2]) * f;
+  out[3] = a[3] + (b[3] - a[3]) * f;
+  return out;
+}
+
+/**
+ * Merge welded primitive groups into ONE non-indexed BufferGeometry by
+ * concatenating position + normal attributes — a pure stand-in for the addons
+ * `mergeGeometries` so the synchronous `createProceduralMesh` never needs the
+ * (async) three/addons bundle. Each part's own translate/rotate is already baked
+ * into its geometry before it reaches here.
+ */
+function mergeGeometriesPure(T: typeof THREE, parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  let total = 0;
+  const flat: THREE.BufferGeometry[] = [];
+  for (const p of parts) {
+    if (!p.getAttribute('normal')) p.computeVertexNormals();
+    const ni = p.index ? p.toNonIndexed() : p;
+    total += (ni.getAttribute('position') as THREE.BufferAttribute).count;
+    flat.push(ni);
+  }
+  const positions = new Float32Array(total * 3);
+  const normals = new Float32Array(total * 3);
+  let off = 0;
+  for (const ni of flat) {
+    const pp = ni.getAttribute('position') as THREE.BufferAttribute;
+    const nn = ni.getAttribute('normal') as THREE.BufferAttribute;
+    positions.set(pp.array as ArrayLike<number>, off * 3);
+    normals.set(nn.array as ArrayLike<number>, off * 3);
+    off += pp.count;
+  }
+  const geo = new T.BufferGeometry();
+  geo.setAttribute('position', new T.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new T.Float32BufferAttribute(normals, 3));
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/**
+ * Soft-sprite point shader: per-particle size (size-attenuated by view depth) +
+ * a pre-multiplied RGB color (alpha folded in so additive blending fades without
+ * a per-vertex alpha channel), sampling the dot texture.
+ */
+const PARTICLE_VERT = /* glsl */ `
+  attribute float psize;
+  attribute vec3 pcolor;
+  varying vec3 vColor;
+  void main() {
+    vColor = pcolor;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = psize * (320.0 / max(0.001, -mv.z));
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const PARTICLE_FRAG = /* glsl */ `
+  uniform sampler2D map;
+  uniform int useMap;
+  varying vec3 vColor;
+  void main() {
+    vec4 tex = useMap == 1 ? texture2D(map, gl_PointCoord) : vec4(1.0);
+    gl_FragColor = vec4(vColor * tex.rgb, 1.0) * tex.a;
+  }
+`;
+
+/** One CPU-integrated particle slot (object-local to its Points origin). */
+interface ParticleSlot {
+  px: number; py: number; pz: number;
+  vx: number; vy: number; vz: number;
+  age: number; life: number; size: number;
+  active: boolean;
+}
+
+/** A live particle system (one-shot burst or continuous emitter). */
+interface ParticleRuntime {
+  points: THREE.Points;
+  geometry: THREE.BufferGeometry;
+  material: THREE.ShaderMaterial;
+  posAttr: THREE.BufferAttribute;
+  colAttr: THREE.BufferAttribute;
+  sizeAttr: THREE.BufferAttribute;
+  positions: Float32Array;
+  colors: Float32Array;
+  sizes: Float32Array;
+  slots: ParticleSlot[];
+  continuous: boolean;
+  followCamera: boolean;
+  emitRate: number;
+  emitAccumulator: number;
+  age: number;
+  duration?: number;
+  position: Vec3;
+  emitRadius: number;
+  emitRadiusRange: number;
+  minSize: number; maxSize: number;
+  minLifeTime: number; maxLifeTime: number;
+  minEmitPower: number; maxEmitPower: number;
+  color1: Color4; color2: Color4; colorDead: Color4;
+  gravity: Vec3;
 }
 
 interface XYZ { x: number; y: number; z: number }

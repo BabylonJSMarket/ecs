@@ -33,6 +33,11 @@ import type {
   ScreenPoint,
   ThinFieldSpec,
   Vec3,
+  ProceduralMeshSpec,
+  DynamicTextureSpec,
+  ParticleBurstSpec,
+  ParticleEmitterSpec,
+  SunSpec,
 } from './types';
 
 export interface RendererAdapterContractOptions {
@@ -938,6 +943,181 @@ export function runRendererAdapterContract(
         });
       });
     }
+
+    // ---------------------------------------------------------------------
+    // Phase-3: procedural seeded geometry. The mesh build is a no-throw smoke
+    // (engines tessellate; Mock records), but `sampleProceduralSurface` is PURE
+    // shared math — its determinism + cut-axis behavior run on EVERY adapter,
+    // no GPU needed. That's the seeded-mesh-is-deterministic contract.
+    // ---------------------------------------------------------------------
+    describe('procedural mesh', () => {
+      const rock: ProceduralMeshSpec = { shape: 'asteroid', seed: 7, size: [100, 0, 0] };
+
+      it('createProceduralMesh returns distinct handles and round-trips position', () => {
+        const a = adapter.createProceduralMesh('rock-a', rock);
+        const b = adapter.createProceduralMesh('rock-b', { ...rock, seed: 8 });
+        expect(a).not.toBe(b);
+        adapter.setMeshPosition(a, 5, -6, 7);
+        const out: Vec3 = [0, 0, 0];
+        adapter.getMeshWorldPosition(a, out);
+        // Mock round-trips exactly; engines place the displaced mesh root there too.
+        expect(Number.isFinite(out[0])).toBe(true);
+        expect(() => adapter.disposeMesh(a)).not.toThrow();
+      });
+
+      it('createProceduralMesh accepts every named shape + a cut-axis carve without throwing', () => {
+        const shapes: ProceduralMeshSpec['shape'][] = [
+          'asteroid', 'oil-blob', 'asteroid-drop', 'spaceplane', 'kilrathi',
+          'freighter-head', 'freighter-car', 'missile', 'waypoint',
+        ];
+        expect(() => {
+          for (const shape of shapes) {
+            adapter.createProceduralMesh(`s-${shape}`, { shape, seed: 3, size: [4, 2, 9], color: [0.6, 0.6, 0.6] });
+          }
+          adapter.createProceduralMesh('carved', { ...rock, cutAxis: [0, 1, 0], cutDepth: 0.4 });
+        }).not.toThrow();
+      });
+
+      it('sampleProceduralSurface is deterministic for the same seed + direction', () => {
+        const a: Vec3 = [0, 0, 0];
+        const b: Vec3 = [0, 0, 0];
+        adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, a);
+        adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, b);
+        expect(a).toEqual(b); // byte-identical — the determinism lock
+        expect(Number.isFinite(a[0]) && Number.isFinite(a[1]) && Number.isFinite(a[2])).toBe(true);
+        const r = Math.hypot(a[0], a[1], a[2]);
+        expect(r).toBeGreaterThan(0); // displaced onto a real radius
+      });
+
+      it('sampleProceduralSurface changes with the seed and leaves non-rock shapes untouched', () => {
+        const a: Vec3 = [0, 0, 0];
+        const c: Vec3 = [0, 0, 0];
+        adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, a);
+        adapter.sampleProceduralSurface({ ...rock, seed: 99 }, 0.3, 0.5, 0.81, c);
+        expect(c).not.toEqual(a); // a different seed yields a different surface
+        // Ship/missile/waypoint have no radial field → `out` is returned untouched.
+        const untouched: Vec3 = [1, 2, 3];
+        const ret = adapter.sampleProceduralSurface({ shape: 'missile', size: [1, 1, 4] }, 0, 0, 1, untouched);
+        expect(ret).toBe(untouched);
+        expect(untouched).toEqual([1, 2, 3]);
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture). The
+    // dedupe-by-key + update round-trip is bookkeeping (a raw RGBA upload needs
+    // no canvas/fetch), so it runs on every adapter.
+    // ---------------------------------------------------------------------
+    describe('dynamic textures', () => {
+      const px = (n: number) => new Uint8ClampedArray(n * n * 4).fill(180);
+      const spec: DynamicTextureSpec = { width: 4, height: 4, pixels: px(4), hasAlpha: true };
+
+      it('createDynamicTexture dedupes by key; update + new key are safe', () => {
+        const a = adapter.createDynamicTexture('rock-albedo', spec);
+        const again = adapter.createDynamicTexture('rock-albedo', spec);
+        const other = adapter.createDynamicTexture('rock-normal', spec);
+        expect(again).toBe(a); // same key → same handle
+        expect(other).not.toBe(a); // distinct key → distinct handle
+        expect(() => adapter.updateDynamicTexture(a, px(4))).not.toThrow();
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Phase-3: particle systems. Burst is fire-and-forget; the continuous
+    // emitter handle round-trips create → setPosition → dispose. Smoke only —
+    // particle simulation isn't asserted headlessly.
+    // ---------------------------------------------------------------------
+    describe('particles', () => {
+      const tex = (a: RendererAdapter) => a.createDynamicTexture('dot', { width: 2, height: 2, pixels: new Uint8ClampedArray(2 * 2 * 4).fill(255), hasAlpha: true });
+
+      it('createParticleBurst fires a one-shot without throwing', () => {
+        const burst: ParticleBurstSpec = {
+          position: [0, 0, 0], texture: tex(adapter), count: 200, emitRadius: 0.2,
+          minSize: 0.5, maxSize: 2.5, minLifeTime: 0.6, maxLifeTime: 1.6,
+          minEmitPower: 20, maxEmitPower: 120,
+          color1: [3, 2.5, 1, 1], color2: [2.5, 0.8, 0.2, 1], colorDead: [0.3, 0.05, 0, 0],
+          blend: 'add', duration: 0.06,
+        };
+        expect(() => adapter.createParticleBurst(burst)).not.toThrow();
+      });
+
+      it('createParticleEmitter handle round-trips setPosition + dispose; handles are distinct', () => {
+        const base: ParticleEmitterSpec = {
+          texture: tex(adapter), capacity: 1000, emitRate: 1800, emitRadius: 60,
+          minSize: 0.04, maxSize: 0.12, minLifeTime: 1.4, maxLifeTime: 3.2,
+          minEmitPower: 0, maxEmitPower: 0,
+          color1: [0.7, 0.85, 1, 0.9], color2: [0.55, 0.7, 1, 0.7], colorDead: [0.4, 0.6, 1, 0],
+          blend: 'add', followCamera: true,
+        };
+        const a = adapter.createParticleEmitter('dust', base);
+        const b = adapter.createParticleEmitter('trail', { ...base, followCamera: false });
+        expect(a).toBeDefined();
+        expect(a).not.toBe(b);
+        expect(() => {
+          adapter.setParticleEmitterPosition(b, 10, 0, -5);
+          adapter.disposeParticleEmitter(a);
+          adapter.disposeParticleEmitter(b);
+          adapter.disposeParticleEmitter(a); // idempotent
+        }).not.toThrow();
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Phase-3: glow / bloom / emissive / render ordering. All smoke-safe,
+    // including on unknown ids/handles (Systems call them speculatively).
+    // ---------------------------------------------------------------------
+    describe('glow, bloom & render order', () => {
+      it('setGlowLayer / addGlowMesh / removeGlowMesh / setBloom are smoke-safe (incl. disable)', () => {
+        const m = adapter.createProceduralMesh('gate', { shape: 'waypoint', size: [20, 0, 0], emissive: 1 });
+        expect(() => {
+          adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.5 });
+          adapter.addGlowMesh(m);
+          adapter.removeGlowMesh(m);
+          adapter.setBloom({ weight: 0.3, threshold: 0.8 });
+          adapter.setBloom(null);
+          adapter.setGlowLayer(null);
+          adapter.addGlowMesh(m); // no-op after disable
+        }).not.toThrow();
+      });
+
+      it('setMeshEmissiveById no-ops on an unknown id; setMeshRenderingOptions is smoke-safe', () => {
+        const m = adapter.createMesh('sky', { kind: 'box' });
+        expect(() => {
+          adapter.setMeshEmissiveById('does-not-exist', 1, 0.5, 0.2, 2);
+          adapter.setMeshRenderingOptions(m, { renderingGroupId: 1, disableDepthWrite: true, infiniteDistance: true, applyFog: false, pickable: false });
+        }).not.toThrow();
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Phase-3: camera-following sun + directional-light query.
+    // ---------------------------------------------------------------------
+    describe('sun', () => {
+      const sunSpec: SunSpec = {
+        direction: [0, -0.22, 1], distance: 2400, intensity: 4.5,
+        diffuse: [1, 0.95, 0.85], specular: [1, 0.95, 0.85], discDiameter: 90,
+        discColor: [14, 12, 8.5], shadow: { enabled: true, mapSize: 2048, darkness: 0.25 },
+      };
+
+      it('getSunWorldPosition returns null before any sun is created', () => {
+        const out: Vec3 = [42, 42, 42];
+        expect(adapter.getSunWorldPosition(out)).toBeNull();
+        expect(out).toEqual([42, 42, 42]); // untouched on null
+      });
+
+      it('createSun returns a light handle; getSunWorldPosition then writes a finite Vec3 and returns out', () => {
+        // A perspective camera exists first so engine suns can park their disc
+        // relative to the active camera.
+        adapter.createPerspectiveCamera('cam', { fov: Math.PI / 3, near: 0.1, far: 200000 });
+        const light = adapter.createSun('sun', sunSpec);
+        expect(light).toBeDefined();
+        expect(() => adapter.updateLightIntensity(light, 3.0)).not.toThrow();
+        const out: Vec3 = [0, 0, 0];
+        const returned = adapter.getSunWorldPosition(out);
+        expect(returned).toBe(out);
+        expect(Number.isFinite(out[0]) && Number.isFinite(out[1]) && Number.isFinite(out[2])).toBe(true);
+      });
+    });
 
     // ---------------------------------------------------------------------
     // Lifecycle

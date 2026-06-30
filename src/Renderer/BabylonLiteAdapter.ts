@@ -67,6 +67,16 @@ import type {
   Quaternion,
   ScreenPoint,
   Vec3,
+  // ─── Phase-3 (Wingman) visual capabilities ───
+  ProceduralMeshSpec,
+  DynamicTextureSpec,
+  ParticleBurstSpec,
+  ParticleEmitterSpec,
+  ParticleEmitterHandle,
+  GlowSpec,
+  BloomSpec,
+  MeshRenderOptions,
+  SunSpec,
 } from './types';
 
 /** Babylon Lite mesh-like node (Mesh extends SceneNode; both carry transforms). */
@@ -75,6 +85,74 @@ type LiteMesh = BLNS.Mesh;
 interface LiteTemplate {
   container: BLNS.AssetContainer;
   animationNames: string[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase-3 shared pure math (engine-free). Identical to the reference noise in
+// MockRendererAdapter so seeded asteroid/oil-blob geometry is byte-identical
+// across adapters: the same `seed` produces the same silhouette on every
+// client, whether the surface is tessellated here (WebGPU) or only sampled in
+// a test. Kept at module scope (no `this`) so it can't drift per-instance.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Deterministic [0,1) hash of three integers — mirrors MockRendererAdapter.mockHash3. */
+function liteHash3(a: number, b: number, c: number): number {
+  let n = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+}
+
+/** Normalize a 3-tuple in place-free style (returns a fresh unit tuple). */
+function unit3(x: number, y: number, z: number): [number, number, number] {
+  const l = Math.hypot(x, y, z) || 1;
+  return [x / l, y / l, z / l];
+}
+
+/**
+ * Generate a unit icosphere by recursively subdividing an icosahedron `depth`
+ * times (triangles = 20·4^depth). Returns shared-vertex unit directions plus
+ * triangle indices. The directions are fed through `sampleProceduralSurface`
+ * to displace the rock; the topology is deterministic so the geometry is too.
+ */
+function buildIcosphere(depth: number): { dirs: Array<[number, number, number]>; indices: number[] } {
+  const t = (1 + Math.sqrt(5)) / 2;
+  const dirs: Array<[number, number, number]> = [
+    [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+    [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+    [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+  ].map(([x, y, z]) => unit3(x, y, z));
+  let faces: Array<[number, number, number]> = [
+    [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+    [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+    [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+    [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+  ];
+  const midCache = new Map<number, number>();
+  const midpoint = (a: number, b: number): number => {
+    const key = a < b ? a * 100000 + b : b * 100000 + a;
+    const hit = midCache.get(key);
+    if (hit !== undefined) return hit;
+    const va = dirs[a];
+    const vb = dirs[b];
+    const m = unit3((va[0] + vb[0]) / 2, (va[1] + vb[1]) / 2, (va[2] + vb[2]) / 2);
+    const idx = dirs.length;
+    dirs.push(m);
+    midCache.set(key, idx);
+    return idx;
+  };
+  for (let d = 0; d < depth; d++) {
+    const next: Array<[number, number, number]> = [];
+    for (const [a, b, c] of faces) {
+      const ab = midpoint(a, b);
+      const bc = midpoint(b, c);
+      const ca = midpoint(c, a);
+      next.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
+    }
+    faces = next;
+  }
+  const indices: number[] = [];
+  for (const [a, b, c] of faces) indices.push(a, b, c);
+  return { dirs, indices };
 }
 
 export class BabylonLiteAdapter implements RendererAdapter {
@@ -154,6 +232,31 @@ export class BabylonLiteAdapter implements RendererAdapter {
    * a later setMeshPosition would clobber a position-baked pivot and sink the mesh.
    */
   private pivotOffsets = new Map<MeshHandle, number>();
+
+  // ─── Phase-3 (Wingman) visual state ───
+  /** Dynamic textures (CPU pixel buffer → GPU), deduped by key like loadTexture. */
+  private dynamicTextures = new Map<string, TextureHandle>();
+  /** Handle → live Texture2D, so updateDynamicTexture can re-upload pixels. */
+  private dynamicTextureObjects = new Map<TextureHandle, BLNS.Texture2D>();
+  /**
+   * Continuous particle emitters (space dust, trails). Lite's preview build has
+   * no ParticleSystem function (only the billboard-sprite / node-block-emitter
+   * surface), so — matching this adapter's other documented stubs — the emitter
+   * tracks position/follow state and round-trips create→setPosition→dispose
+   * without yet streaming GPU particles. See createParticleEmitter.
+   */
+  private particleEmitters = new Map<ParticleEmitterHandle, { position: Vec3; followCamera: boolean }>();
+  /** Selective-glow config + whitelist (empty until addGlowMesh). Null = disabled. */
+  private glowSpec: GlowSpec | null = null;
+  private glowMeshes = new Set<MeshHandle>();
+  /** HDR bloom config recorded for the pipeline. Null = disabled. */
+  private bloomSpec: BloomSpec | null = null;
+  /**
+   * The camera-following sun: its directional light, the emissive disc parked at
+   * a fixed offset from the active camera, and a `disposed` flag the per-frame
+   * follow observer checks (Lite's onBeforeRender has no unsubscribe handle).
+   */
+  private sun?: { light: BLNS.DirectionalLight; disc: LiteMesh; offsetLH: Vec3; disposed: boolean };
 
   private onFrame?: (dt: number) => void;
   /** True once the per-frame onBeforeRender hook is installed (install once). */
@@ -1490,6 +1593,366 @@ export class BabylonLiteAdapter implements RendererAdapter {
     }
   }
 
+  // ─── Phase-3: procedural seeded geometry ───
+  createProceduralMesh(id: string, spec: ProceduralMeshSpec, mat?: MaterialSpec): MeshHandle {
+    const engine = this.requireEngine();
+    const scene = this.requireScene();
+    const isRock = spec.shape === 'asteroid' || spec.shape === 'oil-blob' || spec.shape === 'asteroid-drop';
+    const mesh = isRock
+      ? this.buildRockMesh(engine, id, spec)
+      : this.buildNamedShape(engine, id, spec);
+    mesh.name = id;
+    this.applyProceduralMaterial(mesh, spec, mat);
+    BL.addToScene(scene, mesh);
+
+    const handle = this.makeHandle<MeshHandle>('procMesh', id);
+    this.meshes.set(handle, mesh);
+    this.meshesByMeshId.set(id, mesh);
+    return handle;
+  }
+
+  /**
+   * Tessellate a seeded rock: subdivide an icosphere, displace each unit vertex
+   * by {@link sampleProceduralSurface} (the SAME deterministic noise the contract
+   * asserts), then upload via Lite's `createMeshFromData`. Positions are negated
+   * on Z and the winding reversed so the right-handed object surface renders with
+   * outward faces in Lite's left-handed frame (the conjugate of the Z-flip the
+   * rest of the adapter applies to positions/cameras).
+   */
+  private buildRockMesh(engine: BLNS.EngineContext, id: string, spec: ProceduralMeshSpec): LiteMesh {
+    const sub = spec.subdivisions ?? 8;
+    const depth = sub <= 4 ? 1 : sub <= 8 ? 2 : sub <= 16 ? 3 : 4;
+    const { dirs, indices } = buildIcosphere(depth);
+
+    const positions = new Float32Array(dirs.length * 3);
+    const tmp: Vec3 = [0, 0, 0];
+    for (let i = 0; i < dirs.length; i++) {
+      const d = dirs[i];
+      this.sampleProceduralSurface(spec, d[0], d[1], d[2], tmp);
+      positions[i * 3] = tmp[0];
+      positions[i * 3 + 1] = tmp[1];
+      positions[i * 3 + 2] = -tmp[2]; // RH→LH
+    }
+
+    // Reverse winding (the Z-flip mirrors handedness, which inverts front faces).
+    const tri = new Uint32Array(indices.length);
+    for (let f = 0; f < indices.length; f += 3) {
+      tri[f] = indices[f];
+      tri[f + 1] = indices[f + 2];
+      tri[f + 2] = indices[f + 1];
+    }
+
+    const normals = this.computeNormals(positions, tri);
+    const mesh = BL.createMeshFromData(engine, id, positions, normals, tri);
+    // Stamp local bounds so getMeshBoundingBoxExtents / shadow framing have an AABB.
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+      if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
+    }
+    mesh.boundMin = [minX, minY, minZ];
+    mesh.boundMax = [maxX, maxY, maxZ];
+    return mesh;
+  }
+
+  /** Per-vertex normals from face cross-products (Lite's createMeshFromData wants explicit normals). */
+  private computeNormals(positions: Float32Array, indices: Uint32Array): Float32Array {
+    const normals = new Float32Array(positions.length);
+    for (let f = 0; f < indices.length; f += 3) {
+      const ia = indices[f] * 3, ib = indices[f + 1] * 3, ic = indices[f + 2] * 3;
+      const ax = positions[ia], ay = positions[ia + 1], az = positions[ia + 2];
+      const bx = positions[ib], by = positions[ib + 1], bz = positions[ib + 2];
+      const cx = positions[ic], cy = positions[ic + 1], cz = positions[ic + 2];
+      const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+      const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+      const nx = e1y * e2z - e1z * e2y;
+      const ny = e1z * e2x - e1x * e2z;
+      const nz = e1x * e2y - e1y * e2x;
+      normals[ia] += nx; normals[ia + 1] += ny; normals[ia + 2] += nz;
+      normals[ib] += nx; normals[ib + 1] += ny; normals[ib + 2] += nz;
+      normals[ic] += nx; normals[ic + 1] += ny; normals[ic + 2] += nz;
+    }
+    for (let i = 0; i < normals.length; i += 3) {
+      const l = Math.hypot(normals[i], normals[i + 1], normals[i + 2]) || 1;
+      normals[i] /= l; normals[i + 1] /= l; normals[i + 2] /= l;
+    }
+    return normals;
+  }
+
+  /**
+   * Build a named ship / projectile / gate silhouette. Lite's preview build has
+   * no welded-primitive-group builder, so these are best-effort primitive
+   * approximations sized to {@link ProceduralMeshSpec.size} (`[width, height,
+   * length]`) — enough to display and address like any mesh. The full bespoke
+   * hull geometry (Spaceplane/Kilrathi/Freighter) is deferred with the GLB path.
+   */
+  private buildNamedShape(engine: BLNS.EngineContext, id: string, spec: ProceduralMeshSpec): LiteMesh {
+    const [w, h, l] = spec.size;
+    switch (spec.shape) {
+      case 'missile':
+        return BL.createCylinder(engine, { height: l || 4, diameter: w || 0.5, tessellation: 12 });
+      case 'waypoint':
+        return BL.createTorus(engine, {
+          diameter: (w || 10) * 2,
+          thickness: Math.max(1, (w || 10) * 0.08),
+          tessellation: 48,
+        });
+      default: {
+        // spaceplane / kilrathi / freighter-head / freighter-car → a hull-sized box.
+        const mesh = BL.createBox(engine, 1);
+        mesh.scaling.set(w || 1, h || 1, l || 1);
+        return mesh;
+      }
+    }
+  }
+
+  /** Material for a procedural mesh: explicit MaterialSpec, else color/emissive from the spec. */
+  private applyProceduralMaterial(mesh: LiteMesh, spec: ProceduralMeshSpec, mat?: MaterialSpec): void {
+    if (mat) {
+      this.applyMaterialSpec(mesh, { kind: 'box' } as PrimitiveSpec, mat);
+      return;
+    }
+    const color = spec.color ?? [0.5, 0.5, 0.5];
+    const emissive = spec.emissive ?? 0;
+    const unlit = spec.shape === 'waypoint';
+    if (unlit || emissive > 0) {
+      mesh.material = BL.createPbrMaterial({
+        unlit,
+        baseColorFactor: [color[0], color[1], color[2], 1],
+        emissiveColor: emissive > 0 ? [color[0] * emissive, color[1] * emissive, color[2] * emissive] : undefined,
+        metallicFactor: 0,
+        roughnessFactor: 1,
+      });
+    } else {
+      const std = BL.createStandardMaterial();
+      std.diffuseColor = [color[0], color[1], color[2]];
+      mesh.material = std;
+    }
+  }
+
+  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3 {
+    const isRock = spec.shape === 'asteroid' || spec.shape === 'oil-blob' || spec.shape === 'asteroid-drop';
+    if (!isRock) return out; // ship/missile/waypoint have no radial surface field
+    const seed = spec.seed ?? 1;
+    const radius = spec.size[0];
+    const len = Math.hypot(dirX, dirY, dirZ) || 1;
+    const nx = dirX / len, ny = dirY / len, nz = dirZ / len;
+    // Deterministic multi-octave displacement keyed by seed + quantized dir, so
+    // identical (seed, dir) ⇒ identical radius on every adapter/run.
+    let amp = 0.5;
+    let freq = 2;
+    let disp = 0;
+    for (let o = 0; o < 4; o++) {
+      const qx = Math.round(nx * freq * 8);
+      const qy = Math.round(ny * freq * 8);
+      const qz = Math.round(nz * freq * 8);
+      disp += (liteHash3(qx + seed, qy + seed * 31, qz + seed * 131) - 0.5) * amp;
+      amp *= 0.5;
+      freq *= 2;
+    }
+    let r = radius * (1 + disp * 0.5); // silhouette varies ±~25%
+    // Optional cut-axis carve: flatten the cap on the far side of the plane.
+    if (spec.cutAxis && spec.cutDepth && spec.cutDepth > 0) {
+      const [cx, cy, cz] = spec.cutAxis;
+      const cl = Math.hypot(cx, cy, cz) || 1;
+      const proj = (nx * cx + ny * cy + nz * cz) / cl;
+      const threshold = 1 - spec.cutDepth;
+      if (proj > threshold) r = Math.min(r, radius * threshold);
+    }
+    out[0] = nx * r;
+    out[1] = ny * r;
+    out[2] = nz * r;
+    return out;
+  }
+
+  // ─── Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture) ───
+  // Real on Lite: the WebGPU raw-texture path via createTexture2DFromPixels /
+  // updateTexture2DFromPixels (the rawTexture extension Lite registers itself).
+  createDynamicTexture(key: string, spec: DynamicTextureSpec): TextureHandle {
+    const engine = this.requireEngine();
+    const cached = this.dynamicTextures.get(key);
+    if (cached) return cached;
+    const data = spec.pixels instanceof Uint8Array ? spec.pixels : new Uint8Array(spec.pixels);
+    // String-literal union rather than naming `GPUAddressMode` (the @webgpu/types
+    // global isn't installed in this package); it's accepted by the option type.
+    const addr: 'clamp-to-edge' | 'mirror-repeat' | 'repeat' =
+      spec.wrap === 'clamp' ? 'clamp-to-edge' : spec.wrap === 'mirror' ? 'mirror-repeat' : 'repeat';
+    const tex = BL.createTexture2DFromPixels(engine, data, spec.width, spec.height, {
+      srgb: spec.srgb ?? false,
+      addressModeU: addr,
+      addressModeV: addr,
+      minFilter: 'linear',
+      magFilter: 'linear',
+    });
+    const handle = this.makeHandle<TextureHandle>('dynTex', key);
+    this.dynamicTextures.set(key, handle);
+    this.dynamicTextureObjects.set(handle, tex);
+    return handle;
+  }
+
+  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
+    const tex = this.dynamicTextureObjects.get(h);
+    if (!tex || !this.engine) return;
+    const data = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
+    BL.updateTexture2DFromPixels(this.engine, tex, data);
+  }
+
+  // ─── Phase-3: particle systems ───
+  // Babylon Lite's preview build ships no ParticleSystem/GPUParticleSystem
+  // function — its particle surface is the billboard-sprite system
+  // (createFacingBillboardSystem / addBillboardSprite) and the node-block
+  // emitter (loadNodeBlockEmitterWithGeometry). Standing a full GPU-compute
+  // emitter on that is out of scope for this provisional adapter, so — exactly
+  // like the line/label/sky stubs — bursts no-op and continuous emitters track
+  // handle + position so the create→setPosition→dispose surface is structurally
+  // correct. The GPU/CPU auto-select + ParticleBurst/Emitter spec mapping lives
+  // in the (core-backed) Babylon adapter; revisit once Lite's emitter lands.
+  createParticleBurst(spec: ParticleBurstSpec): void {
+    void spec;
+  }
+  createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
+    const handle = this.makeHandle<ParticleEmitterHandle>('emitter', id);
+    this.particleEmitters.set(handle, {
+      position: spec.position ? [...spec.position] as Vec3 : [0, 0, 0],
+      followCamera: spec.followCamera ?? false,
+    });
+    return handle;
+  }
+  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
+    const rec = this.particleEmitters.get(h);
+    if (rec) rec.position = [x, y, z];
+  }
+  disposeParticleEmitter(h: ParticleEmitterHandle): void {
+    this.particleEmitters.delete(h);
+  }
+
+  // ─── Phase-3: glow / bloom / emissive / render ordering ───
+  // Lite's post-process surface is createBloomPostProcessTask wired into the
+  // scene frame graph; this provisional adapter doesn't stand up that graph, so
+  // glow/bloom record their config + whitelist (mirroring the selective-glow
+  // semantics: empty whitelist, cleared on disable) without yet compositing.
+  // setMeshEmissiveById / setMeshRenderingOptions act for real on the material /
+  // mesh fields Lite does expose.
+  setGlowLayer(spec: GlowSpec | null): void {
+    this.glowSpec = spec;
+    if (!spec) this.glowMeshes.clear();
+  }
+  addGlowMesh(h: MeshHandle): void {
+    if (this.glowSpec) this.glowMeshes.add(h);
+  }
+  removeGlowMesh(h: MeshHandle): void {
+    this.glowMeshes.delete(h);
+  }
+  setBloom(spec: BloomSpec | null): void {
+    this.bloomSpec = spec;
+  }
+  setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (!mesh) return;
+    const m = mesh.material as { emissiveColor?: [number, number, number]; unlit?: boolean } | undefined;
+    if (!m) return;
+    // Unlit materials (waypoint gates, sun disc) output albedo directly, so a
+    // multiplied emissive blows them to white under bloom/tonemap — clamp it.
+    // Lit materials want emissive to overpower lighting → keep the 2.5× boost.
+    const e = m.unlit === true ? Math.min(1, intensity) : intensity * 2.5;
+    m.emissiveColor = [r * e, g * e, b * e];
+  }
+  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    // Lite exposes per-mesh pick + render-order; it has no rendering-GROUP
+    // buckets, so renderingGroupId maps onto renderOrder (lower = drawn first).
+    if (opts.pickable !== undefined) mesh.pickable = opts.pickable;
+    if (opts.renderingGroupId !== undefined) mesh.renderOrder = opts.renderingGroupId;
+    // disableDepthWrite / infiniteDistance / applyFog aren't modeled per-mesh in
+    // this Lite preview (no skybox-locked depth path yet) — documented no-ops.
+  }
+
+  // ─── Phase-3: camera-following sun + directional-light query ───
+  createSun(id: string, spec: SunSpec): LightHandle {
+    const engine = this.requireEngine();
+    const scene = this.requireScene();
+    // Unit direction the light TRAVELS, RH→LH (negate Z, as elsewhere).
+    const d = spec.direction;
+    const dl = Math.hypot(d[0], d[1], d[2]) || 1;
+    const dirLH: Vec3 = [d[0] / dl, d[1] / dl, -d[2] / dl];
+
+    const light = BL.createDirectionalLight([dirLH[0], dirLH[1], dirLH[2]], spec.intensity);
+    light.diffuse = [spec.diffuse[0], spec.diffuse[1], spec.diffuse[2]];
+    light.specular = [spec.specular[0], spec.specular[1], spec.specular[2]];
+    BL.addToScene(scene, light);
+
+    const handle = this.makeHandle<LightHandle>('sun', id);
+    this.lights.set(handle, light);
+
+    if (spec.shadow?.enabled) {
+      // The ortho X/Y bounds auto-fit the casters; depth runs from just in front
+      // of the disc out to its distance. Lite's ShadowGenerator is opaque, so the
+      // darkness/bias/normalBias/forceBackFacesOnly tuning isn't settable here.
+      const gen = BL.createPcfDirectionalShadowGenerator(engine, light, {
+        mapSize: spec.shadow.mapSize,
+        orthoMinZ: 1,
+        orthoMaxZ: spec.distance,
+      });
+      light.shadowGenerator = gen;
+      this.shadowGenerators.set(handle, gen);
+    }
+
+    // Emissive disc parked OPPOSITE the light direction so it reads as the star.
+    const disc = BL.createSphere(engine, { diameter: spec.discDiameter ?? 90, segments: 16 });
+    disc.name = `${id}-disc`;
+    disc.pickable = false;
+    const dc = spec.discColor ?? [14, 12, 8.5];
+    disc.material = BL.createPbrMaterial({
+      unlit: true,
+      baseColorFactor: [dc[0], dc[1], dc[2], 1],
+      emissiveColor: [dc[0], dc[1], dc[2]],
+      metallicFactor: 0,
+      roughnessFactor: 1,
+    });
+    BL.addToScene(scene, disc);
+
+    // disc = camera − direction*distance  (all in the LH frame).
+    const offsetLH: Vec3 = [-dirLH[0] * spec.distance, -dirLH[1] * spec.distance, -dirLH[2] * spec.distance];
+    const rec = { light, disc, offsetLH, disposed: false };
+    this.sun = rec;
+    const cam0 = this.activeCameraPositionLH();
+    disc.position.set(cam0[0] + offsetLH[0], cam0[1] + offsetLH[1], cam0[2] + offsetLH[2]);
+    // Re-seat the disc on the active camera each frame; Lite's onBeforeRender has
+    // no unsubscribe, so the closure early-returns once the sun is disposed.
+    BL.onBeforeRender(scene, () => {
+      if (rec.disposed) return;
+      const c = this.activeCameraPositionLH();
+      rec.disc.position.set(c[0] + rec.offsetLH[0], c[1] + rec.offsetLH[1], c[2] + rec.offsetLH[2]);
+    });
+    return handle;
+  }
+
+  /** World-space position (LH frame) of the active camera, for the camera-locked sun. */
+  private activeCameraPositionLH(): Vec3 {
+    if (this.activePerspective) {
+      const p = this.activePerspective.camera.position;
+      return [p.x, p.y, p.z];
+    }
+    const cam = this.scene?.camera;
+    if (cam) {
+      const p = BL.getCameraPosition(cam);
+      return [p.x, p.y, p.z];
+    }
+    return [0, 0, 0];
+  }
+
+  getSunWorldPosition(out: Vec3): Vec3 | null {
+    if (!this.sun) return null;
+    const p = this.sun.disc.position;
+    out[0] = p.x;
+    out[1] = p.y;
+    out[2] = -p.z; // LH→RH (see createArcCamera)
+    return out;
+  }
+
   // ─── Loop / resize / dispose ───
   startLoop(onFrame: (dtSeconds: number) => void): void {
     const engine = this.requireEngine();
@@ -1583,5 +2046,14 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.cards.clear();
     this.boxExtents.clear();
     this.pivotOffsets.clear();
+    // Phase-3 visual state.
+    if (this.sun) this.sun.disposed = true;
+    this.sun = undefined;
+    this.dynamicTextures.clear();
+    this.dynamicTextureObjects.clear();
+    this.particleEmitters.clear();
+    this.glowMeshes.clear();
+    this.glowSpec = null;
+    this.bloomSpec = null;
   }
 }

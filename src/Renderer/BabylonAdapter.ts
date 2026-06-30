@@ -32,6 +32,7 @@ import {
   Mesh,
   LinesMesh,
   DynamicTexture,
+  RawTexture,
   AnimationGroup,
   PhysicsAggregate,
   PhysicsShapeType,
@@ -41,9 +42,20 @@ import {
   HavokPlugin,
   BoundingInfo,
   VertexData,
+  VertexBuffer,
+  ParticleSystem,
+  GPUParticleSystem,
+  GlowLayer,
+  DefaultRenderingPipeline,
 } from '@babylonjs/core';
 import type { AssetContainer, InstantiatedEntries, TransformNode } from '@babylonjs/core';
+import type { Observer } from '@babylonjs/core';
 import '@babylonjs/loaders';
+// GPU particle backends — registered as side effects so GPUParticleSystem can
+// auto-select on a WebGL2/WebGPU device. Inert (and unused) under NullEngine,
+// where GPUParticleSystem.IsSupported is false and the CPU path is taken.
+import '@babylonjs/core/Particles/webgl2ParticleSystem';
+import '@babylonjs/core/Particles/computeShaderParticleSystem';
 import HavokPhysics from '@babylonjs/havok';
 import type {
   ArcCameraSpec,
@@ -83,10 +95,25 @@ import type {
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
+  ProceduralMeshSpec,
+  DynamicTextureSpec,
+  ParticleBurstSpec,
+  ParticleEmitterSpec,
+  ParticleEmitterHandle,
+  GlowSpec,
+  BloomSpec,
+  MeshRenderOptions,
+  SunSpec,
   Vec3,
 } from './types';
 import type { Color } from './types';
 import { Matrix, Ray, Viewport } from '@babylonjs/core';
+import {
+  asteroidShape,
+  asteroidSurfacePosition,
+  hash as rockHash,
+  clamp01,
+} from './proceduralRock';
 
 function notImplemented(method: string): never {
   throw new Error(`BabylonAdapter.${method}: not implemented yet`);
@@ -229,6 +256,30 @@ export class BabylonAdapter implements RendererAdapter {
    */
   private textures = new Map<TextureHandle, Texture>();
   private texturesByKey = new Map<string, TextureHandle>();
+  // ─── Phase-3 (Wingman) visual state ───
+  /** RawTextures built from CPU pixel buffers, deduped by the caller's key. */
+  private dynamicTexturesByKey = new Map<string, TextureHandle>();
+  /**
+   * Continuous particle emitters (space dust, trails). Each holds the live
+   * system, its mutable emitter Vector3 (re-seated each frame when
+   * `followCamera`), and the before-render observer that does the re-seating.
+   */
+  private particleEmitters = new Map<ParticleEmitterHandle, {
+    system: ParticleSystem | GPUParticleSystem;
+    emitter: Vector3;
+    observer: Observer<Scene> | null;
+    followCamera: boolean;
+  }>();
+  /** Monotonic suffix so each fire-and-forget burst / emitter gets a unique name. */
+  private particleCounter = 0;
+  /** The selective glow post-pass (empty whitelist until addGlowMesh). */
+  private glowLayer: GlowLayer | null = null;
+  /** The HDR bloom pipeline, created lazily on the first setBloom call. */
+  private renderPipeline: DefaultRenderingPipeline | null = null;
+  /** Camera-following sun: emissive disc, its per-frame follow observer + offset. */
+  private sunDisc: Mesh | null = null;
+  private sunObserver: Observer<Scene> | null = null;
+  private readonly sunOffset = new Vector3();
   /**
    * Card meshes built by createCardMesh: the PBR material, its rounded-rect
    * alpha mask, and the front/back face textures. setMeshFaceTexture swaps the
@@ -1036,6 +1087,11 @@ export class BabylonAdapter implements RendererAdapter {
     if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
     if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
     if (spec?.scale !== undefined) root.scaling.setAll(spec.scale);
+    // Auto-fit a displayed GLB (the Wingman ships): measure-and-normalize the
+    // longest horizontal extent to fit.fitLength (overriding spec.scale), apply
+    // the yaw/pitch facing correction (nose → +Z), and filter to one body when a
+    // GLB carries several (freighter.glb holds TrainCar + TrainEngine).
+    if (spec?.fit) this.applyModelFit(root, spec.fit);
     // Start parked/hidden — the model System reveals it when the entity is live.
     root.setEnabled(false);
 
@@ -1068,6 +1124,41 @@ export class BabylonAdapter implements RendererAdapter {
     }
 
     return handle;
+  }
+
+  /**
+   * Auto-fit a displayed model hierarchy (see {@link ModelFitSpec}): optional
+   * mesh-name filter, longest-horizontal-extent normalization to `fitLength`
+   * (measured at neutral scale so it OVERRIDES `spec.scale`), then yaw/pitch
+   * facing correction and a vertical offset. Phase-3 DISPLAY only — the
+   * dual-proxy/blow-apart composite is deferred to the combat phase.
+   */
+  private applyModelFit(root: TransformNode, fit: NonNullable<ModelInstantiateSpec['fit']>): void {
+    if (fit.meshNameFilter) {
+      for (const child of root.getChildMeshes(false)) {
+        if (!child.name.includes(fit.meshNameFilter)) child.dispose();
+      }
+    }
+    if (fit.fitLength !== undefined) {
+      // Measure at scale 1 so the normalization is independent of any spec.scale.
+      root.scaling.setAll(1);
+      root.computeWorldMatrix(true);
+      let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+      for (const child of root.getChildMeshes(false)) {
+        child.computeWorldMatrix(true);
+        const bb = child.getBoundingInfo().boundingBox;
+        const lo = bb.minimumWorld, hi = bb.maximumWorld;
+        if (lo.x < minX) minX = lo.x;
+        if (hi.x > maxX) maxX = hi.x;
+        if (lo.z < minZ) minZ = lo.z;
+        if (hi.z > maxZ) maxZ = hi.z;
+      }
+      const horiz = Math.max(maxX - minX, maxZ - minZ);
+      if (Number.isFinite(horiz) && horiz > 1e-6) root.scaling.setAll(fit.fitLength / horiz);
+    }
+    root.rotation.y += fit.yaw ?? 0;
+    root.rotation.x += fit.pitch ?? 0;
+    if (fit.yOffset) root.position.y += fit.yOffset;
   }
 
   setModelVisible(h: MeshHandle, visible: boolean): void {
@@ -2129,6 +2220,381 @@ export class BabylonAdapter implements RendererAdapter {
     this.havokPlugin.setTimeStep(1 / hz);
   }
 
+  // ─── Phase-3: procedural seeded geometry ───
+  /**
+   * Build a deterministic, seed-driven Wingman mesh and register it like any
+   * other mesh. Rock shapes (asteroid / oil-blob / asteroid-drop) displace an
+   * icosphere through the SHARED {@link asteroidSurfacePosition} field (so the
+   * geometry matches {@link sampleProceduralSurface} byte-for-byte); the named
+   * ship / missile / waypoint shapes are welded primitive groups. The
+   * AsteroidMaterialPlugin ripple shader + OilBlob jet are deferred to Phase 3b.
+   */
+  createProceduralMesh(id: string, spec: ProceduralMeshSpec): MeshHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createProceduralMesh: call init() first');
+    const scene = this.scene;
+    const color = new Color3(
+      spec.color?.[0] ?? 0.5,
+      spec.color?.[1] ?? 0.5,
+      spec.color?.[2] ?? 0.5,
+    );
+    const seed = spec.seed ?? 1;
+    let mesh: Mesh;
+    switch (spec.shape) {
+      case 'asteroid':
+        mesh = buildWingmanAsteroid(scene, id, spec.size[0], color, seed, spec.cutAxis, spec.cutDepth, spec.subdivisions);
+        break;
+      case 'oil-blob':
+        mesh = buildWingmanOilBlob(scene, id, spec.size[0], color, seed);
+        break;
+      case 'asteroid-drop':
+        mesh = buildWingmanAsteroidDrop(scene, id, spec.size, color);
+        break;
+      case 'spaceplane':
+        mesh = buildSpaceplane(scene, id, color);
+        break;
+      case 'kilrathi':
+        mesh = buildKilrathi(scene, id, color);
+        break;
+      case 'freighter-head':
+        mesh = buildFreighterHead(scene, id, color);
+        break;
+      case 'freighter-car':
+        mesh = buildFreighterCar(scene, id, color);
+        break;
+      case 'missile':
+        // size = [diameter, _ignored, length]
+        mesh = buildMissile(scene, id, spec.size[0], spec.size[2], color);
+        break;
+      case 'waypoint':
+        mesh = buildWingmanWaypoint(scene, id, spec.size[0], color, spec.emissive ?? 0);
+        break;
+      default:
+        throw new Error(`BabylonAdapter.createProceduralMesh: unknown shape "${(spec as ProceduralMeshSpec).shape}"`);
+    }
+    // Self-illumination on the rock shapes (gates carry their own emissive).
+    if (spec.emissive && spec.emissive > 0 && spec.shape !== 'waypoint') {
+      const material = mesh.material as PBRMaterial | StandardMaterial | null;
+      if (material && 'emissiveColor' in material) {
+        const e = spec.emissive * 2.5;
+        material.emissiveColor = new Color3(color.r * e, color.g * e, color.b * e);
+      }
+    }
+    const handle = this.makeHandle<MeshHandle>('procMesh', id);
+    this.meshes.set(handle, mesh);
+    this.meshesByMeshId.set(id, mesh);
+    return handle;
+  }
+
+  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3 {
+    const isRock = spec.shape === 'asteroid' || spec.shape === 'oil-blob' || spec.shape === 'asteroid-drop';
+    // Ship / missile / waypoint have no radial field — leave `out` untouched.
+    if (!isRock) return out;
+    const seed = spec.seed ?? 1;
+    const radius = spec.size[0];
+    // Icosphere vertices arrive as unit dirs; normalize so an arbitrary caller
+    // direction samples the same surface the geometry was built from.
+    const len = Math.hypot(dirX, dirY, dirZ) || 1;
+    const shape = asteroidShape(seed, spec.cutAxis, spec.cutDepth);
+    asteroidSurfacePosition(
+      shape, dirX / len, dirY / len, dirZ / len, radius,
+      out as [number, number, number],
+    );
+    return out;
+  }
+
+  // ─── Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture) ───
+  /**
+   * Upload a CPU-rasterized RGBA8 buffer as a GPU texture via
+   * `RawTexture.CreateRGBA` — no 2D canvas, so it runs headlessly under
+   * NullEngine and keeps the pixel math in renderer-free component code. Deduped
+   * by `key` like {@link loadTexture}.
+   */
+  createDynamicTexture(key: string, spec: DynamicTextureSpec): TextureHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createDynamicTexture: call init() first');
+    const cached = this.dynamicTexturesByKey.get(key);
+    if (cached) return cached;
+    const tex = RawTexture.CreateRGBATexture(
+      spec.pixels, spec.width, spec.height, this.scene,
+      false /* generateMipMaps */, false /* invertY */, Texture.TRILINEAR_SAMPLINGMODE,
+    );
+    tex.hasAlpha = spec.hasAlpha ?? false;
+    // RawTexture is gamma (sRGB) space by default; albedo stays sRGB, normal /
+    // metallic / AO buffers must be flagged linear or they decode wrong.
+    tex.gammaSpace = spec.srgb ?? false;
+    const wrap = wrapAddressMode(spec.wrap);
+    tex.wrapU = wrap;
+    tex.wrapV = wrap;
+    tex.uScale = spec.uScale ?? 1;
+    tex.vScale = spec.vScale ?? 1;
+    const handle = this.makeHandle<TextureHandle>('dynTex', key);
+    this.textures.set(handle, tex);
+    this.dynamicTexturesByKey.set(key, handle);
+    return handle;
+  }
+
+  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
+    const tex = this.textures.get(h);
+    if (tex instanceof RawTexture) tex.update(pixels);
+  }
+
+  // ─── Phase-3: particle systems ───
+  /**
+   * Fire a one-shot burst (explosion / muzzle flash) that auto-disposes. GPU
+   * particles are auto-selected when `GPUParticleSystem.IsSupported`; otherwise
+   * the CPU `ParticleSystem` (the NullEngine path) carries it.
+   */
+  createParticleBurst(spec: ParticleBurstSpec): void {
+    if (!this.scene) return;
+    const scene = this.scene;
+    const name = `burst-${this.particleCounter++}`;
+    const capacity = Math.max(1, spec.count);
+    const system: ParticleSystem | GPUParticleSystem = GPUParticleSystem.IsSupported
+      ? new GPUParticleSystem(name, { capacity }, scene)
+      : new ParticleSystem(name, capacity, scene);
+    const tex = this.textures.get(spec.texture);
+    if (tex) system.particleTexture = tex;
+    system.emitter = new Vector3(spec.position[0], spec.position[1], spec.position[2]);
+    system.createSphereEmitter(spec.emitRadius, spec.emitRadiusRange ?? 1);
+    system.minSize = spec.minSize;
+    system.maxSize = spec.maxSize;
+    system.minLifeTime = spec.minLifeTime;
+    system.maxLifeTime = spec.maxLifeTime;
+    system.emitRate = 0;
+    system.manualEmitCount = spec.count;
+    system.minEmitPower = spec.minEmitPower;
+    system.maxEmitPower = spec.maxEmitPower;
+    system.updateSpeed = 0.016;
+    system.gravity = toVec3(spec.gravity);
+    system.color1 = toColor4(spec.color1);
+    system.color2 = toColor4(spec.color2);
+    system.colorDead = toColor4(spec.colorDead);
+    system.blendMode = particleBlendMode(spec.blend);
+    system.targetStopDuration = spec.duration ?? 0.06;
+    system.disposeOnStop = true;
+    system.start();
+  }
+
+  /**
+   * Create a continuous emitter (camera-anchored space dust, trails). With
+   * `followCamera` an internal before-render observer re-seats the emitter at
+   * the active camera each frame.
+   */
+  createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createParticleEmitter: call init() first');
+    const scene = this.scene;
+    const capacity = Math.max(1, spec.capacity);
+    const system: ParticleSystem | GPUParticleSystem = GPUParticleSystem.IsSupported
+      ? new GPUParticleSystem(id, { capacity }, scene)
+      : new ParticleSystem(id, capacity, scene);
+    const tex = this.textures.get(spec.texture);
+    if (tex) system.particleTexture = tex;
+    const start = spec.position ?? [0, 0, 0];
+    const emitter = new Vector3(start[0], start[1], start[2]);
+    system.emitter = emitter;
+    system.createSphereEmitter(spec.emitRadius, spec.emitRadiusRange ?? 0.2);
+    system.minSize = spec.minSize;
+    system.maxSize = spec.maxSize;
+    system.minLifeTime = spec.minLifeTime;
+    system.maxLifeTime = spec.maxLifeTime;
+    system.emitRate = spec.emitRate;
+    system.minEmitPower = spec.minEmitPower;
+    system.maxEmitPower = spec.maxEmitPower;
+    system.updateSpeed = 0.016;
+    system.gravity = toVec3(spec.gravity);
+    system.color1 = toColor4(spec.color1);
+    system.color2 = toColor4(spec.color2);
+    system.colorDead = toColor4(spec.colorDead);
+    system.blendMode = particleBlendMode(spec.blend);
+    if (spec.preWarmCycles) {
+      system.preWarmCycles = spec.preWarmCycles;
+      system.preWarmStepOffset = 1 / 60;
+    }
+    system.start();
+    const followCamera = !!spec.followCamera;
+    let observer: Observer<Scene> | null = null;
+    if (followCamera) {
+      observer = scene.onBeforeRenderObservable.add(() => {
+        const cam = scene.activeCamera;
+        if (cam) emitter.copyFrom(cam.position);
+      });
+    }
+    const handle = this.makeHandle<ParticleEmitterHandle>('emitter', id);
+    this.particleEmitters.set(handle, { system, emitter, observer, followCamera });
+    return handle;
+  }
+
+  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
+    const rec = this.particleEmitters.get(h);
+    // followCamera drives the position each frame — an explicit set would fight it.
+    if (rec && !rec.followCamera) rec.emitter.set(x, y, z);
+  }
+
+  disposeParticleEmitter(h: ParticleEmitterHandle): void {
+    const rec = this.particleEmitters.get(h);
+    if (!rec) return;
+    if (rec.observer) this.scene?.onBeforeRenderObservable.remove(rec.observer);
+    rec.system.dispose();
+    this.particleEmitters.delete(h);
+  }
+
+  // ─── Phase-3: glow / bloom / emissive / render ordering ───
+  setGlowLayer(spec: GlowSpec | null): void {
+    if (!this.scene) return;
+    if (!spec) {
+      this.glowLayer?.dispose();
+      this.glowLayer = null;
+      return;
+    }
+    if (!this.glowLayer) {
+      this.glowLayer = new GlowLayer('glow', this.scene, {
+        mainTextureSamples: spec.samples ?? 1,
+        mainTextureRatio: spec.textureRatio ?? 0.5,
+      });
+    }
+    this.glowLayer.intensity = spec.intensity;
+  }
+
+  addGlowMesh(h: MeshHandle): void {
+    const mesh = this.meshes.get(h);
+    if (this.glowLayer && mesh) this.glowLayer.addIncludedOnlyMesh(mesh);
+  }
+
+  removeGlowMesh(h: MeshHandle): void {
+    const mesh = this.meshes.get(h);
+    if (this.glowLayer && mesh) this.glowLayer.removeIncludedOnlyMesh(mesh);
+  }
+
+  setBloom(spec: BloomSpec | null): void {
+    if (!this.scene) return;
+    if (!spec) {
+      if (this.renderPipeline) this.renderPipeline.bloomEnabled = false;
+      return;
+    }
+    const pipeline = this.ensureRenderPipeline();
+    if (!pipeline) return;
+    pipeline.bloomEnabled = true;
+    pipeline.bloomWeight = spec.weight;
+    if (spec.threshold !== undefined) pipeline.bloomThreshold = spec.threshold;
+    if (spec.scale !== undefined) pipeline.bloomScale = spec.scale;
+    if (spec.kernel !== undefined) pipeline.bloomKernel = spec.kernel;
+  }
+
+  /** Lazily build the HDR pipeline (with whatever camera is active) for bloom. */
+  private ensureRenderPipeline(): DefaultRenderingPipeline | null {
+    if (this.renderPipeline) return this.renderPipeline;
+    if (!this.scene) return null;
+    const cameras = this.scene.activeCamera ? [this.scene.activeCamera] : [];
+    this.renderPipeline = new DefaultRenderingPipeline('pipeline', true, this.scene, cameras);
+    this.renderPipeline.bloomEnabled = false;
+    return this.renderPipeline;
+  }
+
+  setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
+    const mesh = this.meshesByMeshId.get(meshId);
+    if (!mesh) return;
+    const mat = mesh.material as unknown as {
+      emissiveColor?: Color3;
+      unlit?: boolean;
+    } | null;
+    if (!mat || !mat.emissiveColor) return;
+    // Unlit materials already output albedo directly, so a multiplied emissive
+    // on top blows them to white under bloom + ACES — treat `intensity` as a
+    // literal clamped emissive. Lit materials want emissive to OVERPOWER the
+    // lighting, hence the 2.5× boost.
+    if (mat.unlit) {
+      const e = Math.min(1, intensity);
+      mat.emissiveColor.set(r * e, g * e, b * e);
+    } else {
+      const e = intensity * 2.5;
+      mat.emissiveColor.set(r * e, g * e, b * e);
+    }
+  }
+
+  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    if (opts.renderingGroupId !== undefined) mesh.renderingGroupId = opts.renderingGroupId;
+    if (opts.infiniteDistance !== undefined) mesh.infiniteDistance = opts.infiniteDistance;
+    if (opts.applyFog !== undefined) mesh.applyFog = opts.applyFog;
+    if (opts.pickable !== undefined) mesh.isPickable = opts.pickable;
+    if (opts.disableDepthWrite !== undefined && mesh.material) {
+      mesh.material.disableDepthWrite = opts.disableDepthWrite;
+    }
+  }
+
+  // ─── Phase-3: camera-following sun + directional-light query ───
+  /**
+   * Create a camera-following sun: a DirectionalLight whose rays travel along
+   * `spec.direction`, plus an emissive disc parked at `camera − direction*distance`
+   * (re-seated each frame so it reads as an infinitely-distant star). An optional
+   * ShadowGenerator drives crisp rock-on-rock shadows. Returns the directional
+   * light's handle; the disc's world position is read back via
+   * {@link getSunWorldPosition}. (Lens flare / RTT are deferred to Phase 3b.)
+   */
+  createSun(id: string, spec: SunSpec): LightHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createSun: call init() first');
+    const scene = this.scene;
+    const dir = normalizeVec3(spec.direction);
+    const light = new BabylonDirectionalLight(`Sun_${id}`, new Vector3(dir[0], dir[1], dir[2]), scene);
+    light.intensity = spec.intensity;
+    light.diffuse = Color3.FromArray(spec.diffuse);
+    light.specular = Color3.FromArray(spec.specular);
+    const handle = this.makeHandle<LightHandle>('sun', id);
+    this.lights.set(handle, light);
+
+    // Emissive disc. Unlit + HDR emissive so it clears the bloom threshold; the
+    // starburst flare / lens-flare RTT is Phase-3b.
+    const disc = MeshBuilder.CreateSphere(`Sun_${id}_disc`, {
+      diameter: spec.discDiameter ?? 90,
+      segments: 16,
+    }, scene);
+    const discMat = new PBRMaterial(`Sun_${id}_disc_mat`, scene);
+    discMat.unlit = true;
+    discMat.disableLighting = true;
+    discMat.albedoColor = new Color3(1, 0.96, 0.82);
+    const dc = spec.discColor ?? [14, 12, 8.5];
+    discMat.emissiveColor = new Color3(dc[0], dc[1], dc[2]);
+    disc.material = discMat;
+    disc.isPickable = false;
+    disc.applyFog = false;
+    this.sunDisc = disc;
+
+    // The disc sits OPPOSITE the ray-travel direction. Seed its position now (no
+    // render has run yet) and follow the camera every frame thereafter.
+    this.sunOffset.set(-dir[0] * spec.distance, -dir[1] * spec.distance, -dir[2] * spec.distance);
+    const cam = scene.activeCamera;
+    const cp = cam ? cam.position : Vector3.Zero();
+    disc.position.set(cp.x + this.sunOffset.x, cp.y + this.sunOffset.y, cp.z + this.sunOffset.z);
+    this.sunObserver = scene.onBeforeRenderObservable.add(() => {
+      const c = scene.activeCamera;
+      if (c) disc.position.set(c.position.x + this.sunOffset.x, c.position.y + this.sunOffset.y, c.position.z + this.sunOffset.z);
+    });
+
+    // Lazy shadow generator — only paid for if shadows are asked for.
+    if (spec.shadow?.enabled) {
+      const sg = new ShadowGenerator(spec.shadow.mapSize, light);
+      sg.forceBackFacesOnly = spec.shadow.forceBackFacesOnly ?? true;
+      sg.bias = spec.shadow.bias ?? 0.005;
+      sg.normalBias = spec.shadow.normalBias ?? 0.04;
+      sg.darkness = spec.shadow.darkness ?? 0.25;
+      sg.usePoissonSampling = false;
+      sg.useExponentialShadowMap = false;
+      light.autoUpdateExtends = true;
+      light.autoCalcShadowZBounds = true;
+      this.shadowGenerators.set(handle, sg);
+    }
+    return handle;
+  }
+
+  getSunWorldPosition(out: Vec3): Vec3 | null {
+    if (!this.sunDisc) return null;
+    const p = this.sunDisc.position;
+    out[0] = p.x;
+    out[1] = p.y;
+    out[2] = p.z;
+    return out;
+  }
+
   startLoop(onFrame: (dtSeconds: number) => void): void {
     if (!this.engine || !this.scene) {
       throw new Error('BabylonAdapter.startLoop: call init() first');
@@ -2213,6 +2679,15 @@ export class BabylonAdapter implements RendererAdapter {
     this.labels.clear();
     this.skyboxes.clear();
     this.loadedAnimationGroups.clear();
+    // Phase-3: the engine objects (glow layer, pipeline, particle systems, sun
+    // disc) are scene children reclaimed by scene.dispose() above; just drop our
+    // bookkeeping + null the lazy singletons so a re-init starts clean.
+    this.dynamicTexturesByKey.clear();
+    this.particleEmitters.clear();
+    this.glowLayer = null;
+    this.renderPipeline = null;
+    this.sunDisc = null;
+    this.sunObserver = null;
   }
 }
 
@@ -2223,6 +2698,616 @@ function normalizeVec3(v: Vec3): Vec3 {
 
 function toV3Lines(lines: Vec3[][]): Vector3[][] {
   return lines.map((poly) => poly.map((p) => new Vector3(p[0], p[1], p[2])));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase-3 (Wingman) builders + helpers. Lifted from the bespoke
+// games/.../adapter/babylon builders so the space-sim shapes run on the shared
+// adapter. Kept renderer-local (only this file may import @babylonjs/*). The
+// custom-material ripple/jet shaders + lens flare + nebula sky are Phase-3b.
+// All shapes are +Z forward, +Y up (right-handed; matches the locked camera).
+// ─────────────────────────────────────────────────────────────────────────
+
+function toColor4(c: readonly [number, number, number, number]): Color4 {
+  return new Color4(c[0], c[1], c[2], c[3]);
+}
+
+function toVec3(v?: Vec3): Vector3 {
+  return v ? new Vector3(v[0], v[1], v[2]) : new Vector3(0, 0, 0);
+}
+
+function particleBlendMode(blend?: 'add' | 'standard' | 'multiply'): number {
+  switch (blend) {
+    case 'standard': return ParticleSystem.BLENDMODE_STANDARD;
+    case 'multiply': return ParticleSystem.BLENDMODE_MULTIPLY;
+    default: return ParticleSystem.BLENDMODE_ADD;
+  }
+}
+
+function wrapAddressMode(wrap?: 'wrap' | 'clamp' | 'mirror'): number {
+  switch (wrap) {
+    case 'clamp': return Texture.CLAMP_ADDRESSMODE;
+    case 'mirror': return Texture.MIRROR_ADDRESSMODE;
+    default: return Texture.WRAP_ADDRESSMODE;
+  }
+}
+
+/**
+ * Procedural asteroid: a subdivided icosphere displaced along its vertex
+ * directions by the shared seeded noise field, with normals recomputed
+ * (reversed winding) so shading matches the new surface. The displacement is
+ * the SAME {@link asteroidSurfacePosition} the sampler uses, so geometry and
+ * collision agree. The shared-material / ripple-plugin path is Phase-3b.
+ */
+function buildWingmanAsteroid(
+  scene: Scene, id: string, radius: number, color: Color3, seed: number,
+  cutAxis?: Vec3, cutDepth?: number, subdivisions = 14,
+): Mesh {
+  const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions, flat: false }, scene);
+  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+  if (positions) {
+    const shape = asteroidShape(seed, cutAxis, cutDepth);
+    // Capture the pre-displacement unit directions before overwriting positions.
+    const directions = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i++) directions[i] = positions[i];
+    applyWingmanAsteroidDisplacement(mesh, positions, directions, shape, radius);
+    mesh.refreshBoundingInfo();
+  }
+  // Asteroids are huge (up to ~400u) and few — never cull them; per-pixel GPU
+  // clipping is cheaper than risking a half-clipped mountain.
+  mesh.alwaysSelectAsActiveMesh = true;
+  const mat = new PBRMaterial(`${id}-mat`, scene);
+  mat.albedoColor = new Color3(
+    clamp01(color.r + (rockHash(seed, 6) - 0.5) * 0.08),
+    clamp01(color.g + (rockHash(seed, 7) - 0.5) * 0.08),
+    clamp01(color.b + (rockHash(seed, 8) - 0.5) * 0.08),
+  );
+  mat.metallic = 1.0;
+  mat.roughness = 1.0;
+  mat.environmentIntensity = 0.6;
+  mat.emissiveColor = new Color3(0.045, 0.04, 0.035);
+  mesh.material = mat;
+  return mesh;
+}
+
+/**
+ * Displace + re-normal an icosphere through the shared seeded field. Duplicate
+ * vertices (the icosphere keeps per-triangle UV copies) are grouped by hashed
+ * direction so the mesh stays watertight and lighting smooth across edges.
+ */
+function applyWingmanAsteroidDisplacement(
+  mesh: Mesh,
+  positions: number[] | Float32Array,
+  directions: Float32Array,
+  shape: ReturnType<typeof asteroidShape>,
+  radius: number,
+): void {
+  const out: [number, number, number] = [0, 0, 0];
+  const vertCount = positions.length / 3;
+  const keyOf = (i: number): string =>
+    directions[i * 3].toFixed(5) + ',' +
+    directions[i * 3 + 1].toFixed(5) + ',' +
+    directions[i * 3 + 2].toFixed(5);
+  const groups = new Map<string, number[]>();
+  for (let i = 0; i < vertCount; i++) {
+    const k = keyOf(i);
+    const arr = groups.get(k);
+    if (arr) arr.push(i);
+    else groups.set(k, [i]);
+  }
+  for (const group of groups.values()) {
+    const i0 = group[0];
+    asteroidSurfacePosition(shape, directions[i0 * 3], directions[i0 * 3 + 1], directions[i0 * 3 + 2], radius, out);
+    for (const i of group) {
+      positions[i * 3] = out[0];
+      positions[i * 3 + 1] = out[1];
+      positions[i * 3 + 2] = out[2];
+    }
+  }
+  mesh.setVerticesData(VertexBuffer.PositionKind, positions, false);
+
+  const indices = mesh.getIndices();
+  if (indices) {
+    const groupNormals = new Map<string, [number, number, number]>();
+    for (let t = 0; t < indices.length; t += 3) {
+      const a = indices[t], b = indices[t + 1], c = indices[t + 2];
+      const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
+      const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
+      const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
+      const ex = bx - ax, ey = by - ay, ez = bz - az;
+      const fx = cx - ax, fy = cy - ay, fz = cz - az;
+      // Reversed cross (c-a)×(b-a) — Babylon icosphere winding flips the natural
+      // (b-a)×(c-a), so this points OUTWARD.
+      const nx = ez * fy - ey * fz;
+      const ny = ex * fz - ez * fx;
+      const nz = ey * fx - ex * fy;
+      for (const idx of [a, b, c]) {
+        const k = keyOf(idx);
+        let acc = groupNormals.get(k);
+        if (!acc) { acc = [0, 0, 0]; groupNormals.set(k, acc); }
+        acc[0] += nx; acc[1] += ny; acc[2] += nz;
+      }
+    }
+    const normals = new Float32Array(positions.length);
+    for (const [k, group] of groups) {
+      const acc = groupNormals.get(k);
+      if (!acc) continue;
+      const len = Math.sqrt(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]) || 1;
+      const nx = acc[0] / len, ny = acc[1] / len, nz = acc[2] / len;
+      for (const i of group) {
+        normals[i * 3] = nx;
+        normals[i * 3 + 1] = ny;
+        normals[i * 3 + 2] = nz;
+      }
+    }
+    mesh.setVerticesData(VertexBuffer.NormalKind, Array.from(normals), false);
+  }
+}
+
+/** Oil blob: a unit icosphere scaled to `radius`. The Worthington-jet plugin is Phase-3b. */
+function buildWingmanOilBlob(scene: Scene, id: string, radius: number, color: Color3, seed: number): Mesh {
+  const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions: 12, flat: false }, scene);
+  mesh.scaling.set(radius, radius, radius);
+  mesh.isPickable = false;
+  const mat = new PBRMaterial(`${id}-mat`, scene);
+  mat.albedoColor = new Color3(
+    clamp01(color.r + (rockHash(seed, 6) - 0.5) * 0.08),
+    clamp01(color.g + (rockHash(seed, 7) - 0.5) * 0.08),
+    clamp01(color.b + (rockHash(seed, 8) - 0.5) * 0.08),
+  );
+  mat.metallic = 1.0;
+  mat.roughness = 1.0;
+  mat.environmentIntensity = 0.7;
+  mat.emissiveColor = new Color3(0.035, 0.032, 0.028);
+  mesh.material = mat;
+  return mesh;
+}
+
+/** Asteroid chip: a low-poly icosphere stretched along `size` for a teardrop. */
+function buildWingmanAsteroidDrop(scene: Scene, id: string, size: Vec3, color: Color3): Mesh {
+  const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions: 3, flat: false }, scene);
+  mesh.scaling.set(size[0], size[1] || size[0], size[2] || size[0]);
+  mesh.alwaysSelectAsActiveMesh = true;
+  const mat = new PBRMaterial(`${id}-mat`, scene);
+  mat.albedoColor = color.clone();
+  mat.metallic = 1.0;
+  mat.roughness = 1.0;
+  mat.environmentIntensity = 0.7;
+  mesh.material = mat;
+  return mesh;
+}
+
+/**
+ * Waypoint gate: a thin trigger ring (hole faces +Z). Flat UNLIT material so the
+ * state colour (cyan / yellow / green) shows exactly as written rather than
+ * filtered through PBR lighting; depth-tested bloom handles the glow.
+ */
+function buildWingmanWaypoint(scene: Scene, id: string, sx: number, color: Color3, emissive: number): Mesh {
+  const mesh = MeshBuilder.CreateTorus(id, {
+    diameter: sx * 2,
+    thickness: Math.max(2, sx * 0.08),
+    tessellation: 48,
+  }, scene);
+  const mat = new PBRMaterial(`${id}-mat`, scene);
+  mat.unlit = true;
+  mat.albedoColor = color.clone();
+  mat.metallic = 0;
+  mat.roughness = 1;
+  mat.environmentIntensity = 0;
+  if (emissive > 0) {
+    const e = Math.min(1, emissive);
+    mat.emissiveColor = new Color3(color.r * e, color.g * e, color.b * e);
+  }
+  mesh.material = mat;
+  return mesh;
+}
+
+/** Single-seat space fighter built from welded primitives. +Z forward, +Y up. */
+function buildSpaceplane(scene: Scene, id: string, hullColor: Color3): Mesh {
+  const root = new Mesh(`${id}-root`, scene);
+  root.isVisible = false;
+
+  const hullMat = new PBRMaterial(`${id}-hull-mat`, scene);
+  hullMat.albedoColor = hullColor;
+  hullMat.metallic = 0.75;
+  hullMat.roughness = 0.32;
+  hullMat.environmentIntensity = 0.35;
+
+  const trimMat = new PBRMaterial(`${id}-trim-mat`, scene);
+  trimMat.albedoColor = hullColor.scale(0.45);
+  trimMat.metallic = 0.55;
+  trimMat.roughness = 0.28;
+  trimMat.environmentIntensity = 0.35;
+
+  const glassMat = new PBRMaterial(`${id}-glass-mat`, scene);
+  glassMat.albedoColor = new Color3(0.04, 0.06, 0.1);
+  glassMat.metallic = 0.85;
+  glassMat.roughness = 0.3;
+  glassMat.environmentIntensity = 0.35;
+  glassMat.emissiveColor = new Color3(0.05, 0.1, 0.18);
+
+  const engineMat = new PBRMaterial(`${id}-engine-mat`, scene);
+  engineMat.unlit = true;
+  engineMat.albedoColor = new Color3(0.2, 0.7, 1.0);
+  engineMat.emissiveColor = new Color3(1.2, 3.2, 5.5);
+
+  const fuselage = MeshBuilder.CreateSphere(`${id}-fuselage`, { diameterX: 1.0, diameterY: 0.9, diameterZ: 4.4, segments: 16 }, scene);
+  fuselage.material = hullMat;
+  fuselage.parent = root;
+
+  const nose = MeshBuilder.CreateCylinder(`${id}-nose`, { diameterTop: 0.0, diameterBottom: 0.85, height: 1.1, tessellation: 16 }, scene);
+  nose.rotation.x = Math.PI / 2;
+  nose.position.set(0, 0, 2.5);
+  nose.material = hullMat;
+  nose.parent = root;
+
+  const cockpit = MeshBuilder.CreateSphere(`${id}-cockpit`, { diameterX: 0.6, diameterY: 0.45, diameterZ: 1.2, slice: 0.55, segments: 12 }, scene);
+  cockpit.position.set(0, 0.38, 0.55);
+  cockpit.material = glassMat;
+  cockpit.parent = root;
+
+  const wingShape = { width: 1.8, height: 0.08, depth: 1.6 };
+  const lWing = MeshBuilder.CreateBox(`${id}-lwing`, wingShape, scene);
+  lWing.position.set(-1.25, -0.08, -0.25);
+  lWing.rotation.y = -0.32;
+  lWing.material = trimMat;
+  lWing.parent = root;
+
+  const rWing = MeshBuilder.CreateBox(`${id}-rwing`, wingShape, scene);
+  rWing.position.set(1.25, -0.08, -0.25);
+  rWing.rotation.y = 0.32;
+  rWing.material = trimMat;
+  rWing.parent = root;
+
+  const tipShape = { width: 0.18, height: 0.18, depth: 1.1 };
+  const lTip = MeshBuilder.CreateBox(`${id}-ltip`, tipShape, scene);
+  lTip.position.set(-2.05, -0.08, -0.65);
+  lTip.material = hullMat;
+  lTip.parent = root;
+
+  const rTip = MeshBuilder.CreateBox(`${id}-rtip`, tipShape, scene);
+  rTip.position.set(2.05, -0.08, -0.65);
+  rTip.material = hullMat;
+  rTip.parent = root;
+
+  const tail = MeshBuilder.CreateBox(`${id}-tail`, { width: 0.1, height: 0.75, depth: 0.9 }, scene);
+  tail.position.set(0, 0.5, -1.45);
+  tail.material = trimMat;
+  tail.parent = root;
+
+  const nacelle = { diameter: 0.46, height: 1.3, tessellation: 18 };
+  const lNacelle = MeshBuilder.CreateCylinder(`${id}-lnacelle`, nacelle, scene);
+  lNacelle.rotation.x = Math.PI / 2;
+  lNacelle.position.set(-0.55, -0.12, -1.5);
+  lNacelle.material = trimMat;
+  lNacelle.parent = root;
+
+  const rNacelle = MeshBuilder.CreateCylinder(`${id}-rnacelle`, nacelle, scene);
+  rNacelle.rotation.x = Math.PI / 2;
+  rNacelle.position.set(0.55, -0.12, -1.5);
+  rNacelle.material = trimMat;
+  rNacelle.parent = root;
+
+  const glowOpts = { diameter: 0.38, segments: 10 };
+  const lGlow = MeshBuilder.CreateSphere(`${id}-lglow`, glowOpts, scene);
+  lGlow.position.set(-0.55, -0.12, -2.15);
+  lGlow.material = engineMat;
+  lGlow.parent = root;
+
+  const rGlow = MeshBuilder.CreateSphere(`${id}-rglow`, glowOpts, scene);
+  rGlow.position.set(0.55, -0.12, -2.15);
+  rGlow.material = engineMat;
+  rGlow.parent = root;
+
+  return root;
+}
+
+/** Kilrathi-style enemy fighter: forward mandibles + glowing sensor. +Z forward. */
+function buildKilrathi(scene: Scene, id: string, hullColor: Color3): Mesh {
+  const root = new Mesh(`${id}-root`, scene);
+  root.isVisible = false;
+
+  const hullMat = new PBRMaterial(`${id}-hull-mat`, scene);
+  hullMat.albedoColor = hullColor;
+  hullMat.metallic = 0.65;
+  hullMat.roughness = 0.38;
+  hullMat.environmentIntensity = 0.3;
+
+  const trimMat = new PBRMaterial(`${id}-trim-mat`, scene);
+  trimMat.albedoColor = hullColor.scale(0.45);
+  trimMat.metallic = 0.5;
+  trimMat.roughness = 0.35;
+  trimMat.environmentIntensity = 0.3;
+
+  const eyeMat = new PBRMaterial(`${id}-eye-mat`, scene);
+  eyeMat.unlit = true;
+  eyeMat.albedoColor = new Color3(0.9, 0.15, 0.1);
+  eyeMat.emissiveColor = new Color3(3.0, 0.5, 0.2);
+
+  const engineMat = new PBRMaterial(`${id}-engine-mat`, scene);
+  engineMat.unlit = true;
+  engineMat.albedoColor = new Color3(1.0, 0.6, 0.2);
+  engineMat.emissiveColor = new Color3(2.5, 1.0, 0.35);
+
+  const body = MeshBuilder.CreateSphere(`${id}-body`, { diameterX: 1.7, diameterY: 1.1, diameterZ: 2.3, segments: 16 }, scene);
+  body.position.set(0, 0, -0.4);
+  body.material = hullMat;
+  body.parent = root;
+
+  const mandibleShape = { width: 0.5, height: 0.55, depth: 2.6 };
+  const lMandible = MeshBuilder.CreateBox(`${id}-mandL`, mandibleShape, scene);
+  lMandible.position.set(-0.92, 0, 1.5);
+  lMandible.rotation.y = -0.22;
+  lMandible.material = hullMat;
+  lMandible.parent = root;
+
+  const rMandible = MeshBuilder.CreateBox(`${id}-mandR`, mandibleShape, scene);
+  rMandible.position.set(0.92, 0, 1.5);
+  rMandible.rotation.y = 0.22;
+  rMandible.material = hullMat;
+  rMandible.parent = root;
+
+  const tipShape = { width: 0.42, height: 0.5, depth: 1.0 };
+  const lTip = MeshBuilder.CreateBox(`${id}-tipL`, tipShape, scene);
+  lTip.position.set(-0.72, 0, 2.95);
+  lTip.rotation.y = 0.55;
+  lTip.material = trimMat;
+  lTip.parent = root;
+
+  const rTip = MeshBuilder.CreateBox(`${id}-tipR`, tipShape, scene);
+  rTip.position.set(0.72, 0, 2.95);
+  rTip.rotation.y = -0.55;
+  rTip.material = trimMat;
+  rTip.parent = root;
+
+  const eye = MeshBuilder.CreateSphere(`${id}-eye`, { diameterX: 0.55, diameterY: 0.4, diameterZ: 0.55, segments: 14 }, scene);
+  eye.position.set(0, 0.08, 1.25);
+  eye.material = eyeMat;
+  eye.parent = root;
+
+  const crest = MeshBuilder.CreateBox(`${id}-crest`, { width: 0.18, height: 0.55, depth: 1.5 }, scene);
+  crest.position.set(0, 0.55, -0.45);
+  crest.material = trimMat;
+  crest.parent = root;
+
+  const wingShape = { width: 1.5, height: 0.1, depth: 1.2 };
+  const lWing = MeshBuilder.CreateBox(`${id}-lwing`, wingShape, scene);
+  lWing.position.set(-1.15, -0.05, -1.1);
+  lWing.rotation.y = -0.55;
+  lWing.rotation.z = -0.15;
+  lWing.material = trimMat;
+  lWing.parent = root;
+
+  const rWing = MeshBuilder.CreateBox(`${id}-rwing`, wingShape, scene);
+  rWing.position.set(1.15, -0.05, -1.1);
+  rWing.rotation.y = 0.55;
+  rWing.rotation.z = 0.15;
+  rWing.material = trimMat;
+  rWing.parent = root;
+
+  const engineOpts = { diameter: 0.55, height: 1.5, tessellation: 16 };
+  const lEng = MeshBuilder.CreateCylinder(`${id}-leng`, engineOpts, scene);
+  lEng.rotation.x = Math.PI / 2;
+  lEng.position.set(-0.48, -0.05, -1.7);
+  lEng.material = trimMat;
+  lEng.parent = root;
+
+  const rEng = MeshBuilder.CreateCylinder(`${id}-reng`, engineOpts, scene);
+  rEng.rotation.x = Math.PI / 2;
+  rEng.position.set(0.48, -0.05, -1.7);
+  rEng.material = trimMat;
+  rEng.parent = root;
+
+  const glowOpts = { diameter: 0.42, segments: 10 };
+  const lGlow = MeshBuilder.CreateSphere(`${id}-lglow`, glowOpts, scene);
+  lGlow.position.set(-0.48, -0.05, -2.45);
+  lGlow.material = engineMat;
+  lGlow.parent = root;
+
+  const rGlow = MeshBuilder.CreateSphere(`${id}-rglow`, glowOpts, scene);
+  rGlow.position.set(0.48, -0.05, -2.45);
+  rGlow.material = engineMat;
+  rGlow.parent = root;
+
+  return root;
+}
+
+/** Shared freighter PBR materials so head + cars stay visually consistent. */
+function freighterMaterials(scene: Scene, id: string, hullColor: Color3) {
+  const hull = new PBRMaterial(`${id}-hull-mat`, scene);
+  hull.albedoColor = hullColor;
+  hull.metallic = 0.55;
+  hull.roughness = 0.45;
+  hull.environmentIntensity = 0.32;
+
+  const trim = new PBRMaterial(`${id}-trim-mat`, scene);
+  trim.albedoColor = hullColor.scale(0.4);
+  trim.metallic = 0.45;
+  trim.roughness = 0.4;
+  trim.environmentIntensity = 0.32;
+
+  const cargo = new PBRMaterial(`${id}-cargo-mat`, scene);
+  cargo.albedoColor = hullColor.scale(0.75);
+  cargo.metallic = 0.35;
+  cargo.roughness = 0.55;
+  cargo.environmentIntensity = 0.3;
+
+  const glass = new PBRMaterial(`${id}-glass-mat`, scene);
+  glass.albedoColor = new Color3(0.04, 0.08, 0.12);
+  glass.metallic = 0.85;
+  glass.roughness = 0.28;
+  glass.environmentIntensity = 0.35;
+  glass.emissiveColor = new Color3(0.1, 0.2, 0.3);
+
+  const engine = new PBRMaterial(`${id}-engine-mat`, scene);
+  engine.unlit = true;
+  engine.albedoColor = new Color3(0.4, 0.7, 1.0);
+  engine.emissiveColor = new Color3(1.6, 3.0, 5.0);
+
+  return { hull, trim, cargo, glass, engine };
+}
+
+/** Supply-train locomotive head. +Z forward. */
+function buildFreighterHead(scene: Scene, id: string, hullColor: Color3): Mesh {
+  const root = new Mesh(`${id}-root`, scene);
+  root.isVisible = false;
+  const mats = freighterMaterials(scene, id, hullColor);
+
+  const nose = MeshBuilder.CreateCylinder(`${id}-nose`, { diameterTop: 1.2, diameterBottom: 3.6, height: 4.5, tessellation: 8 }, scene);
+  nose.rotation.x = Math.PI / 2;
+  nose.position.set(0, -0.6, 8.8);
+  nose.material = mats.hull;
+  nose.parent = root;
+
+  const bridge = MeshBuilder.CreateBox(`${id}-bridge`, { width: 4.4, height: 3.2, depth: 6.2 }, scene);
+  bridge.position.set(0, 1.6, 4.5);
+  bridge.material = mats.hull;
+  bridge.parent = root;
+
+  const glass = MeshBuilder.CreateBox(`${id}-bridgeGlass`, { width: 3.6, height: 1.4, depth: 0.3 }, scene);
+  glass.position.set(0, 2.0, 7.7);
+  glass.material = mats.glass;
+  glass.parent = root;
+
+  const antenna = MeshBuilder.CreateCylinder(`${id}-antenna`, { diameter: 0.2, height: 3.0, tessellation: 8 }, scene);
+  antenna.position.set(0, 4.7, 3.4);
+  antenna.material = mats.trim;
+  antenna.parent = root;
+
+  const chassis = MeshBuilder.CreateBox(`${id}-chassis`, { width: 4.6, height: 1.2, depth: 14.0 }, scene);
+  chassis.position.set(0, -0.6, 4.0);
+  chassis.material = mats.trim;
+  chassis.parent = root;
+
+  const engineBlock = MeshBuilder.CreateCylinder(`${id}-engineBlock`, { diameterTop: 4.6, diameterBottom: 5.0, height: 4.5, tessellation: 20 }, scene);
+  engineBlock.rotation.x = Math.PI / 2;
+  engineBlock.position.set(0, 0, -2.0);
+  engineBlock.material = mats.hull;
+  engineBlock.parent = root;
+
+  const bell = { diameterTop: 1.9, diameterBottom: 0.85, height: 2.6, tessellation: 16 };
+  const lBell = MeshBuilder.CreateCylinder(`${id}-lbell`, bell, scene);
+  lBell.rotation.x = -Math.PI / 2;
+  lBell.position.set(-1.6, 0, -5.5);
+  lBell.material = mats.trim;
+  lBell.parent = root;
+
+  const rBell = MeshBuilder.CreateCylinder(`${id}-rbell`, bell, scene);
+  rBell.rotation.x = -Math.PI / 2;
+  rBell.position.set(1.6, 0, -5.5);
+  rBell.material = mats.trim;
+  rBell.parent = root;
+
+  const glowOpts = { diameter: 1.5, segments: 14 };
+  const lGlow = MeshBuilder.CreateSphere(`${id}-lglow`, glowOpts, scene);
+  lGlow.position.set(-1.6, 0, -7.0);
+  lGlow.material = mats.engine;
+  lGlow.parent = root;
+
+  const rGlow = MeshBuilder.CreateSphere(`${id}-rglow`, glowOpts, scene);
+  rGlow.position.set(1.6, 0, -7.0);
+  rGlow.material = mats.engine;
+  rGlow.parent = root;
+
+  const coupler = MeshBuilder.CreateBox(`${id}-coupler`, { width: 0.6, height: 0.6, depth: 1.0 }, scene);
+  coupler.position.set(0, -0.6, -7.2);
+  coupler.material = mats.trim;
+  coupler.parent = root;
+
+  return root;
+}
+
+/** Supply-train cargo car: one container + ribs + couplers. */
+function buildFreighterCar(scene: Scene, id: string, hullColor: Color3): Mesh {
+  const root = new Mesh(`${id}-root`, scene);
+  root.isVisible = false;
+  const mats = freighterMaterials(scene, id, hullColor);
+
+  const cargo = MeshBuilder.CreateBox(`${id}-cargo`, { width: 5.2, height: 4.8, depth: 11.5 }, scene);
+  cargo.position.set(0, 0, 0);
+  cargo.material = mats.cargo;
+  cargo.parent = root;
+
+  const ribDims = { width: 5.5, height: 5.1, depth: 0.35 };
+  const ribFront = MeshBuilder.CreateBox(`${id}-rib-front`, ribDims, scene);
+  ribFront.position.set(0, 0, 5.4);
+  ribFront.material = mats.trim;
+  ribFront.parent = root;
+
+  const ribBack = MeshBuilder.CreateBox(`${id}-rib-back`, ribDims, scene);
+  ribBack.position.set(0, 0, -5.4);
+  ribBack.material = mats.trim;
+  ribBack.parent = root;
+
+  const ribMid = MeshBuilder.CreateBox(`${id}-rib-mid`, { width: 5.4, height: 5.0, depth: 0.25 }, scene);
+  ribMid.position.set(0, 0, 0);
+  ribMid.material = mats.trim;
+  ribMid.parent = root;
+
+  const couplerDims = { width: 0.7, height: 0.7, depth: 1.1 };
+  const cFront = MeshBuilder.CreateBox(`${id}-coupler-front`, couplerDims, scene);
+  cFront.position.set(0, -1.4, 6.2);
+  cFront.material = mats.trim;
+  cFront.parent = root;
+
+  const cBack = MeshBuilder.CreateBox(`${id}-coupler-back`, couplerDims, scene);
+  cBack.position.set(0, -1.4, -6.2);
+  cBack.material = mats.trim;
+  cBack.parent = root;
+
+  return root;
+}
+
+/** Procedural missile: body + nose cone + cruciform fins + emissive tail glow. +Z forward. */
+function buildMissile(scene: Scene, id: string, diameter: number, length: number, finColor: Color3): Mesh {
+  const root = new Mesh(`${id}-root`, scene);
+  root.isVisible = false;
+
+  const bodyMat = new PBRMaterial(`${id}-body-mat`, scene);
+  bodyMat.albedoColor = new Color3(0.88, 0.88, 0.92);
+  bodyMat.metallic = 0.55;
+  bodyMat.roughness = 0.32;
+  bodyMat.environmentIntensity = 0.3;
+
+  const finMat = new PBRMaterial(`${id}-fin-mat`, scene);
+  finMat.albedoColor = finColor;
+  finMat.metallic = 0.3;
+  finMat.roughness = 0.4;
+  finMat.environmentIntensity = 0.3;
+
+  const trailMat = new StandardMaterial(`${id}-trail-mat`, scene);
+  trailMat.emissiveColor = new Color3(3.2, 1.7, 0.5);
+  trailMat.diffuseColor = new Color3(0, 0, 0);
+  trailMat.specularColor = new Color3(0, 0, 0);
+  trailMat.disableLighting = true;
+
+  const body = MeshBuilder.CreateCylinder(`${id}-body`, { diameter, height: length * 0.78, tessellation: 14 }, scene);
+  body.rotation.x = Math.PI / 2;
+  body.material = bodyMat;
+  body.parent = root;
+
+  const nose = MeshBuilder.CreateCylinder(`${id}-nose`, { diameterTop: 0.0, diameterBottom: diameter, height: length * 0.28, tessellation: 14 }, scene);
+  nose.rotation.x = -Math.PI / 2;
+  nose.position.z = length * 0.42;
+  nose.material = bodyMat;
+  nose.parent = root;
+
+  const finShape = { width: 0.05, height: diameter * 1.7, depth: length * 0.22 };
+  for (let i = 0; i < 4; i++) {
+    const angle = i * Math.PI / 2;
+    const fin = MeshBuilder.CreateBox(`${id}-fin-${i}`, finShape, scene);
+    fin.rotation.z = angle;
+    fin.position.set(Math.sin(angle) * diameter * 0.55, Math.cos(angle) * diameter * 0.55, -length * 0.26);
+    fin.material = finMat;
+    fin.parent = root;
+  }
+
+  const trail = MeshBuilder.CreateSphere(`${id}-trail`, { diameter: diameter * 1.05, segments: 12 }, scene);
+  trail.position.z = -length * 0.4;
+  trail.material = trailMat;
+  trail.parent = root;
+
+  return root;
 }
 
 // Vertex: pass model-space position as the "view ray" — the skybox sphere is

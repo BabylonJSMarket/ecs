@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { CameraHandle, Quaternion, Vec3 } from './types';
+import type { CameraHandle, ProceduralMeshSpec, Quaternion, Vec3 } from './types';
 
 // @babylonjs/lite is a WebGPU-only preview engine: its bundle reads the
 // `GPUShaderStage` family of globals at MODULE-INIT (not just at device
@@ -100,5 +100,39 @@ describe('BabylonLiteAdapter (pre-device contract subset)', () => {
       adapter.getCameraPose(bogus, outPos, outQ); // unknown handle → leaves outs untouched
     }).not.toThrow();
     expect(outPos).toEqual([9, 9, 9]);
+  });
+
+  // ─── Phase-3: the seeded-surface displacement is PURE math (no GPU device),
+  // so the determinism + cut-axis contract runs in this headless subset even
+  // though createProceduralMesh / particles / glow / sun need a WebGPU device
+  // (browser-only). This is the Lite analog of the shared contract's
+  // sampleProceduralSurface cases — locking the same byte-identical-per-seed
+  // invariant the other adapters guarantee.
+  describe('procedural surface (pure math, no device)', () => {
+    const rock: ProceduralMeshSpec = { shape: 'asteroid', seed: 7, size: [100, 0, 0] };
+
+    it('is deterministic for the same seed + direction, on a real radius', () => {
+      const adapter = new BabylonLiteAdapter();
+      const a: Vec3 = [0, 0, 0];
+      const b: Vec3 = [0, 0, 0];
+      adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, a);
+      adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, b);
+      expect(a).toEqual(b);
+      expect(Number.isFinite(a[0]) && Number.isFinite(a[1]) && Number.isFinite(a[2])).toBe(true);
+      expect(Math.hypot(a[0], a[1], a[2])).toBeGreaterThan(0);
+    });
+
+    it('changes with the seed and leaves non-rock shapes untouched', () => {
+      const adapter = new BabylonLiteAdapter();
+      const a: Vec3 = [0, 0, 0];
+      const c: Vec3 = [0, 0, 0];
+      adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, a);
+      adapter.sampleProceduralSurface({ ...rock, seed: 99 }, 0.3, 0.5, 0.81, c);
+      expect(c).not.toEqual(a);
+      const untouched: Vec3 = [1, 2, 3];
+      const ret = adapter.sampleProceduralSurface({ shape: 'missile', size: [1, 1, 4] }, 0, 0, 1, untouched);
+      expect(ret).toBe(untouched);
+      expect(untouched).toEqual([1, 2, 3]);
+    });
   });
 });

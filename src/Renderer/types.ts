@@ -228,6 +228,13 @@ export interface ModelInstantiateSpec {
   rotation?: Vec3;
   /** Uniform scale applied to the clone root. Default: 1. */
   scale?: number;
+  /**
+   * Optional auto-fit (measure-and-normalize + facing correction + mesh filter)
+   * for a displayed ship GLB. When `fit.fitLength` is set it overrides `scale`.
+   * See {@link ModelFitSpec}. The Wingman ships use this to show a 6–19 MB model
+   * at the right size/heading regardless of how the asset was authored.
+   */
+  fit?: ModelFitSpec;
 }
 
 export interface SkyboxSpec {
@@ -417,6 +424,319 @@ export interface CardMeshSpec {
   front?: TextureHandle;
   /** Initial back-face albedo. May be set later with `setMeshFaceTexture`. */
   back?: TextureHandle;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase-3 (Wingman) visual capabilities. Procedural seeded geometry, runtime
+// dynamic textures, particle systems, post-process glow/bloom, and a
+// camera-following sun — the surface the bespoke Wingman BabylonRenderer
+// exposed, lifted onto the shared adapter so the space-sim components run on
+// every engine. Handedness is locked elsewhere (identity camera → +Z forward,
+// RIGHT-handed geometry); all placement below must stay consistent with it.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** An RGBA color tuple in 0..1 (particle start/mid/dead colors carry alpha). */
+export type Color4 = [number, number, number, number];
+
+/** Opaque handle for a continuous particle emitter (space dust, trails). */
+export type ParticleEmitterHandle = { readonly __particleEmitter: unique symbol };
+
+/**
+ * Named procedural mesh shapes built by {@link RendererAdapter.createProceduralMesh}.
+ * `asteroid` / `oil-blob` / `asteroid-drop` are seeded rock geometry (a
+ * subdivided icosphere displaced by deterministic multi-octave noise); the
+ * remaining shapes are the bespoke Wingman ship / projectile / gate silhouettes
+ * built from welded primitive groups. Every shape is `+Z` forward, `+Y` up.
+ */
+export type ProceduralMeshShape =
+  | 'asteroid'
+  | 'oil-blob'
+  | 'asteroid-drop'
+  | 'spaceplane'
+  | 'kilrathi'
+  | 'freighter-head'
+  | 'freighter-car'
+  | 'missile'
+  | 'waypoint';
+
+/**
+ * Spec for {@link RendererAdapter.createProceduralMesh}: a deterministic,
+ * seed-driven mesh. `createMesh` builds engine PRIMITIVES (box/sphere/…);
+ * this builds the Wingman shapes — seeded asteroids/oil-blobs whose surface is
+ * displaced by an integer-seeded noise field (same `seed` ⇒ byte-identical
+ * geometry, so the same rock renders the same on every client and frame), plus
+ * the named ship/missile/waypoint silhouettes. The pure surface-displacement
+ * math is exposed separately via {@link RendererAdapter.sampleProceduralSurface}
+ * so collision/occlusion code and the adapter agree on the same shape.
+ */
+export interface ProceduralMeshSpec {
+  shape: ProceduralMeshShape;
+  /**
+   * Integer seed selecting the deterministic noise offset. Identical seed →
+   * identical displaced geometry. Ignored by the non-seeded ship/missile/
+   * waypoint shapes. Default 1.
+   */
+  seed?: number;
+  /**
+   * Base dimensions. For `asteroid` / `oil-blob` / `asteroid-drop` only `size[0]`
+   * is read — the MEAN radius before displacement (silhouette varies ±~25%).
+   * For ship/missile shapes it's `[diameter/width, height, length]`.
+   */
+  size: Vec3;
+  /** Base surface color (rock tint / hull color). Default mid-grey. */
+  color?: Color;
+  /** Self-illumination 0..1 (waypoint gates, engine glow orbs). Default 0. */
+  emissive?: number;
+  /**
+   * Optional carve: a plane normal (need not be unit — it's normalized) along
+   * which the rock is sliced flat, giving a fractured/cleaved face instead of a
+   * closed blob. Same `seed`+`cutAxis`+`cutDepth` is still deterministic. Only
+   * honored by the rock shapes.
+   */
+  cutAxis?: Vec3;
+  /** How deep the {@link cutAxis} plane bites in, as a fraction of the radius (0..1). */
+  cutDepth?: number;
+  /**
+   * Icosphere subdivision count for rock shapes (triangles ≈ 20·N²). Higher =
+   * smoother silhouette at GPU cost. Default engine-defined (~14). Ignored by
+   * non-rock shapes.
+   */
+  subdivisions?: number;
+}
+
+/**
+ * Auto-fit transform for a displayed GLB ship, layered on top of
+ * {@link ModelInstantiateSpec}'s base position/rotation/scale. The Wingman ships
+ * are authored at wildly different scales and facings, so the adapter measures
+ * the loaded hierarchy's bounding box and normalizes its longest HORIZONTAL
+ * (X or Z) extent to {@link fitLength}, then applies {@link yaw}/{@link pitch}
+ * so the nose points `+Z`. (Phase 3 just DISPLAYS the model — the
+ * dual-proxy/blow-apart composite is deferred to the combat phase.)
+ */
+export interface ModelFitSpec {
+  /**
+   * Normalize the longest horizontal extent of the loaded model to this world
+   * length. When set, it OVERRIDES {@link ModelInstantiateSpec.scale} (which is
+   * a fixed multiplier). The Wingman fighters fit to ~5; the freighter cars to ~12.
+   */
+  fitLength?: number;
+  /** Extra yaw (radians) so the model's nose aligns to `+Z`. Default 0. */
+  yaw?: number;
+  /** Extra pitch (radians). Default 0. */
+  pitch?: number;
+  /** Vertical offset applied after the fit-scale. Default 0. */
+  yOffset?: number;
+  /**
+   * Keep only loaded meshes whose name INCLUDES this substring, disposing the
+   * rest. One GLB can hold several bodies (freighter.glb carries both `TrainCar`
+   * and `TrainEngine`); this selects the one this instance shows. Omit → keep all.
+   */
+  meshNameFilter?: string;
+}
+
+/**
+ * Spec for {@link RendererAdapter.createDynamicTexture}: a GPU texture built
+ * from a raw RGBA8 PIXEL BUFFER the caller rasterized on the CPU (procedural
+ * rock albedo/normal/metallic, soft particle dots, the sun starburst). The
+ * canvas/pixel math stays in renderer-free component code (it's pure number
+ * crunching, no engine types); the adapter only uploads. Keyed/deduped exactly
+ * like {@link RendererAdapter.loadTexture}.
+ */
+export interface DynamicTextureSpec {
+  /** Texture width in texels. */
+  width: number;
+  /** Texture height in texels. */
+  height: number;
+  /**
+   * Tightly packed RGBA8 buffer, length = `width*height*4`, row-major, origin
+   * TOP-LEFT, channel order R,G,B,A. Re-uploadable via
+   * {@link RendererAdapter.updateDynamicTexture}.
+   */
+  pixels: Uint8ClampedArray | Uint8Array;
+  /**
+   * Treat the data as sRGB-encoded color (albedo). Normal/metallic/AO maps pass
+   * `false` (linear data) or they decode wrong. Default false.
+   */
+  srgb?: boolean;
+  /** The buffer carries meaningful alpha (sprite dots, starburst). Default false. */
+  hasAlpha?: boolean;
+  /** UV addressing for both axes. Default `'wrap'`. */
+  wrap?: 'wrap' | 'clamp' | 'mirror';
+  /** UV tiling repeat. Default 1. */
+  uScale?: number;
+  vScale?: number;
+}
+
+/**
+ * Spec for {@link RendererAdapter.createParticleBurst}: a ONE-SHOT emitter that
+ * fires {@link count} particles from a sphere around {@link position} then
+ * auto-disposes. Explosions and muzzle/launch flashes. The adapter auto-selects
+ * GPU vs CPU particles (Babylon `GPUParticleSystem.IsSupported`); Three uses a
+ * points/sprite pool; BabylonLite a WebGPU compute emitter; the Mock records it.
+ */
+export interface ParticleBurstSpec {
+  /** World-space center of the burst. */
+  position: Vec3;
+  /** Soft sprite texture (a {@link RendererAdapter.createDynamicTexture} dot). */
+  texture: TextureHandle;
+  /** Particles emitted in the single shot (`manualEmitCount`). */
+  count: number;
+  /** Sphere-emitter radius the particles spawn within. */
+  emitRadius: number;
+  /** Direction randomizer 0..1 (1 = fully spherical spread). Default 1. */
+  emitRadiusRange?: number;
+  minSize: number;
+  maxSize: number;
+  minLifeTime: number;
+  maxLifeTime: number;
+  /** Outward launch speed range. */
+  minEmitPower: number;
+  maxEmitPower: number;
+  /** HDR start / mid / dead colors (RGBA, may exceed 1 for bloom). */
+  color1: Color4;
+  color2: Color4;
+  colorDead: Color4;
+  /** Blend mode. `'add'` for fire/energy; `'standard'` for smoke. Default `'add'`. */
+  blend?: 'add' | 'standard' | 'multiply';
+  /** Constant acceleration (e.g. `[0,0,0]` in space). Default `[0,0,0]`. */
+  gravity?: Vec3;
+  /** Seconds the system stays alive emitting before auto-dispose. Default ~0.06. */
+  duration?: number;
+}
+
+/**
+ * Spec for {@link RendererAdapter.createParticleEmitter}: a CONTINUOUS emitter
+ * that streams particles until disposed (camera-anchored space dust, engine
+ * trails). Same GPU/CPU auto-select as {@link ParticleBurstSpec}.
+ */
+export interface ParticleEmitterSpec {
+  /** Initial world-space emitter position. Default `[0,0,0]`. */
+  position?: Vec3;
+  /** Soft sprite texture handle. */
+  texture: TextureHandle;
+  /** Max live particles (GPU buffer capacity). */
+  capacity: number;
+  /** Particles spawned per second. */
+  emitRate: number;
+  /** Sphere-emitter radius. */
+  emitRadius: number;
+  /** Direction randomizer / inner-radius fraction 0..1. Default 0.2. */
+  emitRadiusRange?: number;
+  minSize: number;
+  maxSize: number;
+  minLifeTime: number;
+  maxLifeTime: number;
+  minEmitPower: number;
+  maxEmitPower: number;
+  color1: Color4;
+  color2: Color4;
+  colorDead: Color4;
+  blend?: 'add' | 'standard' | 'multiply';
+  gravity?: Vec3;
+  /**
+   * Re-seat the emitter at the ACTIVE camera's world position every frame, so
+   * the field is always "around you" (Wingman space dust). With floating-origin
+   * world streaming this avoids spawning/culling real entities. Default false.
+   */
+  followCamera?: boolean;
+  /** Pre-warm simulation cycles so the field is already populated on frame 1. */
+  preWarmCycles?: number;
+}
+
+/**
+ * Config for {@link RendererAdapter.setGlowLayer}: a SELECTIVE glow post-pass.
+ * The layer starts with an EMPTY whitelist — only meshes added via
+ * {@link RendererAdapter.addGlowMesh} bleed (the sun disc/flare, engine orbs),
+ * so explosions/trails/stars don't smear. Pass `null` to disable.
+ */
+export interface GlowSpec {
+  /** Glow strength. Wingman uses ~0.9. */
+  intensity: number;
+  /** Glow RTT downsample ratio (cheaper/blurrier as it drops). Default 0.5. */
+  textureRatio?: number;
+  /** MSAA samples on the glow RTT. Default 1. */
+  samples?: number;
+}
+
+/**
+ * Config for {@link RendererAdapter.setBloom}: HDR bloom on the default
+ * rendering pipeline (depth-tested, so it naturally hides emissive pixels
+ * occluded by nearer geometry — unlike the additive glow layer). Pass `null`
+ * to disable.
+ */
+export interface BloomSpec {
+  /** Bloom contribution weight. */
+  weight: number;
+  /** Brightness above which pixels bloom. Default engine-defined. */
+  threshold?: number;
+  /** Bloom blur scale. Default engine-defined. */
+  scale?: number;
+  /** Blur kernel size in px. Default engine-defined. */
+  kernel?: number;
+}
+
+/**
+ * Per-mesh draw-order / depth knobs for {@link RendererAdapter.setMeshRenderingOptions}.
+ * These layer the skybox (behind everything, no depth write, camera-locked),
+ * the sun/flare, decals, and HUD widgets so they composite correctly without a
+ * component touching the engine. All fields optional; the adapter applies only
+ * what's provided.
+ */
+export interface MeshRenderOptions {
+  /**
+   * Draw bucket. Group 0 (default) renders first; higher groups render after,
+   * on top. The Wingman HUD plane + light gizmo use group 1 so asteroids can't
+   * occlude them.
+   */
+  renderingGroupId?: number;
+  /** Skip depth WRITES (skybox: never blocks the z-test of real geometry). */
+  disableDepthWrite?: boolean;
+  /** Render at the far plane, locked to the camera (skybox dome). */
+  infiniteDistance?: boolean;
+  /** Whether scene fog tints this mesh. Sun/flare/HUD set false. */
+  applyFog?: boolean;
+  /** Whether the mesh participates in ray picks. Decals/HUD set false. */
+  pickable?: boolean;
+}
+
+/**
+ * Spec for {@link RendererAdapter.createSun}: a camera-following sun — a
+ * DirectionalLight whose rays travel along {@link direction}, plus an emissive
+ * disc parked at {@link distance} from the active camera in the OPPOSITE
+ * direction (so it reads as an infinitely-distant star that never parallaxes).
+ * Optional shadow-generator tuning drives crisp rock-on-rock shadows. Returns a
+ * {@link LightHandle} addressing the directional light; the disc is internal and
+ * its world position is read back via {@link RendererAdapter.getSunWorldPosition}
+ * (for the off-screen sun indicator).
+ */
+export interface SunSpec {
+  /**
+   * Unit world-space direction the light TRAVELS (rays go this way). The disc
+   * sits at `camera − direction*distance`. RIGHT-handed; keep consistent with
+   * the locked `+Z` forward convention.
+   */
+  direction: Vec3;
+  /** Distance from the camera to the disc. Only affects parallax-free framing. */
+  distance: number;
+  intensity: number;
+  diffuse: Color;
+  specular: Color;
+  /** Visible disc diameter at {@link distance}. Default engine-defined. */
+  discDiameter?: number;
+  /** HDR emissive color of the disc (may exceed 1 to clear the bloom threshold). */
+  discColor?: Color;
+  /** Optional shadow-generator tuning. Omit → no shadow pass (cheapest). */
+  shadow?: {
+    enabled: boolean;
+    /** Shadow-map resolution (e.g. 2048 for sharp field shadows). */
+    mapSize: number;
+    /** Shadow darkness 0..1. Default engine-defined. */
+    darkness?: number;
+    bias?: number;
+    normalBias?: number;
+    /** Render only back-faces into the shadow map (fixes self-shadow acne on big rocks). */
+    forceBackFacesOnly?: boolean;
+  };
 }
 
 export interface RendererAdapter {
@@ -941,6 +1261,120 @@ export interface RendererAdapter {
    * adapters no-op. A debug aid — not a per-body control.
    */
   setCollidersVisible(visible: boolean): void;
+
+  // ─── Phase-3: procedural seeded geometry ───
+  /**
+   * Build a deterministic, seed-driven mesh (Wingman asteroids/oil-blobs + the
+   * named ship/missile/waypoint silhouettes) and register it under `id` so the
+   * standard mesh ops (`setMeshPosition`/`setMeshRotation`/`setMeshScale`/
+   * `setMeshVisible`/`disposeMesh`, `setMeshEmissiveById`, `attachShadowCaster`)
+   * all address it. Distinct from {@link createMesh}, which builds engine
+   * PRIMITIVES — this builds noise-displaced/welded geometry from a
+   * {@link ProceduralMeshSpec}. Same `seed` (+`cutAxis`/`cutDepth`) ⇒ identical
+   * geometry on every client. Adapters that can't tessellate procedurally may
+   * fall back to a primitive of the same bounding size but MUST keep the handle
+   * contract.
+   */
+  createProceduralMesh(id: string, spec: ProceduralMeshSpec, mat?: MaterialSpec): MeshHandle;
+  /**
+   * Pure, ENGINE-FREE surface evaluation for a seeded rock shape: given the
+   * spec and a (need-not-be-unit) direction, write the displaced surface point
+   * (object-local, before the mesh's own transform) into `out` and return it.
+   * This is the SAME deterministic noise the adapter tessellates, exposed so
+   * collision/occlusion code and the renderer agree on one silhouette — and so
+   * the contract can prove determinism (same seed+dir ⇒ identical point) without
+   * a GPU. Every adapter MUST return byte-identical results for identical inputs
+   * (it's shared pure math, not an engine call). Returns `out` unchanged for the
+   * non-rock shapes (ship/missile/waypoint), which have no radial surface field.
+   */
+  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3;
+
+  // ─── Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture) ───
+  /**
+   * Upload a CPU-rasterized RGBA8 pixel buffer (see {@link DynamicTextureSpec})
+   * as a GPU texture, deduped by `key` exactly like {@link loadTexture}: a
+   * repeat call with the same key returns the same handle (ignoring the new
+   * spec). The component owns the (renderer-free) pixel math — procedural rock
+   * maps, the soft particle dot, the sun starburst — and never touches a canvas
+   * type. Adapters without a texture pipeline record the upload and return a
+   * key-deduped handle.
+   */
+  createDynamicTexture(key: string, spec: DynamicTextureSpec): TextureHandle;
+  /**
+   * Re-upload new pixels into a texture made by {@link createDynamicTexture}
+   * (animated procedural maps). `pixels` must match the original width*height*4.
+   * No-op on an unknown handle.
+   */
+  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void;
+
+  // ─── Phase-3: particle systems ───
+  /**
+   * Fire a ONE-SHOT particle burst (explosion, muzzle/launch flash) at a world
+   * point and auto-dispose it after {@link ParticleBurstSpec.duration}. The
+   * adapter auto-selects GPU vs CPU particles. Fire-and-forget — no handle.
+   */
+  createParticleBurst(spec: ParticleBurstSpec): void;
+  /**
+   * Create a CONTINUOUS particle emitter (camera-anchored space dust, engine
+   * trails) registered under `id`, returning a handle for repositioning /
+   * disposal. With {@link ParticleEmitterSpec.followCamera} the adapter re-seats
+   * it at the active camera each frame internally.
+   */
+  createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle;
+  /** Move a continuous emitter (no-op when `followCamera` drives it / unknown handle). */
+  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void;
+  /** Dispose a continuous emitter and free its GPU buffers. Idempotent. */
+  disposeParticleEmitter(h: ParticleEmitterHandle): void;
+
+  // ─── Phase-3: post-process glow / bloom + emissive + render ordering ───
+  /**
+   * Enable / configure the SELECTIVE glow post-pass (empty whitelist by
+   * default — add meshes with {@link addGlowMesh}). Pass `null` to disable.
+   * Adapters without a glow pipeline no-op.
+   */
+  setGlowLayer(spec: GlowSpec | null): void;
+  /** Whitelist a mesh into the glow layer (sun disc/flare, engine orbs). No-op if no glow layer. */
+  addGlowMesh(h: MeshHandle): void;
+  /** Remove a mesh from the glow whitelist. No-op if absent / no glow layer. */
+  removeGlowMesh(h: MeshHandle): void;
+  /**
+   * Enable / configure HDR bloom on the default pipeline (depth-tested, so it
+   * respects occlusion — preferred over the glow layer for emissive gates
+   * behind rocks). Pass `null` to disable. Adapters without a pipeline no-op.
+   */
+  setBloom(spec: BloomSpec | null): void;
+  /**
+   * Unlit-aware emissive setter keyed by the same id passed to
+   * {@link createMesh}/{@link createProceduralMesh}. On a normal (lit) material
+   * the emissive is the given color × `intensity` (it overpowers lighting); on
+   * an UNLIT material (waypoint gates, sun disc) the value is treated as a
+   * literal clamped emissive so bloom+tonemap don't blow it to white. No-op on
+   * an unknown id. (The deliberate counterpart to {@link setMeshColor}, which
+   * drives the flat diffuse path.)
+   */
+  setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void;
+  /**
+   * Apply per-mesh draw-order / depth knobs (see {@link MeshRenderOptions}) so
+   * the skybox, sun, decals and HUD layer correctly. No-op on an unknown handle.
+   */
+  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void;
+
+  // ─── Phase-3: camera-following sun + directional-light query ───
+  /**
+   * Create a camera-following sun (directional light + emissive disc, optional
+   * shadow generator; see {@link SunSpec}) registered under `id`, returning the
+   * {@link LightHandle} for the directional light. The disc parks at a fixed
+   * offset from the active camera so it reads as infinitely distant. Adapters
+   * without a sun concept create just the directional light.
+   */
+  createSun(id: string, spec: SunSpec): LightHandle;
+  /**
+   * World-space position of the sun disc (camera-relative — it moves every
+   * frame), written into `out` and returned. Drives the HUD's off-screen sun
+   * arrow via {@link worldToScreen}. Returns `null` (leaving `out` untouched) if
+   * no sun has been created.
+   */
+  getSunWorldPosition(out: Vec3): Vec3 | null;
 
   startLoop(onFrame: (dtSeconds: number) => void): void;
   stopLoop(): void;

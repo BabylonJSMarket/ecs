@@ -44,8 +44,28 @@ import type {
   Quaternion,
   ScreenPoint,
   Vec3,
+  ProceduralMeshSpec,
+  DynamicTextureSpec,
+  ParticleBurstSpec,
+  ParticleEmitterSpec,
+  ParticleEmitterHandle,
+  GlowSpec,
+  BloomSpec,
+  MeshRenderOptions,
+  SunSpec,
 } from './types';
 import type { Color } from './types';
+
+/**
+ * Deterministic [0,1) hash of three integers — the Mock's reference noise
+ * source for {@link MockRendererAdapter.sampleProceduralSurface}. Mirrors the
+ * Wingman asteroid hash so seeded geometry is reproducible without an engine.
+ */
+function mockHash3(a: number, b: number, c: number): number {
+  let n = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+}
 
 /**
  * Rotate a Vec3 by a unit quaternion: v' = v + 2·w·(q×v) + 2·(q×(q×v)).
@@ -672,6 +692,154 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   physicsStep(dt: number): void {
     this.record('physicsStep', dt);
+  }
+
+  // ─── Phase-3: procedural seeded geometry ───
+  /** Per-procedural-mesh recorded spec, so tests can assert seed/shape/cut. */
+  proceduralMeshes = new Map<MeshHandle, ProceduralMeshSpec>();
+
+  createProceduralMesh(id: string, spec: ProceduralMeshSpec, mat?: MaterialSpec): MeshHandle {
+    const h = makeHandle<MeshHandle>('proc', id);
+    this.proceduralMeshes.set(h, spec);
+    this.record('createProceduralMesh', id, spec, mat);
+    return h;
+  }
+  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3 {
+    const isRock = spec.shape === 'asteroid' || spec.shape === 'oil-blob' || spec.shape === 'asteroid-drop';
+    if (!isRock) return out; // ship/missile/waypoint have no radial surface field
+    const seed = spec.seed ?? 1;
+    const radius = spec.size[0];
+    // Normalize the input direction (callers pass icosphere vertex dirs).
+    const len = Math.hypot(dirX, dirY, dirZ) || 1;
+    const nx = dirX / len, ny = dirY / len, nz = dirZ / len;
+    // Deterministic multi-octave displacement keyed by seed + quantized dir.
+    // Quantizing makes the same vertex direction map to the same offset on
+    // every adapter/run; identical (seed,dir) ⇒ identical radius.
+    let amp = 0.5;
+    let freq = 2;
+    let disp = 0;
+    for (let o = 0; o < 4; o++) {
+      const qx = Math.round(nx * freq * 8);
+      const qy = Math.round(ny * freq * 8);
+      const qz = Math.round(nz * freq * 8);
+      disp += (mockHash3(qx + seed, qy + seed * 31, qz + seed * 131) - 0.5) * amp;
+      amp *= 0.5;
+      freq *= 2;
+    }
+    let r = radius * (1 + disp * 0.5); // silhouette varies ±~25%
+    // Optional cut-axis carve: flatten the cap on the far side of the plane.
+    if (spec.cutAxis && spec.cutDepth && spec.cutDepth > 0) {
+      const [cx, cy, cz] = spec.cutAxis;
+      const cl = Math.hypot(cx, cy, cz) || 1;
+      const proj = (nx * cx + ny * cy + nz * cz) / cl; // -1..1 along the cut normal
+      const threshold = 1 - spec.cutDepth;
+      if (proj > threshold) r = Math.min(r, radius * threshold);
+    }
+    out[0] = nx * r;
+    out[1] = ny * r;
+    out[2] = nz * r;
+    return out;
+  }
+
+  // ─── Phase-3: runtime dynamic textures ───
+  /** Dynamic textures deduped by key (mirrors the engine adapters' cache). */
+  dynamicTextures = new Map<string, TextureHandle>();
+
+  createDynamicTexture(key: string, spec: DynamicTextureSpec): TextureHandle {
+    this.record('createDynamicTexture', key, spec);
+    const existing = this.dynamicTextures.get(key);
+    if (existing) return existing;
+    const h = makeHandle<TextureHandle>('dynTex', key);
+    this.dynamicTextures.set(key, h);
+    return h;
+  }
+  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
+    this.record('updateDynamicTexture', h, pixels);
+  }
+
+  // ─── Phase-3: particle systems ───
+  /** Live continuous emitters, so create/setPosition/dispose round-trips. */
+  particleEmitters = new Map<ParticleEmitterHandle, { spec: ParticleEmitterSpec; position: Vec3 }>();
+
+  createParticleBurst(spec: ParticleBurstSpec): void {
+    this.record('createParticleBurst', spec);
+  }
+  createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
+    const h = makeHandle<ParticleEmitterHandle>('emitter', id);
+    this.particleEmitters.set(h, {
+      spec,
+      position: spec.position ? [...spec.position] as Vec3 : [0, 0, 0],
+    });
+    this.record('createParticleEmitter', id, spec);
+    return h;
+  }
+  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
+    const rec = this.particleEmitters.get(h);
+    if (rec) rec.position = [x, y, z];
+    this.record('setParticleEmitterPosition', h, x, y, z);
+  }
+  disposeParticleEmitter(h: ParticleEmitterHandle): void {
+    this.particleEmitters.delete(h);
+    this.record('disposeParticleEmitter', h);
+  }
+
+  // ─── Phase-3: glow / bloom / emissive / render ordering ───
+  /** Last glow / bloom config + glow whitelist, surfaced for assertions. */
+  glow: GlowSpec | null = null;
+  bloom: BloomSpec | null = null;
+  glowMeshes = new Set<MeshHandle>();
+  meshRenderOptions = new Map<MeshHandle, MeshRenderOptions>();
+
+  setGlowLayer(spec: GlowSpec | null): void {
+    this.glow = spec;
+    if (!spec) this.glowMeshes.clear();
+    this.record('setGlowLayer', spec);
+  }
+  addGlowMesh(h: MeshHandle): void {
+    this.glowMeshes.add(h);
+    this.record('addGlowMesh', h);
+  }
+  removeGlowMesh(h: MeshHandle): void {
+    this.glowMeshes.delete(h);
+    this.record('removeGlowMesh', h);
+  }
+  setBloom(spec: BloomSpec | null): void {
+    this.bloom = spec;
+    this.record('setBloom', spec);
+  }
+  setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
+    this.record('setMeshEmissiveById', meshId, r, g, b, intensity);
+  }
+  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
+    this.meshRenderOptions.set(h, { ...(this.meshRenderOptions.get(h) ?? {}), ...opts });
+    this.record('setMeshRenderingOptions', h, opts);
+  }
+
+  // ─── Phase-3: camera-following sun ───
+  /** Recorded sun world position; null until createSun. Tests can override. */
+  sunWorldPosition: Vec3 | null = null;
+
+  createSun(id: string, spec: SunSpec): LightHandle {
+    const h = makeHandle<LightHandle>('sun', id);
+    // Disc parks at `-direction * distance` from the (origin) camera by default;
+    // gives a finite, deterministic readback for getSunWorldPosition.
+    const d = spec.direction;
+    const dl = Math.hypot(d[0], d[1], d[2]) || 1;
+    this.sunWorldPosition = [
+      -(d[0] / dl) * spec.distance,
+      -(d[1] / dl) * spec.distance,
+      -(d[2] / dl) * spec.distance,
+    ];
+    this.record('createSun', id, spec);
+    return h;
+  }
+  getSunWorldPosition(out: Vec3): Vec3 | null {
+    this.record('getSunWorldPosition');
+    if (!this.sunWorldPosition) return null;
+    out[0] = this.sunWorldPosition[0];
+    out[1] = this.sunWorldPosition[1];
+    out[2] = this.sunWorldPosition[2];
+    return out;
   }
 
   startLoop(onFrame: (dtSeconds: number) => void): void {
