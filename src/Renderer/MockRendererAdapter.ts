@@ -39,9 +39,29 @@ import type {
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
+  PerspectiveCameraSpec,
+  LargeWorldSpec,
+  Quaternion,
+  ScreenPoint,
   Vec3,
 } from './types';
 import type { Color } from './types';
+
+/**
+ * Rotate a Vec3 by a unit quaternion: v' = v + 2·w·(q×v) + 2·(q×(q×v)).
+ * Used by the Mock's deterministic pinhole projection so `worldToScreen`
+ * resolves a real camera basis from the quaternion set via `setCameraPose`.
+ */
+function rotateByQuat(v: Vec3, q: Quaternion): Vec3 {
+  const tx = 2 * (q.y * v[2] - q.z * v[1]);
+  const ty = 2 * (q.z * v[0] - q.x * v[2]);
+  const tz = 2 * (q.x * v[1] - q.y * v[0]);
+  return [
+    v[0] + q.w * tx + (q.y * tz - q.z * ty),
+    v[1] + q.w * ty + (q.z * tx - q.x * tz),
+    v[2] + q.w * tz + (q.x * ty - q.y * tx),
+  ];
+}
 
 export interface MockCall {
   method: string;
@@ -359,6 +379,94 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   setCameraControlsEnabled(h: CameraHandle, enabled: boolean): void {
     this.record('setCameraControlsEnabled', h, enabled);
+  }
+
+  // ─── Free 6-DOF perspective camera + projection ───
+  /** Per-perspective-camera pose + spec stub; `worldToScreen` projects against the active one. */
+  perspectiveCameras = new Map<CameraHandle, { spec: PerspectiveCameraSpec; position: Vec3; orientation: Quaternion }>();
+  /** The most-recently-created perspective camera — the one `worldToScreen` projects against. */
+  private activePerspectiveCamera: CameraHandle | null = null;
+  /** Render dims used by the deterministic pinhole projection. Tests can override. */
+  renderWidth = 1280;
+  renderHeight = 720;
+
+  createPerspectiveCamera(id: string, spec: PerspectiveCameraSpec): CameraHandle {
+    const h = makeHandle<CameraHandle>('perspCamera', id);
+    this.perspectiveCameras.set(h, {
+      spec,
+      position: spec.position ? [spec.position[0], spec.position[1], spec.position[2]] : [0, 0, 0],
+      orientation: spec.orientation ? { ...spec.orientation } : { x: 0, y: 0, z: 0, w: 1 },
+    });
+    this.activePerspectiveCamera = h;
+    this.record('createPerspectiveCamera', id, spec);
+    return h;
+  }
+  setCameraPose(h: CameraHandle, position: Vec3, orientation: Quaternion): void {
+    const rec = this.perspectiveCameras.get(h);
+    if (rec) {
+      rec.position = [position[0], position[1], position[2]];
+      rec.orientation = { x: orientation.x, y: orientation.y, z: orientation.z, w: orientation.w };
+    }
+    this.record('setCameraPose', h, position, orientation);
+  }
+  getCameraPose(h: CameraHandle, outPosition: Vec3, outOrientation: Quaternion): void {
+    const rec = this.perspectiveCameras.get(h);
+    if (!rec) return;
+    outPosition[0] = rec.position[0];
+    outPosition[1] = rec.position[1];
+    outPosition[2] = rec.position[2];
+    outOrientation.x = rec.orientation.x;
+    outOrientation.y = rec.orientation.y;
+    outOrientation.z = rec.orientation.z;
+    outOrientation.w = rec.orientation.w;
+  }
+  worldToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
+    this.record('worldToScreen', x, y, z);
+    const cam = this.activePerspectiveCamera
+      ? this.perspectiveCameras.get(this.activePerspectiveCamera)
+      : undefined;
+    if (!cam) return false;
+    // Camera basis from the quaternion. Babylon LH convention: an identity
+    // orientation looks down +Z, +X is right, +Y is up.
+    const fwd = rotateByQuat([0, 0, 1], cam.orientation);
+    const right = rotateByQuat([1, 0, 0], cam.orientation);
+    const up = rotateByQuat([0, 1, 0], cam.orientation);
+    const rx = x - cam.position[0];
+    const ry = y - cam.position[1];
+    const rz = z - cam.position[2];
+    const depth = rx * fwd[0] + ry * fwd[1] + rz * fwd[2];
+    if (depth <= 0) return false; // behind the camera — leave `out` untouched
+    const vx = rx * right[0] + ry * right[1] + rz * right[2];
+    const vy = rx * up[0] + ry * up[1] + rz * up[2];
+    const aspect = this.renderWidth / this.renderHeight;
+    const tanHalf = Math.tan(cam.spec.fov / 2);
+    const ndcX = vx / depth / (tanHalf * aspect);
+    const ndcY = vy / depth / tanHalf;
+    out.x = (ndcX * 0.5 + 0.5) * this.renderWidth;
+    out.y = (0.5 - ndcY * 0.5) * this.renderHeight;
+    return true;
+  }
+
+  // ─── Floating origin (Phase-1: contract-only, dormant) ───
+  /** Tracked floating-origin offset; round-trips via get/setOriginOffset. No active rebase. */
+  originOffset: Vec3 = [0, 0, 0];
+  /** Recorded large-world config (Phase-1 records only; no rebase). */
+  largeWorld: { enabled: boolean; farPlane?: number } = { enabled: false };
+
+  getOriginOffset(out: Vec3): Vec3 {
+    out[0] = this.originOffset[0];
+    out[1] = this.originOffset[1];
+    out[2] = this.originOffset[2];
+    this.record('getOriginOffset');
+    return out;
+  }
+  setOriginOffset(x: number, y: number, z: number): void {
+    this.originOffset = [x, y, z];
+    this.record('setOriginOffset', x, y, z);
+  }
+  configureLargeWorld(spec: LargeWorldSpec): void {
+    this.largeWorld = { enabled: spec.enabled, farPlane: spec.farPlane };
+    this.record('configureLargeWorld', spec);
   }
 
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {

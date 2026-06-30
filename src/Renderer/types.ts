@@ -12,6 +12,26 @@
 export type Vec3 = [number, number, number];
 export type Color = [number, number, number];
 
+/**
+ * A rotation quaternion `{ x, y, z, w }` (the renderer-agnostic orientation
+ * primitive). Carried as a quaternion — not Euler angles — so a 6-DOF chase
+ * camera that loops and rolls reaches the renderer without a lossy
+ * quat→Euler→quat round-trip and the gimbal flips that invites. Adapters expect
+ * a UNIT quaternion; the identity (no rotation) is `{ x: 0, y: 0, z: 0, w: 1 }`.
+ */
+export type Quaternion = { x: number; y: number; z: number; w: number };
+
+/**
+ * A mutable screen-pixel pair used as an `out` parameter so projection-heavy HUD
+ * code (target brackets, crosshair, lead diamond, off-screen arrows, sun marker)
+ * can re-project hundreds of points per frame without allocating. Pixel-space,
+ * origin TOP-LEFT, +x right, +y DOWN.
+ */
+export interface ScreenPoint {
+  x: number;
+  y: number;
+}
+
 // Opaque handles. The `__brand` fields are phantom and exist only to make
 // handle types distinct to TypeScript.
 export type MeshHandle = { readonly __mesh: unique symbol };
@@ -125,6 +145,44 @@ export interface ArcCameraSpec {
    * games (top-down shooter, pinball) where the camera should ignore input.
    */
   controlsEnabled?: boolean;
+}
+
+/**
+ * Spec for {@link RendererAdapter.createPerspectiveCamera}: a FREE 6-DOF
+ * perspective camera with no orbit target. Unlike {@link ArcCameraSpec} (which
+ * frames a target via alpha/beta/radius), this camera is posed directly each
+ * frame with {@link RendererAdapter.setCameraPose} — the surface a gimbal-safe
+ * chase camera (loops, rolls, free flight) needs.
+ */
+export interface PerspectiveCameraSpec {
+  /** Vertical field of view in RADIANS. */
+  fov: number;
+  /** Near clip-plane distance in world units. */
+  near: number;
+  /**
+   * Far clip-plane distance in world units. A large-world / space scene pushes
+   * this far out (~200000); see {@link LargeWorldSpec.farPlane}, which can widen
+   * it on the active camera after creation.
+   */
+  far: number;
+  /** Optional initial world-space position. Default `[0, 0, 0]`. */
+  position?: Vec3;
+  /** Optional initial orientation quaternion. Default identity `{ x:0, y:0, z:0, w:1 }`. */
+  orientation?: Quaternion;
+}
+
+/**
+ * Config for {@link RendererAdapter.configureLargeWorld}: the floating-origin /
+ * large-world enable flag plus an optional far-plane override applied to the
+ * active perspective camera. Phase-1 is CONTRACT-ONLY — the adapter records the
+ * config (and may widen the far plane) but performs NO active per-frame
+ * rebasing; the pure game keeps passing real world coordinates.
+ */
+export interface LargeWorldSpec {
+  /** Enable large-world / floating-origin bookkeeping. */
+  enabled: boolean;
+  /** Far clip plane for the active perspective camera (~200000 for a space sim). */
+  farPlane?: number;
 }
 
 export interface MeshLoadSpec {
@@ -589,6 +647,76 @@ export interface RendererAdapter {
    * temporarily takes over the camera).
    */
   setCameraControlsEnabled(h: CameraHandle, enabled: boolean): void;
+
+  // ─── Free 6-DOF perspective camera (chase / flight) ───
+  /**
+   * Create a FREE 6-DOF perspective camera (no orbit target) registered under
+   * `id`, and make it the active camera. Where {@link createArcCamera} orbits a
+   * target, this camera is driven directly each frame by {@link setCameraPose} —
+   * the surface a gimbal-safe chase camera (loops, rolls, free flight) needs.
+   * Babylon backs it with a `UniversalCamera`; Three with a `PerspectiveCamera`;
+   * BabylonLite with its functional WebGPU camera. Returns an opaque
+   * {@link CameraHandle}. The same handle is accepted by {@link setCameraPose},
+   * {@link getCameraPose}, {@link setCameraFov} and {@link screenToWorldPoint}.
+   */
+  createPerspectiveCamera(id: string, spec: PerspectiveCameraSpec): CameraHandle;
+  /**
+   * Pose a perspective camera with a world-space `position` and a unit
+   * `orientation` QUATERNION. Quaternion — not Euler — on purpose: a chase
+   * camera that loops/rolls must reach the renderer without a lossy quat→Euler
+   * round-trip (and the gimbal flips it invites). Adapters apply the orientation
+   * directly (Babylon: `camera.rotationQuaternion`; Three: `camera.quaternion`;
+   * BabylonLite: stored on its view matrix). No-op on an unknown / non-perspective
+   * handle.
+   */
+  setCameraPose(h: CameraHandle, position: Vec3, orientation: Quaternion): void;
+  /**
+   * Read a perspective camera's current pose: world-space position into
+   * `outPosition` and unit orientation quaternion into `outOrientation`. Lets the
+   * chase camera read back its own pose and underpins the contract's pose
+   * round-trip. The returned quaternion may be the sign-flipped twin of the one
+   * passed to {@link setCameraPose} (q and −q are the same rotation). No-op
+   * (leaves the outs untouched) on an unknown handle.
+   */
+  getCameraPose(h: CameraHandle, outPosition: Vec3, outOrientation: Quaternion): void;
+  /**
+   * Project a world-space point `(x, y, z)` to screen pixels, writing the result
+   * into `out` (origin top-left, +y down). Returns `false` — and LEAVES `out`
+   * UNTOUCHED — when the point is BEHIND the active camera, so HUD callers can
+   * branch to an off-screen arrow instead of drawing a bracket at a mirrored
+   * phantom position. The inverse of {@link screenToWorldPoint}; it drives the
+   * entire Wingman HUD (target brackets, crosshair, lead diamond, off-screen
+   * arrows, sun marker). Babylon: `Vector3.Project`; Three: `Vector3.project`
+   * then NDC→pixels. Uses the active perspective camera and the adapter's current
+   * render size.
+   */
+  worldToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean;
+
+  // ─── Floating origin / large world (Phase-1: contract-only, dormant) ───
+  /**
+   * Read the renderer's current floating-origin offset into `out` and return it.
+   * Phase-1 is CONTRACT-ONLY / dormant: there is no active per-frame rebase, so
+   * this returns whatever {@link setOriginOffset} last recorded (default
+   * `[0, 0, 0]`, a camera-relative fallback). The pure game always passes real
+   * world coordinates; this offset is how a future large-world backend would
+   * report the rebase it applied.
+   */
+  getOriginOffset(out: Vec3): Vec3;
+  /**
+   * Record the desired floating-origin offset `(x, y, z)`. Phase-1
+   * CONTRACT-ONLY — the adapter stores it (so {@link getOriginOffset}
+   * round-trips) but does NOT yet rebase the scene graph each frame. Active
+   * per-frame rebasing is out of scope for Phase 1.
+   */
+  setOriginOffset(x: number, y: number, z: number): void;
+  /**
+   * Configure large-world / floating-origin behavior: the `enabled` flag plus an
+   * optional `farPlane` (~200000 for a space sim) applied to the active
+   * perspective camera. Phase-1 records the config and may widen the far plane,
+   * but performs NO active rebasing. Adapters without a far-plane knob record the
+   * flag and no-op the plane.
+   */
+  configureLargeWorld(spec: LargeWorldSpec): void;
 
   /**
    * Cast a ray from a screen-space point and return the first world

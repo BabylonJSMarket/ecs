@@ -54,6 +54,10 @@ import type {
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
+  PerspectiveCameraSpec,
+  LargeWorldSpec,
+  Quaternion,
+  ScreenPoint,
   Vec3,
 } from './types';
 import type { Color } from './types';
@@ -1627,12 +1631,158 @@ export class ThreeAdapter implements RendererAdapter {
     if (ctrl) ctrl.enabled = enabled;
   }
 
+  // ─── Free 6-DOF perspective camera (chase / flight) ───
+  /**
+   * The active free perspective camera: the one {@link worldToScreen} projects
+   * against and the one the render loop draws through. Set by
+   * {@link createPerspectiveCamera}; null falls back to the first registered /
+   * default camera.
+   */
+  private activePerspectiveCamera: CameraHandle | null = null;
+  /** Scratch vector reused by {@link worldToScreen} so the HUD re-projects allocation-free. */
+  private _wtsVec?: THREE.Vector3;
+
+  /**
+   * The THREE camera the render loop / resize / pick should use: the active free
+   * perspective camera if one exists, else the first registered arc camera, else
+   * the default fallback (built in init()).
+   */
+  private renderCamera(): THREE.PerspectiveCamera | undefined {
+    if (this.activePerspectiveCamera) {
+      const entry = this.cameras.get(this.activePerspectiveCamera);
+      if (entry) return entry.camera;
+    }
+    const first = this.cameras.values().next().value;
+    return first?.camera ?? this.defaultCamera;
+  }
+
+  createPerspectiveCamera(id: string, spec: PerspectiveCameraSpec): CameraHandle {
+    const T = this.requireThree();
+    // Three's PerspectiveCamera wants a VERTICAL fov in DEGREES; the interface
+    // ships radians (matching Babylon), so convert — exactly as setCameraFov does.
+    const camera = new T.PerspectiveCamera(
+      T.MathUtils.radToDeg(spec.fov),
+      this.canvasAspect(),
+      spec.near,
+      spec.far,
+    );
+    if (spec.position) camera.position.set(spec.position[0], spec.position[1], spec.position[2]);
+    if (spec.orientation) {
+      const q = spec.orientation;
+      camera.quaternion.set(q.x, q.y, q.z, q.w);
+    }
+    camera.updateMatrixWorld();
+    // Free camera: NO OrbitControls — it's posed directly each frame via
+    // setCameraPose. The absent `controls` is also how the pose setters tell a
+    // free camera apart from an arc camera in the shared `cameras` registry.
+    const handle = this.makeHandle<CameraHandle>('perspCamera', id);
+    this.cameras.set(handle, { camera });
+    this.activePerspectiveCamera = handle;
+    return handle;
+  }
+
+  setCameraPose(h: CameraHandle, position: Vec3, orientation: Quaternion): void {
+    const entry = this.cameras.get(h);
+    // No-op on an unknown handle or an arc camera (those carry OrbitControls and
+    // are driven by orbit/target, not a direct pose).
+    if (!entry || entry.controls) return;
+    entry.camera.position.set(position[0], position[1], position[2]);
+    // Quaternion applied directly — no quat→Euler round-trip, so loops and rolls
+    // reach the renderer without gimbal flips. Three keeps it exactly as given.
+    entry.camera.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+    entry.camera.updateMatrixWorld();
+  }
+
+  getCameraPose(h: CameraHandle, outPosition: Vec3, outOrientation: Quaternion): void {
+    const entry = this.cameras.get(h);
+    if (!entry) return;
+    const cam = entry.camera;
+    outPosition[0] = cam.position.x;
+    outPosition[1] = cam.position.y;
+    outPosition[2] = cam.position.z;
+    // Three stores the quaternion as set — possibly the sign-flipped twin of the
+    // input (q and −q are the same rotation).
+    outOrientation.x = cam.quaternion.x;
+    outOrientation.y = cam.quaternion.y;
+    outOrientation.z = cam.quaternion.z;
+    outOrientation.w = cam.quaternion.w;
+  }
+
+  worldToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
+    const T = this.THREE;
+    const handle = this.activePerspectiveCamera;
+    const entry = handle ? this.cameras.get(handle) : undefined;
+    if (!T || !entry) return false;
+    const camera = entry.camera;
+    // Keep matrixWorldInverse current (Camera.updateMatrixWorld refreshes it);
+    // Vector3.project reads it + projectionMatrix to land the point in NDC.
+    camera.updateMatrixWorld();
+    if (!this._wtsVec) this._wtsVec = new T.Vector3();
+    const v = this._wtsVec.set(x, y, z).project(camera);
+    // Three cameras look down −Z, so the perspective divide flips a point BEHIND
+    // the camera to NDC z > 1. Treat that as behind: bail and leave `out`
+    // untouched so HUD callers branch to an off-screen arrow.
+    if (v.z > 1) return false;
+    const { width, height } = this.renderPixelSize();
+    out.x = (v.x * 0.5 + 0.5) * width;
+    out.y = (-v.y * 0.5 + 0.5) * height; // NDC +Y up → pixel +Y down
+    return true;
+  }
+
+  /**
+   * CSS-pixel size of the render surface — the basis for HUD projection. Mirrors
+   * canvasAspect's source order (client size → buffer dims → window), so
+   * worldToScreen yields finite pixels even headless.
+   */
+  private renderPixelSize(): { width: number; height: number } {
+    const c = this.canvas;
+    const width = c?.clientWidth || c?.width || window.innerWidth || 1;
+    const height = c?.clientHeight || c?.height || window.innerHeight || 1;
+    return { width, height };
+  }
+
+  // ─── Floating origin / large world (Phase-1: contract-only, dormant) ───
+  /**
+   * Tracked floating-origin offset. Phase-1 is dormant: {@link setOriginOffset}
+   * records it and {@link getOriginOffset} reports it, but nothing rebases the
+   * scene graph — Three has no native floating origin, and the pure game keeps
+   * passing real world coordinates (a camera-relative fallback).
+   */
+  private originOffset: Vec3 = [0, 0, 0];
+  /** Recorded large-world config (Phase-1 records the flag; may widen the far plane). */
+  private largeWorld: { enabled: boolean; farPlane?: number } = { enabled: false };
+
+  getOriginOffset(out: Vec3): Vec3 {
+    out[0] = this.originOffset[0];
+    out[1] = this.originOffset[1];
+    out[2] = this.originOffset[2];
+    return out;
+  }
+  setOriginOffset(x: number, y: number, z: number): void {
+    this.originOffset[0] = x;
+    this.originOffset[1] = y;
+    this.originOffset[2] = z;
+  }
+  configureLargeWorld(spec: LargeWorldSpec): void {
+    this.largeWorld = { enabled: spec.enabled, farPlane: spec.farPlane };
+    // Widen the active perspective camera's far plane if asked (~200000 for a
+    // space sim). No active rebasing in Phase 1.
+    if (spec.farPlane !== undefined) {
+      const handle = this.activePerspectiveCamera;
+      const entry = handle ? this.cameras.get(handle) : undefined;
+      if (entry) {
+        entry.camera.far = spec.farPlane;
+        entry.camera.updateProjectionMatrix();
+      }
+    }
+  }
+
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
     const T = this.THREE;
-    // Pick against the active render camera (first registered arc camera, else
-    // the fallback). Inputs are pixel coords relative to the canvas.
-    const firstCam = this.cameras.values().next().value;
-    const camera = firstCam?.camera ?? this.defaultCamera;
+    // Pick against the active render camera (the free camera if one exists, else
+    // the first registered arc camera, else the fallback). Inputs are pixel
+    // coords relative to the canvas.
+    const camera = this.renderCamera();
     const canvas = this.getRenderingCanvas();
     if (!T || !this.scene || !camera || !canvas) return null;
 
@@ -1879,9 +2029,9 @@ export class ThreeAdapter implements RendererAdapter {
       // move. Mixers are lazily created the first time a mesh's clip is
       // played; primitive meshes have none.
       for (const mixer of this.animationMixers.values()) mixer.update(dt);
-      // Use first registered arc camera, or fall back to the default camera.
-      const firstCam = this.cameras.values().next().value;
-      const camera = firstCam?.camera ?? this.defaultCamera;
+      // Draw through the active free camera if one exists, else the first
+      // registered arc camera, else the default fallback.
+      const camera = this.renderCamera();
       if (camera) {
         if (this.billboards.size > 0) this.updateBillboards(camera);
         this.renderer!.render(this.scene!, camera);
@@ -1920,8 +2070,7 @@ export class ThreeAdapter implements RendererAdapter {
     // synchronously so the compositor never picks up the cleared buffer
     // between the resize and the next rAF tick.
     if (this.scene) {
-      const firstCam = this.cameras.values().next().value;
-      const camera = firstCam?.camera ?? this.defaultCamera;
+      const camera = this.renderCamera();
       if (camera) this.renderer.render(this.scene, camera);
     }
   }

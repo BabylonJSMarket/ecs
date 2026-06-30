@@ -26,6 +26,7 @@ import {
   HemisphericLight as BabylonHemisphericLight,
   DirectionalLight as BabylonDirectionalLight,
   ArcRotateCamera,
+  UniversalCamera,
   ShadowGenerator,
   AnimationPropertiesOverride,
   Mesh,
@@ -48,6 +49,10 @@ import type {
   ArcCameraSpec,
   BillboardMode,
   CameraHandle,
+  PerspectiveCameraSpec,
+  Quaternion as QuaternionSpec,
+  LargeWorldSpec,
+  ScreenPoint,
   DirectionalLightSpec,
   HemisphericLightSpec,
   LabelHandle,
@@ -81,7 +86,7 @@ import type {
   Vec3,
 } from './types';
 import type { Color } from './types';
-import { Matrix, Ray } from '@babylonjs/core';
+import { Matrix, Ray, Viewport } from '@babylonjs/core';
 
 function notImplemented(method: string): never {
   throw new Error(`BabylonAdapter.${method}: not implemented yet`);
@@ -152,6 +157,24 @@ export class BabylonAdapter implements RendererAdapter {
   private pendingPhysicsCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
   private lights = new Map<LightHandle, BabylonHemisphericLight | BabylonDirectionalLight>();
   private cameras = new Map<CameraHandle, ArcRotateCamera>();
+  /**
+   * Free 6-DOF perspective cameras (the chase / flight camera), kept in their
+   * own map because a `UniversalCamera` has no alpha/beta/radius/target — the
+   * arc-camera surface (`getCameraAngles`, `nudgeCameraAlpha`, …) doesn't apply.
+   * Methods that legitimately span both kinds (`screenToWorldPoint`,
+   * `setCameraFov`) resolve through {@link resolveCamera}.
+   */
+  private perspectiveCameras = new Map<CameraHandle, UniversalCamera>();
+  /**
+   * Tracked floating-origin offset (Phase-1: contract-only / dormant). Babylon
+   * has no built-in floating-origin field, so we store the value `setOriginOffset`
+   * records and hand it back from `getOriginOffset`. No active per-frame rebase
+   * happens — the pure game keeps passing real world coordinates; a zero offset
+   * is the camera-relative "no rebase applied" default.
+   */
+  private originOffset: Vec3 = [0, 0, 0];
+  /** Large-world / floating-origin enable flag recorded by `configureLargeWorld`. */
+  private largeWorldEnabled = false;
   private shadowGenerators = new Map<LightHandle, ShadowGenerator>();
   private shadowCasters = new Map<ShadowCasterHandle, { light: LightHandle; mesh: MeshHandle }>();
   private skyboxes = new Map<SkyboxHandle, {
@@ -202,6 +225,12 @@ export class BabylonAdapter implements RendererAdapter {
   // Reused by screenToWorldPoint so per-frame projection never allocates.
   private readonly _tfRay = new Ray(Vector3.Zero(), Vector3.Up());
   private readonly _tfIdentity = Matrix.Identity();
+  // Reused by worldToScreen — the HUD re-projects hundreds of points per frame
+  // (brackets, crosshair, lead diamond, arrows, sun), so none of this allocates.
+  private readonly _projWorld = new Vector3();
+  private readonly _projView = new Vector3();
+  private readonly _projOut = new Vector3();
+  private readonly _projViewport = new Viewport(0, 0, 0, 0);
   private onFrame?: (dt: number) => void;
   private lastTime = 0;
 
@@ -650,7 +679,7 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   screenToWorldPoint(camera: CameraHandle, nx: number, ny: number, distance: number, out: Vec3): Vec3 {
-    const cam = this.cameras.get(camera);
+    const cam = this.resolveCamera(camera);
     if (!cam || !this.scene || !this.engine) {
       out[0] = out[1] = out[2] = 0;
       return out;
@@ -1328,7 +1357,7 @@ export class BabylonAdapter implements RendererAdapter {
     cam.upperRadiusLimit = max;
   }
   setCameraFov(h: CameraHandle, fov: number): void {
-    const cam = this.cameras.get(h);
+    const cam = this.resolveCamera(h);
     if (cam) cam.fov = fov;
   }
   setCameraControlsEnabled(h: CameraHandle, enabled: boolean): void {
@@ -1338,6 +1367,124 @@ export class BabylonAdapter implements RendererAdapter {
       cam.attachControl(this.engine?.getRenderingCanvas(), true);
     } else {
       cam.detachControl();
+    }
+  }
+
+  /**
+   * Resolve a camera handle to whichever kind it minted — an `ArcRotateCamera`
+   * (orbit) or a `UniversalCamera` (free 6-DOF). Used by the methods that
+   * legitimately apply to both kinds (`screenToWorldPoint`, `setCameraFov`).
+   */
+  private resolveCamera(h: CameraHandle): ArcRotateCamera | UniversalCamera | undefined {
+    return this.cameras.get(h) ?? this.perspectiveCameras.get(h);
+  }
+
+  // ─── Free 6-DOF perspective camera (chase / flight) ───
+  createPerspectiveCamera(id: string, spec: PerspectiveCameraSpec): CameraHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createPerspectiveCamera: call init() first');
+    const pos = spec.position ?? [0, 0, 0];
+    const camera = new UniversalCamera(`PerspCamera_${id}`, new Vector3(pos[0], pos[1], pos[2]), this.scene);
+    // Babylon's fov is RADIANS natively (unlike Three's degrees), so spec.fov
+    // passes straight through. minZ/maxZ are the near/far clip planes.
+    camera.fov = spec.fov;
+    camera.minZ = spec.near;
+    camera.maxZ = spec.far;
+    // The chase camera is posed directly every frame via setCameraPose; kill the
+    // built-in inertial smoothing so the pose isn't lagged/lerped behind input.
+    camera.inertia = 0;
+    // Orientation lives on the quaternion — never Euler — so loops and rolls
+    // reach the renderer without a gimbal-flipping quat→Euler round-trip.
+    const q = spec.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
+    camera.rotationQuaternion = new Quaternion(q.x, q.y, q.z, q.w);
+    // Make it the active camera (same as createArcCamera) so worldToScreen and
+    // scene.render target it.
+    this.scene.activeCamera = camera;
+    const handle = this.makeHandle<CameraHandle>('perspCamera', id);
+    this.perspectiveCameras.set(handle, camera);
+    return handle;
+  }
+
+  setCameraPose(h: CameraHandle, position: Vec3, orientation: QuaternionSpec): void {
+    const camera = this.perspectiveCameras.get(h);
+    if (!camera) return;
+    camera.position.set(position[0], position[1], position[2]);
+    // Write straight into the quaternion (creating it once if a caller posed a
+    // camera that somehow lost it) — no Euler conversion, so a rolling chase cam
+    // never gimbal-flips.
+    (camera.rotationQuaternion ??= new Quaternion()).copyFromFloats(
+      orientation.x,
+      orientation.y,
+      orientation.z,
+      orientation.w,
+    );
+  }
+
+  getCameraPose(h: CameraHandle, outPosition: Vec3, outOrientation: QuaternionSpec): void {
+    const camera = this.perspectiveCameras.get(h);
+    if (!camera) return;
+    const p = camera.position;
+    outPosition[0] = p.x;
+    outPosition[1] = p.y;
+    outPosition[2] = p.z;
+    // Babylon may hold the sign-flipped twin (q and −q are the same rotation);
+    // the contract compares up to sign, so hand back whatever it stores. Fall
+    // back to deriving one from the Euler rotation if a quaternion was cleared.
+    const q = camera.rotationQuaternion ?? Quaternion.FromEulerVector(camera.rotation);
+    outOrientation.x = q.x;
+    outOrientation.y = q.y;
+    outOrientation.z = q.z;
+    outOrientation.w = q.w;
+  }
+
+  worldToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
+    const scene = this.scene;
+    const engine = this.engine;
+    const camera = scene?.activeCamera;
+    if (!scene || !engine || !camera) return false;
+    this._projWorld.set(x, y, z);
+    // Behind-camera reject FIRST, in VIEW space, BEFORE touching `out`: in this
+    // right-handed scene an identity-orientation camera looks down +Z, so a
+    // point whose view-space z is <= 0 sits behind the lens. Returning false
+    // (and leaving `out` untouched) lets the HUD draw an off-screen arrow
+    // instead of a mirrored phantom bracket where perspective division would
+    // fling the point.
+    Vector3.TransformCoordinatesToRef(this._projWorld, camera.getViewMatrix(), this._projView);
+    if (this._projView.z <= 0) return false;
+    // In front — project to pixels. Viewport is scaled to the live render
+    // buffer; the world matrix is identity since we pass an absolute point.
+    camera.viewport.toGlobalToRef(engine.getRenderWidth(), engine.getRenderHeight(), this._projViewport);
+    Vector3.ProjectToRef(
+      this._projWorld,
+      this._tfIdentity,
+      scene.getTransformMatrix(),
+      this._projViewport,
+      this._projOut,
+    );
+    out.x = this._projOut.x;
+    out.y = this._projOut.y;
+    return true;
+  }
+
+  // ─── Floating origin / large world (Phase-1: contract-only, dormant) ───
+  getOriginOffset(out: Vec3): Vec3 {
+    out[0] = this.originOffset[0];
+    out[1] = this.originOffset[1];
+    out[2] = this.originOffset[2];
+    return out;
+  }
+
+  setOriginOffset(x: number, y: number, z: number): void {
+    // Record only — Phase-1 performs no active per-frame scene-graph rebase.
+    this.originOffset[0] = x;
+    this.originOffset[1] = y;
+    this.originOffset[2] = z;
+  }
+
+  configureLargeWorld(spec: LargeWorldSpec): void {
+    this.largeWorldEnabled = spec.enabled;
+    // We may widen the far plane on the active camera, but do NOT rebase.
+    if (spec.farPlane !== undefined && this.scene?.activeCamera) {
+      this.scene.activeCamera.maxZ = spec.farPlane;
     }
   }
 
@@ -2011,6 +2158,9 @@ export class BabylonAdapter implements RendererAdapter {
     this.meshesByMeshId.clear();
     this.lights.clear();
     this.cameras.clear();
+    this.perspectiveCameras.clear();
+    this.originOffset[0] = this.originOffset[1] = this.originOffset[2] = 0;
+    this.largeWorldEnabled = false;
     this.shadowGenerators.clear();
     this.shadowCasters.clear();
     this.labels.clear();

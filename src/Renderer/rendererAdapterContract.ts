@@ -25,9 +25,12 @@ import type {
   HemisphericLightSpec,
   LabelSpec,
   MaterialSpec,
+  PerspectiveCameraSpec,
   PickResult,
   PrimitiveSpec,
+  Quaternion,
   RendererAdapter,
+  ScreenPoint,
   ThinFieldSpec,
   Vec3,
 } from './types';
@@ -69,6 +72,19 @@ export interface RendererAdapterContractOptions {
    * it key-dedupes a synthesized handle) runs the load assertion. Default false.
    */
   skipTextureLoad?: boolean;
+  /**
+   * Engine adapters can't run a meaningful screen projection in the headless
+   * test env (Babylon's NullEngine reports a zero-size viewport; Three under
+   * jsdom has no real canvas) — and Babylon/BabylonLite vs Three disagree on the
+   * identity-camera forward axis (+Z vs −Z), so a fixed in-front/behind point
+   * isn't engine-agnostic. Set this to skip the NUMERIC `worldToScreen`
+   * assertions (in-front projection + behind→false). The Mock adapter (a
+   * deterministic Babylon-convention pinhole) runs the full battery as the
+   * reference; engines still run a no-throw smoke check. The pose round-trip and
+   * floating-origin round-trip are NOT gated — every adapter runs those. Default
+   * false.
+   */
+  skipProjection?: boolean;
   /**
    * Optional async setup hook called once per test (after the factory). Use
    * it to drive `adapter.init(canvas)` if the adapter is engine-coupled.
@@ -483,6 +499,103 @@ export function runRendererAdapterContract(
         expect(Number.isFinite(out[0])).toBe(true);
         expect(Number.isFinite(out[1])).toBe(true);
         expect(Number.isFinite(out[2])).toBe(true);
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Free 6-DOF perspective camera (chase / flight)
+    // ---------------------------------------------------------------------
+    describe('perspective camera', () => {
+      const persp: PerspectiveCameraSpec = { fov: Math.PI / 3, near: 0.1, far: 200000 };
+
+      it('createPerspectiveCamera returns a defined handle, distinct per id', () => {
+        const a = adapter.createPerspectiveCamera('cam-a', persp);
+        const b = adapter.createPerspectiveCamera('cam-b', persp);
+        expect(a).toBeDefined();
+        expect(a).not.toBe(b);
+      });
+
+      it('setCameraPose + getCameraPose round-trips position and a unit quaternion', () => {
+        const h = adapter.createPerspectiveCamera('chase', persp);
+        // ~120° yaw about +Y — well past the gimbal-safe Euler band a
+        // quat→Euler round-trip would mangle.
+        const q: Quaternion = { x: 0, y: 0.8660254, z: 0, w: 0.5 };
+        adapter.setCameraPose(h, [10, -4, 25], q);
+        const outPos: Vec3 = [0, 0, 0];
+        const outQ: Quaternion = { x: 0, y: 0, z: 0, w: 1 };
+        adapter.getCameraPose(h, outPos, outQ);
+        expect(outPos[0]).toBeCloseTo(10, 4);
+        expect(outPos[1]).toBeCloseTo(-4, 4);
+        expect(outPos[2]).toBeCloseTo(25, 4);
+        // q and −q are the same rotation, so compare up to sign: |q·out| ≈ 1.
+        const dot = q.x * outQ.x + q.y * outQ.y + q.z * outQ.z + q.w * outQ.w;
+        expect(Math.abs(dot)).toBeCloseTo(1, 4);
+      });
+
+      if (!options.skipProjection) {
+        it('worldToScreen projects an in-front point to finite pixels and returns true', () => {
+          const h = adapter.createPerspectiveCamera('hud', persp);
+          // Camera at origin, identity orientation → looks down +Z (Mock's
+          // Babylon-convention basis). A point ahead must project on-screen.
+          adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+          const out: ScreenPoint = { x: NaN, y: NaN };
+          const visible = adapter.worldToScreen(0, 0, 10, out);
+          expect(visible).toBe(true);
+          expect(Number.isFinite(out.x)).toBe(true);
+          expect(Number.isFinite(out.y)).toBe(true);
+        });
+
+        it('worldToScreen returns false for a point behind the camera and leaves `out` untouched', () => {
+          const h = adapter.createPerspectiveCamera('hud', persp);
+          adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+          const out: ScreenPoint = { x: 123, y: 456 };
+          const visible = adapter.worldToScreen(0, 0, -10, out);
+          expect(visible).toBe(false);
+          expect(out.x).toBe(123); // untouched on a behind-camera miss
+          expect(out.y).toBe(456);
+        });
+      } else {
+        it('worldToScreen returns a boolean without throwing (engine smoke)', () => {
+          const h = adapter.createPerspectiveCamera('hud', persp);
+          adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+          const out: ScreenPoint = { x: 0, y: 0 };
+          let r: boolean | undefined;
+          expect(() => {
+            r = adapter.worldToScreen(0, 0, 10, out);
+          }).not.toThrow();
+          expect(typeof r).toBe('boolean');
+        });
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // Floating origin (Phase-1: contract-only, dormant — pure bookkeeping,
+    // so the round-trip runs on EVERY adapter)
+    // ---------------------------------------------------------------------
+    describe('floating origin', () => {
+      it('getOriginOffset writes into and returns the provided `out`', () => {
+        const out: Vec3 = [0, 0, 0];
+        const returned = adapter.getOriginOffset(out);
+        expect(returned).toBe(out);
+        expect(Number.isFinite(out[0])).toBe(true);
+        expect(Number.isFinite(out[1])).toBe(true);
+        expect(Number.isFinite(out[2])).toBe(true);
+      });
+
+      it('setOriginOffset → getOriginOffset round-trips the recorded offset', () => {
+        adapter.setOriginOffset(1000, -2000, 3000);
+        const out: Vec3 = [0, 0, 0];
+        adapter.getOriginOffset(out);
+        expect(out[0]).toBeCloseTo(1000, 4);
+        expect(out[1]).toBeCloseTo(-2000, 4);
+        expect(out[2]).toBeCloseTo(3000, 4);
+      });
+
+      it('configureLargeWorld records config without throwing (no active rebase in Phase 1)', () => {
+        expect(() => {
+          adapter.configureLargeWorld({ enabled: true, farPlane: 200000 });
+          adapter.configureLargeWorld({ enabled: false });
+        }).not.toThrow();
       });
     });
 

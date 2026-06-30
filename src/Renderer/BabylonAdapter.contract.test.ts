@@ -31,6 +31,9 @@ runRendererAdapterContract(
     skipThinField: true,
     skipMeshLoad: true, // needs a real GLB fetch; covered by the browser demo
     skipTextureLoad: true, // needs a real image fetch; covered by the browser demo
+    skipProjection: true, // NullEngine reports a 0-size viewport; numeric
+    // worldToScreen is covered by the Mock reference + the browser demo. The
+    // pose round-trip + floating-origin round-trip still run here.
     setup(adapter) {
       // Bypass init() — it builds a `new Engine(canvas, ...)` that needs
       // a real WebGL context. NullEngine is a Babylon Engine subclass

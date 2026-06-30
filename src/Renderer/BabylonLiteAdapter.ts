@@ -62,6 +62,10 @@ import type {
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
+  LargeWorldSpec,
+  PerspectiveCameraSpec,
+  Quaternion,
+  ScreenPoint,
   Vec3,
 } from './types';
 
@@ -86,6 +90,26 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private meshesByMeshId = new Map<string, LiteMesh>();
   private lights = new Map<LightHandle, BLNS.DirectionalLight | BLNS.HemisphericLight>();
   private cameras = new Map<CameraHandle, { camera: BLNS.ArcRotateCamera; detach?: () => void }>();
+  /**
+   * Free 6-DOF perspective cameras (chase / flight), kept separate from the
+   * orbit `cameras` map: Lite backs them with a `FreeCamera` (position + target)
+   * rather than an `ArcRotateCamera`, but both implement Lite's `Camera`. The
+   * `orientation` quaternion is stored VERBATIM so {@link getCameraPose}
+   * round-trips it losslessly — a position+target FreeCamera can't represent
+   * roll on its own, so the stored quaternion is the source of truth, not a
+   * re-decomposition of the camera's look direction.
+   */
+  private perspectiveCameras = new Map<CameraHandle, { camera: BLNS.FreeCamera; orientation: Quaternion }>();
+  /** The active perspective camera (last created); {@link worldToScreen} projects through it. */
+  private activePerspective?: { camera: BLNS.FreeCamera; orientation: Quaternion };
+  /**
+   * Floating-origin offset, stored in the adapter's LEFT-handed frame (Z negated
+   * vs. the caller's right-handed frame, matching positions/cameras). Phase-1 is
+   * contract-only / dormant: recorded here but never applied as an active rebase.
+   */
+  private originOffset: Vec3 = [0, 0, 0];
+  /** Large-world enable flag recorded by {@link configureLargeWorld} (Phase-1: no active rebase). */
+  private largeWorldEnabled = false;
   private shadowGenerators = new Map<LightHandle, BLNS.ShadowGenerator>();
   private shadowCasters = new Map<
     ShadowCasterHandle,
@@ -526,10 +550,15 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return undefined;
   }
 
+  /** Resolve a handle to its underlying Lite camera from EITHER camera map (orbit or free). */
+  private liteCamera(h: CameraHandle): BLNS.Camera | undefined {
+    return this.cameras.get(h)?.camera ?? this.perspectiveCameras.get(h)?.camera;
+  }
+
   screenToWorldPoint(camera: CameraHandle, nx: number, ny: number, distance: number, out: Vec3): Vec3 {
-    const entry = this.cameras.get(camera);
+    const cam = this.liteCamera(camera);
     const canvas = this.canvas;
-    if (!entry || !canvas) {
+    if (!cam || !canvas) {
       out[0] = out[1] = out[2] = 0;
       return out;
     }
@@ -537,7 +566,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     // view-projection matrix and unprojecting near/far clip points. Input
     // fraction has origin top-left, so flip Y into NDC (+Y up).
     const aspect = (canvas.clientWidth || canvas.width || 1) / (canvas.clientHeight || canvas.height || 1);
-    const vp = BL.getViewProjectionMatrix(entry.camera, aspect);
+    const vp = BL.getViewProjectionMatrix(cam, aspect);
     const inv = BL.mat4Invert(vp);
     if (!inv) {
       out[0] = out[1] = out[2] = 0;
@@ -857,7 +886,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
   setCameraFov(h: CameraHandle, fov: number): void {
     const entry = this.cameras.get(h);
-    if (entry) entry.camera.fov = fov;
+    if (entry) {
+      entry.camera.fov = fov;
+      return;
+    }
+    // Also accept a free 6-DOF perspective camera (fov lives on Lite's `Camera`).
+    const persp = this.perspectiveCameras.get(h);
+    if (persp) persp.camera.fov = fov;
   }
   setCameraControlsEnabled(h: CameraHandle, enabled: boolean): void {
     const entry = this.cameras.get(h);
@@ -867,6 +902,133 @@ export class BabylonLiteAdapter implements RendererAdapter {
     } else if (entry.detach) {
       entry.detach();
       entry.detach = undefined;
+    }
+  }
+
+  // ─── Free 6-DOF perspective camera (chase / flight) ───
+  createPerspectiveCamera(id: string, spec: PerspectiveCameraSpec): CameraHandle {
+    const scene = this.requireScene();
+    const position = spec.position ?? [0, 0, 0];
+    const orientation = spec.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
+    // Build a FreeCamera at the LH origin looking down −Z (which is +Z in our RH
+    // frame — Mock's "identity orientation looks down +Z" convention). The real
+    // pose is applied by setCameraPose below; the constructor target only needs
+    // to differ from the position so the initial look matrix isn't degenerate.
+    const camera = BL.createFreeCamera({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 });
+    camera.fov = spec.fov;
+    camera.nearPlane = spec.near;
+    camera.farPlane = spec.far;
+    // Render from this camera — mark it active, like createArcCamera sets scene.camera.
+    scene.camera = camera;
+
+    const handle = this.makeHandle<CameraHandle>('perspectiveCamera', id);
+    const entry = { camera, orientation: { ...orientation } };
+    this.perspectiveCameras.set(handle, entry);
+    this.activePerspective = entry;
+    // Apply the initial pose (negates Z, derives the LH look target).
+    this.setCameraPose(handle, position, orientation);
+    return handle;
+  }
+
+  setCameraPose(h: CameraHandle, position: Vec3, orientation: Quaternion): void {
+    const entry = this.perspectiveCameras.get(h);
+    if (!entry) return;
+    // Store the orientation VERBATIM so getCameraPose round-trips it losslessly —
+    // a position+target FreeCamera can't represent roll, so the quaternion is the
+    // source of truth, not a re-decomposition of the look direction.
+    entry.orientation.x = orientation.x;
+    entry.orientation.y = orientation.y;
+    entry.orientation.z = orientation.z;
+    entry.orientation.w = orientation.w;
+    // RH→LH: negate the position's Z (same reflection createArcCamera applies).
+    entry.camera.position.set(position[0], position[1], -position[2]);
+    // Aim the LH camera by deriving a look target from the orientation: forward =
+    // q · (+Z) in RH, mapped into LH by negating its Z, added to the LH position.
+    const f = this.rotateVecByQuat(orientation, 0, 0, 1);
+    entry.camera.target.set(position[0] + f[0], position[1] + f[1], -position[2] - f[2]);
+  }
+
+  getCameraPose(h: CameraHandle, outPosition: Vec3, outOrientation: Quaternion): void {
+    const entry = this.perspectiveCameras.get(h);
+    if (!entry) return; // unknown handle — leave the outs untouched
+    // Position: LH→RH (un-negate Z), the inverse of setCameraPose.
+    outPosition[0] = entry.camera.position.x;
+    outPosition[1] = entry.camera.position.y;
+    outPosition[2] = -entry.camera.position.z;
+    // Orientation: hand back the verbatim-stored quaternion (lossless round-trip).
+    outOrientation.x = entry.orientation.x;
+    outOrientation.y = entry.orientation.y;
+    outOrientation.z = entry.orientation.z;
+    outOrientation.w = entry.orientation.w;
+  }
+
+  /**
+   * Rotate the vector `(vx,vy,vz)` by the unit quaternion `q`, returning a fresh
+   * tuple. Standard `v' = v + 2·qw·(qv×v) + 2·(qv×(qv×v))` (the quaternion
+   * Rodrigues form). Used by setCameraPose to turn the orientation into a look
+   * target without leaking a quaternion onto the position+target FreeCamera.
+   */
+  private rotateVecByQuat(q: Quaternion, vx: number, vy: number, vz: number): [number, number, number] {
+    // t = 2·(qv × v);  v' = v + qw·t + qv × t
+    const tx = 2 * (q.y * vz - q.z * vy);
+    const ty = 2 * (q.z * vx - q.x * vz);
+    const tz = 2 * (q.x * vy - q.y * vx);
+    return [
+      vx + q.w * tx + (q.y * tz - q.z * ty),
+      vy + q.w * ty + (q.z * tx - q.x * tz),
+      vz + q.w * tz + (q.x * ty - q.y * tx),
+    ];
+  }
+
+  worldToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
+    const entry = this.activePerspective;
+    const canvas = this.canvas;
+    if (!entry || !canvas) return false;
+    const width = canvas.clientWidth || canvas.width || 1;
+    const height = canvas.clientHeight || canvas.height || 1;
+    const vp = BL.getViewProjectionMatrix(entry.camera, width / height);
+    // RH→LH world point (negate Z), then column-major VP · vec4(.,.,.,1) → clip.
+    const wx = x, wy = y, wz = -z;
+    const cx = vp[0]! * wx + vp[4]! * wy + vp[8]! * wz + vp[12]!;
+    const cy = vp[1]! * wx + vp[5]! * wy + vp[9]! * wz + vp[13]!;
+    const cw = vp[3]! * wx + vp[7]! * wy + vp[11]! * wz + vp[15]!;
+    // Behind the camera (or on the plane): clip w ≤ 0. Branch BEFORE writing so
+    // a behind-camera miss leaves `out` untouched (the HUD draws an off-screen
+    // arrow instead of a bracket at a mirrored phantom position).
+    if (cw <= 0) return false;
+    const ndcX = cx / cw;
+    const ndcY = cy / cw;
+    // NDC (+y up) → pixels (origin top-left, +y down).
+    out.x = (ndcX * 0.5 + 0.5) * width;
+    out.y = (0.5 - ndcY * 0.5) * height;
+    return true;
+  }
+
+  // ─── Floating origin / large world (Phase-1: contract-only, dormant) ───
+  getOriginOffset(out: Vec3): Vec3 {
+    // Stored LH; present it RH (un-negate Z) — the inverse of setOriginOffset, so
+    // the round-trip is exact and the sign convention matches positions/cameras.
+    out[0] = this.originOffset[0];
+    out[1] = this.originOffset[1];
+    out[2] = -this.originOffset[2];
+    return out;
+  }
+
+  setOriginOffset(x: number, y: number, z: number): void {
+    // Record only (Phase-1 contract-only — no active per-frame rebase). RH→LH:
+    // negate Z so the stored offset stays consistent with the rest of the adapter.
+    this.originOffset[0] = x;
+    this.originOffset[1] = y;
+    this.originOffset[2] = -z;
+  }
+
+  configureLargeWorld(spec: LargeWorldSpec): void {
+    this.largeWorldEnabled = spec.enabled;
+    // Optionally widen the active perspective camera's far plane (~200000 for a
+    // space sim). Phase-1 records the config and may push the plane out, but
+    // performs NO active rebasing.
+    if (spec.farPlane !== undefined && this.activePerspective) {
+      this.activePerspective.camera.farPlane = spec.farPlane;
     }
   }
 
@@ -1391,6 +1553,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.meshesByMeshId.clear();
     this.lights.clear();
     this.cameras.clear();
+    this.perspectiveCameras.clear();
+    this.activePerspective = undefined;
+    this.originOffset = [0, 0, 0];
+    this.largeWorldEnabled = false;
     this.shadowGenerators.clear();
     this.shadowCasters.clear();
     this.shadowCasterMeshes.clear();
