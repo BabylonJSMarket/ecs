@@ -1001,6 +1001,24 @@ export function runRendererAdapterContract(
         expect(ret).toBe(untouched);
         expect(untouched).toEqual([1, 2, 3]);
       });
+
+      it('sampleProceduralSurface carves along the cut axis on both sides of the plane, deterministically', () => {
+        // A hemisphere-facing cut (asteroid halves after a split). Sampling ALONG
+        // +cutAxis lands inside the carve (the near-plane flatten branch runs);
+        // sampling along −cutAxis is on the far, un-carved side (the branch is
+        // skipped). Both must stay finite, and the near-cut sample reproduces.
+        const carved: ProceduralMeshSpec = { shape: 'asteroid', seed: 11, size: [100, 0, 0], cutAxis: [0, 1, 0], cutDepth: 0.5 };
+        const nearCut: Vec3 = [0, 0, 0];
+        const farSide: Vec3 = [0, 0, 0];
+        const a = adapter.sampleProceduralSurface(carved, 0, 1, 0, nearCut);
+        const b = adapter.sampleProceduralSurface(carved, 0, -1, 0, farSide);
+        expect(a).toBe(nearCut);
+        expect(b).toBe(farSide);
+        expect([...nearCut, ...farSide].every(Number.isFinite)).toBe(true);
+        const again: Vec3 = [0, 0, 0];
+        adapter.sampleProceduralSurface(carved, 0, 1, 0, again);
+        expect(again).toEqual(nearCut); // same seed + cut + dir → byte-identical
+      });
     });
 
     // ---------------------------------------------------------------------

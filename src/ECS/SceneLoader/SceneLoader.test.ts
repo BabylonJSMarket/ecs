@@ -8,6 +8,7 @@ import {
   World,
   EventBus,
 } from '..';
+import { MockRendererAdapter } from '../../Renderer/MockRendererAdapter';
 
 // Test components
 class PositionComponent extends Component {
@@ -796,6 +797,49 @@ describe('SceneLoader', () => {
       await expect(sceneLoader.loadSceneFromUrl('/missing.json')).rejects.toThrow(
         'Failed to load scene: /missing.json (404)'
       );
+    });
+  });
+
+  describe('scene clearColor → renderer.setClearColor', () => {
+    const lastClearColor = (renderer: MockRendererAdapter) => {
+      const entry = [...renderer.calls].reverse().find(c => c.method === 'setClearColor');
+      return entry?.args as [number, number, number, number] | undefined;
+    };
+
+    it('applies a 4-tuple clearColor to the active renderer on the entity-creating pass', () => {
+      const renderer = new MockRendererAdapter();
+      const w = new World({ eventBus, renderer });
+      sceneLoader.loadSceneFromData({
+        name: 'ClearScene4',
+        clearColor: [0.1, 0.2, 0.3, 0.4],
+        entities: { world: { components: {} } },
+      });
+      sceneLoader.instantiateScene('ClearScene4', w);
+      expect(lastClearColor(renderer)).toEqual([0.1, 0.2, 0.3, 0.4]);
+    });
+
+    it('defaults alpha to 1 for a 3-tuple clearColor', () => {
+      const renderer = new MockRendererAdapter();
+      const w = new World({ eventBus, renderer });
+      sceneLoader.loadSceneFromData({
+        name: 'ClearScene3',
+        clearColor: [0.5, 0.6, 0.7],
+        entities: { world: { components: {} } },
+      });
+      sceneLoader.instantiateScene('ClearScene3', w);
+      expect(lastClearColor(renderer)).toEqual([0.5, 0.6, 0.7, 1]);
+    });
+
+    it('does not touch the renderer on a systems-only pass (createEntities: false)', () => {
+      const renderer = new MockRendererAdapter();
+      const w = new World({ eventBus, renderer });
+      sceneLoader.loadSceneFromData({
+        name: 'ClearSceneSkip',
+        clearColor: [0.9, 0.9, 0.9, 1],
+        entities: { world: { components: {} } },
+      });
+      sceneLoader.instantiateScene('ClearSceneSkip', w, { createEntities: false });
+      expect(lastClearColor(renderer)).toBeUndefined();
     });
   });
 });

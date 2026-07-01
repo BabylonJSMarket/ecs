@@ -24,9 +24,15 @@ import type {
   LightHandle,
   MaterialSpec,
   MeshHandle,
+  ParticleEmitterSpec,
+  PerspectiveCameraSpec,
   PhysicsBodyOpts,
   PrimitiveSpec,
+  ProceduralMeshSpec,
+  Quaternion,
+  ScreenPoint,
   SkyboxSpec,
+  SunSpec,
   Vec3,
 } from './types';
 
@@ -913,6 +919,102 @@ describe('MockRendererAdapter', () => {
       expect(h).toBeDefined();
       expect(light).toBeDefined();
       expect(cam).toBeDefined();
+    });
+  });
+
+  // Mock-specific branches the shared contract can't reach because its `persp`
+  // spec has no position/orientation, it always creates a camera before
+  // projecting, and it never samples a rock with a seed omitted or a zero-length
+  // direction. These pin the default/guard paths in the Mock's own bookkeeping.
+  describe('perspective camera + projection edge branches', () => {
+    it('createPerspectiveCamera copies an explicit position + orientation into the record', () => {
+      const spec: PerspectiveCameraSpec = {
+        fov: Math.PI / 3,
+        near: 0.1,
+        far: 100000,
+        position: [3, -4, 5],
+        orientation: { x: 0, y: 0.7071068, z: 0, w: 0.7071068 },
+      };
+      const h = renderer.createPerspectiveCamera('posed', spec);
+      const outPos: Vec3 = [0, 0, 0];
+      const outQ: Quaternion = { x: 0, y: 0, z: 0, w: 1 };
+      renderer.getCameraPose(h, outPos, outQ);
+      expect(outPos).toEqual([3, -4, 5]);
+      expect(outQ.y).toBeCloseTo(0.7071068, 6);
+      expect(outQ.w).toBeCloseTo(0.7071068, 6);
+    });
+
+    it('getCameraPose no-ops on an unknown handle, leaving out params untouched', () => {
+      const outPos: Vec3 = [1, 2, 3];
+      const outQ: Quaternion = { x: 9, y: 9, z: 9, w: 9 };
+      // A handle the adapter never minted → early return, out params unchanged.
+      renderer.getCameraPose({} as unknown as CameraHandle, outPos, outQ);
+      expect(outPos).toEqual([1, 2, 3]);
+      expect(outQ).toEqual({ x: 9, y: 9, z: 9, w: 9 });
+    });
+
+    it('worldToScreen returns false and leaves out untouched when no perspective camera exists', () => {
+      const fresh = new MockRendererAdapter();
+      const out: ScreenPoint = { x: 42, y: 42 };
+      expect(fresh.worldToScreen(1, 2, 3, out)).toBe(false);
+      expect(out).toEqual({ x: 42, y: 42 }); // no active camera → untouched
+    });
+  });
+
+  describe('procedural surface guard branches', () => {
+    it('sampleProceduralSurface defaults a missing seed and tolerates a zero-length direction', () => {
+      // No `seed` → the `?? 1` default; a [0,0,0] dir → the `hypot || 1` guard.
+      const spec: ProceduralMeshSpec = { shape: 'asteroid', size: [10, 0, 0] };
+      const out: Vec3 = [0, 0, 0];
+      const ret = renderer.sampleProceduralSurface(spec, 0, 0, 0, out);
+      expect(ret).toBe(out);
+      expect(out.every(Number.isFinite)).toBe(true);
+      // Deterministic for the defaulted seed.
+      const again: Vec3 = [0, 0, 0];
+      renderer.sampleProceduralSurface(spec, 0, 0, 0, again);
+      expect(again).toEqual(out);
+    });
+  });
+
+  describe('particle + sun guard branches', () => {
+    it('createParticleEmitter copies an explicit spec.position into the record', () => {
+      const spec: ParticleEmitterSpec = {
+        texture: renderer.createDynamicTexture('dot', { width: 2, height: 2, pixels: new Uint8ClampedArray(2 * 2 * 4).fill(255), hasAlpha: true }),
+        capacity: 100,
+        emitRate: 100,
+        emitRadius: 1,
+        minSize: 0.1,
+        maxSize: 0.2,
+        minLifeTime: 1,
+        maxLifeTime: 2,
+        minEmitPower: 0,
+        maxEmitPower: 0,
+        color1: [1, 1, 1, 1],
+        color2: [1, 1, 1, 1],
+        colorDead: [0, 0, 0, 0],
+        blend: 'add',
+        position: [7, 8, 9],
+      };
+      const h = renderer.createParticleEmitter('seeded', spec);
+      expect(renderer.particleEmitters.get(h)?.position).toEqual([7, 8, 9]);
+    });
+
+    it('createSun tolerates a zero-length direction via the hypot guard', () => {
+      const spec: SunSpec = {
+        direction: [0, 0, 0], // degenerate → hypot || 1 keeps the readback finite
+        distance: 1000,
+        intensity: 1,
+        diffuse: [1, 1, 1],
+        specular: [1, 1, 1],
+        discDiameter: 10,
+        discColor: [1, 1, 1],
+      };
+      renderer.createSun('degenerate-sun', spec);
+      const out: Vec3 = [7, 7, 7];
+      const ret = renderer.getSunWorldPosition(out);
+      expect(ret).toBe(out);
+      // -(0/1)*distance on every axis → a finite (signed) zero, not NaN.
+      expect(out.every(v => Number.isFinite(v) && v === 0)).toBe(true);
     });
   });
 });
