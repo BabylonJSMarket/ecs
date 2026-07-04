@@ -538,6 +538,13 @@ export class MockRendererAdapter implements RendererAdapter {
 
   /** Tests can preload the clip names `loadModelTemplate` resolves with. */
   modelTemplateAnimationNames: string[] = [];
+  /** Tests can preload the clip names `retargetAnimationLibrary` resolves with. */
+  retargetLibraryClipNames: string[] = [];
+
+  async retargetAnimationLibrary(meshId: string, libraryUrl: string): Promise<string[]> {
+    this.record('retargetAnimationLibrary', meshId, libraryUrl);
+    return [...this.retargetLibraryClipNames];
+  }
   /**
    * Duration `playAnimationOnce` reports back (seconds). Default 0 so consumers
    * fall back to their own configured one-shot durations in unit tests.

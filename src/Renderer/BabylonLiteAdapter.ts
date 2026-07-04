@@ -1263,6 +1263,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return { meshId: id, handle, animationNames };
   }
 
+  async retargetAnimationLibrary(_meshId: string, _libraryUrl: string): Promise<string[]> {
+    // The lite Babylon build ships no AnimatorAvatar / animation retargeting.
+    // Keep the interface surface but no-op (return no clips) rather than bind
+    // donor clips to the wrong skeleton. Use the full BabylonAdapter to retarget.
+    return [];
+  }
+
   async loadModelTemplate(
     url: string,
     opts?: LoadModelTemplateOptions,

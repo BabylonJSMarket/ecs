@@ -1161,6 +1161,20 @@ export interface RendererAdapter {
   playAnimationOnce(meshId: string, clipName: string): number;
 
   /**
+   * Retarget every animation clip from a SEPARATE donor GLB (`libraryUrl`,
+   * typically a skeleton-only shared "animations.glb") onto the already-loaded
+   * mesh `meshId`, and register the retargeted clips under that meshId so the
+   * normal `playAnimation(meshId, clipName)` / `stopAnimation` / weight / speed
+   * methods drive them — exactly as if they had shipped inside the mesh's own
+   * GLB. This is the seam that lets one shared clip library animate many
+   * different characters that share a skeleton (bone-name match). Babylon uses
+   * AnimatorAvatar.retargetAnimationGroup; Three binds the donor clips onto the
+   * target mixer by node name. Returns the clip names now playable. Resolves
+   * after the donor is loaded and retargeted; throws if `meshId` isn't loaded.
+   */
+  retargetAnimationLibrary(meshId: string, libraryUrl: string): Promise<string[]>;
+
+  /**
    * Screen-facing text label at a world-space point. Implemented as a
    * billboarded textured quad (Babylon) or a Sprite (Three). Both renderers
    * draw the text into an offscreen canvas once at creation.

@@ -1360,6 +1360,35 @@ export class ThreeAdapter implements RendererAdapter {
     return { meshId: id, handle, animationNames };
   }
 
+  async retargetAnimationLibrary(meshId: string, libraryUrl: string): Promise<string[]> {
+    if (!this.scene) throw new Error('ThreeAdapter.retargetAnimationLibrary: call init() first');
+    // The target mixer is created by loadMesh when the character glb ships any
+    // clip (its Idle). Require it — the character must be loaded first.
+    const mixer = this.animationMixers.get(meshId);
+    if (!mixer) {
+      throw new Error(
+        `ThreeAdapter.retargetAnimationLibrary: no animation mixer for "${meshId}" — loadMesh a character with at least one clip first`,
+      );
+    }
+    const spec2 = 'three/addons/loaders/GLTFLoader.js';
+    const mod = (await import(/* @vite-ignore */ spec2)) as unknown as {
+      GLTFLoader: new () => {
+        loadAsync(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }>;
+      };
+    };
+    const gltf = await new mod.GLTFLoader().loadAsync(libraryUrl);
+    // Meshy's shared rig means identity bone names: a donor clip's tracks
+    // ("Hips.quaternion", …) resolve directly against the target mixer's root,
+    // so binding the clip onto the target mixer IS the retarget. (Cross-skeleton
+    // sources would need SkeletonUtils.retargetClip; not needed here.)
+    const names: string[] = [];
+    for (const clip of gltf.animations) {
+      this.animationActions.set(`${meshId}/${clip.name}`, mixer.clipAction(clip));
+      names.push(clip.name);
+    }
+    return names;
+  }
+
   async loadModelTemplate(
     url: string,
     _opts?: LoadModelTemplateOptions,

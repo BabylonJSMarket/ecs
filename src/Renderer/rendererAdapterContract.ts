@@ -380,6 +380,14 @@ export function runRendererAdapterContract(
           expect(res.handle).toBeTruthy();
           expect(Array.isArray(res.animationNames)).toBe(true);
         });
+
+        it('retargetAnimationLibrary resolves to an array of clip names', async () => {
+          const names = await adapter.retargetAnimationLibrary(
+            'model',
+            'https://example.invalid/animations.glb',
+          );
+          expect(Array.isArray(names)).toBe(true);
+        });
       });
     }
 
