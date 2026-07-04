@@ -34,7 +34,6 @@ import {
   DynamicTexture,
   RawTexture,
   AnimationGroup,
-  AnimatorAvatar,
   PhysicsAggregate,
   PhysicsShapeType,
   PhysicsShapeBox,
@@ -985,42 +984,32 @@ export class BabylonAdapter implements RendererAdapter {
     };
   }
 
-  async retargetAnimationLibrary(meshId: string, libraryUrl: string): Promise<string[]> {
-    if (!this.scene) throw new Error('BabylonAdapter.retargetAnimationLibrary: call init() first');
-    const root = this.meshesByMeshId.get(meshId);
-    if (!root) {
-      throw new Error(
-        `BabylonAdapter.retargetAnimationLibrary: no loaded mesh "${meshId}" — loadMesh it first`,
-      );
-    }
-    // Load the donor library off-scene, then add it so its bone world matrices
-    // are valid for the retarget solve.
-    const donor = await LoadAssetContainerAsync(libraryUrl, this.scene);
-    donor.addAllToScene();
-    // All Meshy rigs share bone names, so this is an identity name-match — no
-    // mapNodeNames needed. The retargeted groups target THIS character's bones.
-    const avatar = new AnimatorAvatar(`retarget_${meshId}`, root, false, false);
-    avatar.showWarnings = false;
-
+  // ── Extension seam ─────────────────────────────────────────────────────────
+  private extensions = new Map<string, object>();
+  registerExtension(name: string, impl: object): void {
+    this.extensions.set(name, impl);
+  }
+  extension<T = object>(name: string): T | undefined {
+    return this.extensions.get(name) as T | undefined;
+  }
+  // Engine-typed host accessors for adapter plugins (see RendererAdapter docs).
+  /** The live Babylon Scene, for plugins that must load/retarget/etc. */
+  getScene(): Scene | null {
+    return this.scene ?? null;
+  }
+  /** The root TransformNode a mesh was loaded under, keyed by meshId. */
+  getMeshRoot(meshId: string): TransformNode | null {
+    return this.meshesByMeshId.get(meshId) ?? null;
+  }
+  /** Merge animation groups into a mesh's clip registry so `playAnimation(meshId,
+   *  clip)` finds them. Used by plugins that produce clips (e.g. retargeting). */
+  addAnimationGroups(meshId: string, entries: Iterable<[string, AnimationGroup]>): void {
     let byName = this.loadedAnimationGroups.get(meshId);
     if (!byName) {
       byName = new Map<string, AnimationGroup>();
       this.loadedAnimationGroups.set(meshId, byName);
     }
-    const names: string[] = [];
-    for (const group of donor.animationGroups) {
-      const rt = avatar.retargetAnimationGroup(group, {
-        animationGroupName: group.name,
-        retargetAnimationKeys: true,
-      });
-      rt.stop(); // at rest; the Animation/AnimateMeshy system starts clips
-      byName.set(group.name, rt);
-      names.push(group.name);
-    }
-    // The retargeted groups drive THIS character's bones now — the donor
-    // (its own skeleton + clips) is no longer needed.
-    donor.dispose();
-    return names;
+    for (const [name, group] of entries) byName.set(name, group);
   }
 
   async loadModelTemplate(

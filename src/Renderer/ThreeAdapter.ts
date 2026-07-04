@@ -1360,33 +1360,23 @@ export class ThreeAdapter implements RendererAdapter {
     return { meshId: id, handle, animationNames };
   }
 
-  async retargetAnimationLibrary(meshId: string, libraryUrl: string): Promise<string[]> {
-    if (!this.scene) throw new Error('ThreeAdapter.retargetAnimationLibrary: call init() first');
-    // The target mixer is created by loadMesh when the character glb ships any
-    // clip (its Idle). Require it — the character must be loaded first.
-    const mixer = this.animationMixers.get(meshId);
-    if (!mixer) {
-      throw new Error(
-        `ThreeAdapter.retargetAnimationLibrary: no animation mixer for "${meshId}" — loadMesh a character with at least one clip first`,
-      );
-    }
-    const spec2 = 'three/addons/loaders/GLTFLoader.js';
-    const mod = (await import(/* @vite-ignore */ spec2)) as unknown as {
-      GLTFLoader: new () => {
-        loadAsync(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }>;
-      };
-    };
-    const gltf = await new mod.GLTFLoader().loadAsync(libraryUrl);
-    // Meshy's shared rig means identity bone names: a donor clip's tracks
-    // ("Hips.quaternion", …) resolve directly against the target mixer's root,
-    // so binding the clip onto the target mixer IS the retarget. (Cross-skeleton
-    // sources would need SkeletonUtils.retargetClip; not needed here.)
-    const names: string[] = [];
-    for (const clip of gltf.animations) {
-      this.animationActions.set(`${meshId}/${clip.name}`, mixer.clipAction(clip));
-      names.push(clip.name);
-    }
-    return names;
+  // ── Extension seam ─────────────────────────────────────────────────────────
+  private extensions = new Map<string, object>();
+  registerExtension(name: string, impl: object): void {
+    this.extensions.set(name, impl);
+  }
+  extension<T = object>(name: string): T | undefined {
+    return this.extensions.get(name) as T | undefined;
+  }
+  // Engine-typed host accessors for adapter plugins (see RendererAdapter docs).
+  /** The AnimationMixer a mesh's clips play on (created by loadMesh when the
+   *  mesh ships any clip). Plugins bind extra clips onto it. */
+  getMixer(meshId: string): THREE.AnimationMixer | undefined {
+    return this.animationMixers.get(meshId);
+  }
+  /** Register a clip action so `playAnimation(meshId, name)` finds it. */
+  addClipAction(meshId: string, name: string, action: THREE.AnimationAction): void {
+    this.animationActions.set(`${meshId}/${name}`, action);
   }
 
   async loadModelTemplate(

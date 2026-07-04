@@ -1161,18 +1161,21 @@ export interface RendererAdapter {
   playAnimationOnce(meshId: string, clipName: string): number;
 
   /**
-   * Retarget every animation clip from a SEPARATE donor GLB (`libraryUrl`,
-   * typically a skeleton-only shared "animations.glb") onto the already-loaded
-   * mesh `meshId`, and register the retargeted clips under that meshId so the
-   * normal `playAnimation(meshId, clipName)` / `stopAnimation` / weight / speed
-   * methods drive them — exactly as if they had shipped inside the mesh's own
-   * GLB. This is the seam that lets one shared clip library animate many
-   * different characters that share a skeleton (bone-name match). Babylon uses
-   * AnimatorAvatar.retargetAnimationGroup; Three binds the donor clips onto the
-   * target mixer by node name. Returns the clip names now playable. Resolves
-   * after the donor is loaded and retargeted; throws if `meshId` isn't loaded.
+   * Adapter extension seam — lets a component ship its OWN engine-specific
+   * capability instead of bloating this free interface with every niche
+   * operation. A component that needs an engine feature the adapter doesn't
+   * expose ships an "adapter plugin" (the sanctioned place, alongside the
+   * adapters themselves, to import `@babylonjs`/`three`) and registers it here
+   * at bootstrap under a unique `name`; its renderer-agnostic System then
+   * reaches it via `extension(name)` and calls its methods. The plugin gets at
+   * the engine through the adapter's engine-typed host accessors (e.g. Babylon's
+   * `getScene` / `getMeshRoot` / `addAnimationGroups`). Reserve this for
+   * component-specific capabilities; genuinely generic primitives (loadMesh,
+   * playAnimation, …) still belong on this interface.
    */
-  retargetAnimationLibrary(meshId: string, libraryUrl: string): Promise<string[]>;
+  registerExtension(name: string, impl: object): void;
+  /** Retrieve a registered extension by name; undefined if none is registered. */
+  extension<T = object>(name: string): T | undefined;
 
   /**
    * Screen-facing text label at a world-space point. Implemented as a

@@ -538,12 +538,15 @@ export class MockRendererAdapter implements RendererAdapter {
 
   /** Tests can preload the clip names `loadModelTemplate` resolves with. */
   modelTemplateAnimationNames: string[] = [];
-  /** Tests can preload the clip names `retargetAnimationLibrary` resolves with. */
-  retargetLibraryClipNames: string[] = [];
 
-  async retargetAnimationLibrary(meshId: string, libraryUrl: string): Promise<string[]> {
-    this.record('retargetAnimationLibrary', meshId, libraryUrl);
-    return [...this.retargetLibraryClipNames];
+  // ── Extension seam ─────────────────────────────────────────────────────────
+  private extensions = new Map<string, object>();
+  registerExtension(name: string, impl: object): void {
+    this.record('registerExtension', name);
+    this.extensions.set(name, impl);
+  }
+  extension<T = object>(name: string): T | undefined {
+    return this.extensions.get(name) as T | undefined;
   }
   /**
    * Duration `playAnimationOnce` reports back (seconds). Default 0 so consumers

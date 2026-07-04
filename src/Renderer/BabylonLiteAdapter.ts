@@ -1263,11 +1263,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return { meshId: id, handle, animationNames };
   }
 
-  async retargetAnimationLibrary(_meshId: string, _libraryUrl: string): Promise<string[]> {
-    // The lite Babylon build ships no AnimatorAvatar / animation retargeting.
-    // Keep the interface surface but no-op (return no clips) rather than bind
-    // donor clips to the wrong skeleton. Use the full BabylonAdapter to retarget.
-    return [];
+  // ── Extension seam ─────────────────────────────────────────────────────────
+  private extensions = new Map<string, object>();
+  registerExtension(name: string, impl: object): void {
+    this.extensions.set(name, impl);
+  }
+  extension<T = object>(name: string): T | undefined {
+    return this.extensions.get(name) as T | undefined;
   }
 
   async loadModelTemplate(

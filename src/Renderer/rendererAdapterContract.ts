@@ -380,16 +380,24 @@ export function runRendererAdapterContract(
           expect(res.handle).toBeTruthy();
           expect(Array.isArray(res.animationNames)).toBe(true);
         });
-
-        it('retargetAnimationLibrary resolves to an array of clip names', async () => {
-          const names = await adapter.retargetAnimationLibrary(
-            'model',
-            'https://example.invalid/animations.glb',
-          );
-          expect(Array.isArray(names)).toBe(true);
-        });
       });
     }
+
+    // ---------------------------------------------------------------------
+    // Extension seam
+    // ---------------------------------------------------------------------
+    describe('extensions', () => {
+      it('registerExtension / extension round-trips a registered impl', () => {
+        const impl = { hello: () => 42 };
+        adapter.registerExtension('demo', impl);
+        expect(adapter.extension('demo')).toBe(impl);
+        expect(adapter.extension<typeof impl>('demo')?.hello()).toBe(42);
+      });
+
+      it('extension returns undefined for an unregistered name', () => {
+        expect(adapter.extension('nope')).toBeUndefined();
+      });
+    })
 
     // ---------------------------------------------------------------------
     // Lights
