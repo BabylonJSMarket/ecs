@@ -4,8 +4,8 @@
  * unchanged; only a bookkeeping side-effect is added.
  *
  * Only mutating methods are tracked (names starting with `set`, `update`,
- * `nudge`, `attach`, `detach`, `dispose`). Constructors (`create*`) and
- * readers (`get*`) never race with each other in a meaningful way.
+ * `nudge`, `attach`, `detach`, `dispose`, `replace`). Constructors (`create*`)
+ * and readers (`get*`) never race with each other in a meaningful way.
  *
  * Handles are opaque objects, but every real adapter tags them with a stable
  * `__handle` string internally (see BabylonAdapter.makeHandle,
@@ -16,7 +16,7 @@
 import type { RaceDetector } from '../ECS/Race/RaceDetector';
 import type { RendererAdapter } from './types';
 
-const MUTATOR_PREFIXES = ['set', 'update', 'nudge', 'attach', 'detach', 'dispose'];
+const MUTATOR_PREFIXES = ['set', 'update', 'nudge', 'attach', 'detach', 'dispose', 'replace'];
 
 function isMutator(method: string): boolean {
   return MUTATOR_PREFIXES.some((p) => method.startsWith(p));

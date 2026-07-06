@@ -427,15 +427,24 @@ export abstract class System {
     }
 
     // Opt-in race attribution. In dev builds World hangs a RaceDetector off
-    // itself; in prod it's undefined and we take the straight path.
+    // itself; in prod it's undefined and we take the straight path. The
+    // snapshot/diff bracket credits every changed component field to this system
+    // (a cheap no-op unless componentTracking is on) so a second writer warns.
     const detector = (this.world as unknown as {
-      raceDetector?: { setCurrentSystem(name: string | null): void };
+      raceDetector?: {
+        setCurrentSystem(name: string | null): void;
+        snapshotComponents(entities: Iterable<Entity>): unknown;
+        diffComponents(entities: Iterable<Entity>, snapshot: unknown, systemName: string): void;
+      };
     })?.raceDetector;
     if (detector) {
-      detector.setCurrentSystem(this.constructor.name);
+      const name = this.constructor.name;
+      detector.setCurrentSystem(name);
+      const snapshot = detector.snapshotComponents(this.entities);
       try {
         this.onUpdate(deltaTime);
       } finally {
+        detector.diffComponents(this.entities, snapshot, name);
         detector.setCurrentSystem(null);
       }
       return;

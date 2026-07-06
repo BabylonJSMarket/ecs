@@ -129,4 +129,108 @@ describe('RaceDetector', () => {
     detector.recordEvent('e', { entityId: '1' });
     expect(onWarn).toHaveBeenCalledTimes(1);
   });
+
+  describe('component-field races', () => {
+    // A minimal TrackableEntity whose one component's fields can be mutated.
+    const makeEntity = (id: string, comps: Record<string, Record<string, unknown>>) => {
+      const components = Object.entries(comps).map(([name, data]) => ({
+        constructor: { name },
+        data: { ...data },
+        toJSON() {
+          return this.data;
+        },
+      }));
+      return {
+        id,
+        getComponents: () => components,
+        set(name: string, field: string, value: unknown) {
+          components.find((c) => c.constructor.name === name)!.data[field] = value;
+        },
+      };
+    };
+
+    it('snapshot is empty and diff is a no-op when componentTracking is off', () => {
+      const { detector, onWarn } = makeDetector();
+      detector.beginFrame();
+      const e = makeEntity('e', { C: { x: 1 } });
+      const snap = detector.snapshotComponents([e]);
+      expect(snap.size).toBe(0);
+      e.set('C', 'x', 2);
+      detector.diffComponents([e], snap, 'S');
+      expect(onWarn).not.toHaveBeenCalled();
+    });
+
+    it('warns when two systems write the same component field in one frame', () => {
+      const { detector, onWarn } = makeDetector();
+      detector.componentTracking = true;
+      detector.beginFrame();
+      const player = makeEntity('Player', { MeshPrimitive: { position: [0, 0, 0] } });
+      const es = [player];
+
+      detector.setCurrentSystem('KeyboardMoverSystem');
+      const s1 = detector.snapshotComponents(es);
+      player.set('MeshPrimitive', 'position', [1, 0, 0]);
+      detector.diffComponents(es, s1, 'KeyboardMoverSystem');
+
+      detector.setCurrentSystem('AnimateMeshySystem');
+      const s2 = detector.snapshotComponents(es);
+      player.set('MeshPrimitive', 'position', [2, 0, 0]);
+      detector.diffComponents(es, s2, 'AnimateMeshySystem');
+
+      expect(onWarn).toHaveBeenCalledTimes(1);
+      const w = detector.warnings[0];
+      expect(w.kind).toBe('component');
+      expect(w.sources).toEqual(['KeyboardMoverSystem', 'AnimateMeshySystem']);
+      expect(w.message).toContain('MeshPrimitive.position');
+      expect(w.message).toContain('Player');
+    });
+
+    it('one system writing a field is not a race', () => {
+      const { detector, onWarn } = makeDetector();
+      detector.componentTracking = true;
+      detector.beginFrame();
+      const e = makeEntity('e', { C: { x: 1 } });
+      detector.setCurrentSystem('A');
+      const s = detector.snapshotComponents([e]);
+      e.set('C', 'x', 2);
+      detector.diffComponents([e], s, 'A');
+      expect(onWarn).not.toHaveBeenCalled();
+    });
+
+    it('two systems writing different fields is not a race', () => {
+      const { detector, onWarn } = makeDetector();
+      detector.componentTracking = true;
+      detector.beginFrame();
+      const e = makeEntity('e', { C: { x: 1, y: 1 } });
+      detector.setCurrentSystem('A');
+      const s1 = detector.snapshotComponents([e]);
+      e.set('C', 'x', 2);
+      detector.diffComponents([e], s1, 'A');
+      detector.setCurrentSystem('B');
+      const s2 = detector.snapshotComponents([e]);
+      e.set('C', 'y', 9);
+      detector.diffComponents([e], s2, 'B');
+      expect(onWarn).not.toHaveBeenCalled();
+    });
+
+    it('resets between frames so a legit cross-frame handoff does not warn', () => {
+      const { detector, onWarn } = makeDetector();
+      detector.componentTracking = true;
+      const e = makeEntity('e', { C: { x: 0 } });
+
+      detector.beginFrame();
+      detector.setCurrentSystem('A');
+      const s1 = detector.snapshotComponents([e]);
+      e.set('C', 'x', 1);
+      detector.diffComponents([e], s1, 'A');
+
+      detector.beginFrame();
+      detector.setCurrentSystem('B');
+      const s2 = detector.snapshotComponents([e]);
+      e.set('C', 'x', 2);
+      detector.diffComponents([e], s2, 'B');
+
+      expect(onWarn).not.toHaveBeenCalled();
+    });
+  });
 });

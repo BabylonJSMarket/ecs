@@ -38,6 +38,15 @@ export interface IWorldOptions {
    * builds (`import.meta.env.DEV` / `NODE_ENV !== 'production'`).
    */
   detectRaces?: boolean;
+  /**
+   * Also detect component-field races — two Systems writing the same
+   * component field on one entity in a frame (the "one component silently
+   * loses" case a bare field assignment hides from the event/adapter ledgers).
+   * Heavier: snapshots + diffs each System's query entities around onUpdate.
+   * Off by default even in dev; turn on while chasing a suspected race.
+   * Requires `detectRaces` (dev default) to be on.
+   */
+  detectComponentRaces?: boolean;
 }
 
 /**
@@ -211,6 +220,9 @@ export class World {
     const detect = options.detectRaces ?? isDev();
     if (detect) {
       this.raceDetector = new RaceDetector();
+      // Component-field race detection is the heavier, opt-in tier (snapshot +
+      // diff each tracked entity around every onUpdate) — only on when asked.
+      this.raceDetector.componentTracking = options.detectComponentRaces ?? false;
       this.eventBus.setRaceDetector(this.raceDetector);
       this.renderer = options.renderer
         ? withRaceTracking(options.renderer, this.raceDetector)

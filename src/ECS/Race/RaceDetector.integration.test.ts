@@ -13,6 +13,9 @@ import { MockRendererAdapter } from '../../Renderer/MockRendererAdapter';
 import type { MeshHandle } from '../../Renderer/types';
 
 class MarkerComponent extends Component {}
+class HealthComponent extends Component {
+  value = 0;
+}
 
 function makeSystem(
   name: string,
@@ -110,6 +113,63 @@ describe('RaceDetector integration', () => {
     e.add(new MarkerComponent());
     world.update(1 / 60);
     expect(world.raceDetector!.warnings).toHaveLength(0);
+    warn.mockRestore();
+  });
+
+  it('warns when two systems write the same component field in one frame (detectComponentRaces)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const bus = new EventBus();
+    const renderer = new MockRendererAdapter();
+    const world = new World({
+      eventBus: bus,
+      renderer,
+      detectRaces: true,
+      detectComponentRaces: true,
+    });
+
+    const WriterA = makeSystem('WriterA', function () {
+      for (const e of this.entities) e.get(HealthComponent)!.value = 50;
+    });
+    const WriterB = makeSystem('WriterB', function () {
+      for (const e of this.entities) e.get(HealthComponent)!.value = 30;
+    });
+    world.addSystem(new WriterA(bus));
+    world.addSystem(new WriterB(bus));
+    world.initialize();
+    const e = world.createEntity();
+    e.add(new MarkerComponent());
+    e.add(new HealthComponent());
+    world.update(1 / 60);
+
+    const race = world.raceDetector!.warnings.find((w) => w.kind === 'component');
+    expect(race).toBeDefined();
+    expect(race!.key).toContain('HealthComponent.value');
+    expect(race!.sources).toEqual(expect.arrayContaining(['WriterA', 'WriterB']));
+    warn.mockRestore();
+  });
+
+  it('leaves component-field writes untracked unless detectComponentRaces is set', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const bus = new EventBus();
+    const renderer = new MockRendererAdapter();
+    // detectRaces on (event/adapter tracked), but component tracking off.
+    const world = new World({ eventBus: bus, renderer, detectRaces: true });
+
+    const WriterA = makeSystem('WriterA', function () {
+      for (const e of this.entities) e.get(HealthComponent)!.value = 1;
+    });
+    const WriterB = makeSystem('WriterB', function () {
+      for (const e of this.entities) e.get(HealthComponent)!.value = 2;
+    });
+    world.addSystem(new WriterA(bus));
+    world.addSystem(new WriterB(bus));
+    world.initialize();
+    const e = world.createEntity();
+    e.add(new MarkerComponent());
+    e.add(new HealthComponent());
+    world.update(1 / 60);
+
+    expect(world.raceDetector!.warnings.some((w) => w.kind === 'component')).toBe(false);
     warn.mockRestore();
   });
 
