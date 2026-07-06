@@ -213,6 +213,26 @@ describe('RaceDetector', () => {
       expect(onWarn).not.toHaveBeenCalled();
     });
 
+    it('tolerates un-stringifiable and undefined component fields without throwing', () => {
+      const { detector } = makeDetector();
+      detector.componentTracking = true;
+      detector.beginFrame();
+      const circular: Record<string, unknown> = {};
+      circular.self = circular; // JSON.stringify throws → stableField falls back
+      const comp = {
+        constructor: { name: 'Weird' },
+        data: { loop: circular, u: undefined } as Record<string, unknown>,
+        toJSON() {
+          return this.data;
+        },
+      };
+      const e = { id: 'w', getComponents: () => [comp] };
+      expect(() => {
+        const s = detector.snapshotComponents([e]);
+        detector.diffComponents([e], s, 'S');
+      }).not.toThrow();
+    });
+
     it('resets between frames so a legit cross-frame handoff does not warn', () => {
       const { detector, onWarn } = makeDetector();
       detector.componentTracking = true;
