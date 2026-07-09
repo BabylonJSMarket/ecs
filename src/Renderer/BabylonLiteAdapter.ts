@@ -1353,7 +1353,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     g.loopAnimation = loop;
     if (!g.isPlaying) {
       g.isPlaying = true;
-      g.currentFrame = 0;
+      (g as unknown as { currentFrame: number }).currentFrame = 0;
     }
   }
   stopAnimation(meshId: string, clipName: string): void {
@@ -1372,7 +1372,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const g = this.animationGroups.get(`${meshId}/${clipName}`);
     if (!g) return 0;
     g.loopAnimation = false;
-    g.currentFrame = 0;
+    (g as unknown as { currentFrame: number }).currentFrame = 0;
     g.isPlaying = true;
     return g.duration ?? 0;
   }

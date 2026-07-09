@@ -304,6 +304,36 @@ describe('SceneLoader', () => {
       expect(result.systems.some(s => s instanceof MovementSystem)).toBe(true);
     });
 
+    it('creates ALL systems a component drives when registered with an array', () => {
+      class DampingSystem extends System {
+        constructor(eventBus: EventBus) {
+          super(eventBus);
+          this.query = { required: [VelocityComponent] };
+        }
+        protected onUpdate(): void {}
+      }
+      // A component may drive several systems (e.g. guidance + impact).
+      sceneLoader.registerComponent('Velocity', VelocityComponent, [MovementSystem, DampingSystem]);
+      const result = sceneLoader.instantiateScene('GameScene', world);
+      expect(result.systems.some(s => s instanceof MovementSystem)).toBe(true);
+      expect(result.systems.some(s => s instanceof DampingSystem)).toBe(true);
+      // getSystemClass returns the first for back-compat.
+      expect(sceneLoader.getSystemClass('Velocity')).toBe(MovementSystem);
+    });
+
+    it('registerComponents accepts a `systems` array (and legacy `system`)', () => {
+      class DampingSystem extends System {
+        protected onUpdate(): void {}
+      }
+      const loader = new SceneLoader(eventBus);
+      loader.registerComponents({
+        Velocity: { component: VelocityComponent, systems: [MovementSystem, DampingSystem] },
+        Position: { component: PositionComponent, system: MovementSystem },
+      });
+      expect(loader.getSystemClass('Velocity')).toBe(MovementSystem);
+      expect(loader.getSystemClass('Position')).toBe(MovementSystem);
+    });
+
     it('should not create systems when disabled', () => {
       const result = sceneLoader.instantiateScene('GameScene', world, {
         createSystems: false,

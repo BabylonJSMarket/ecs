@@ -111,6 +111,22 @@ export interface ComponentEntry {
   component: new (data?: any) => Component;
   /** Optional concrete System subclass constructor. */
   system?: new (eventBus: EventBus) => System;
+  /**
+   * Optional MULTIPLE System subclasses this component drives. A component may
+   * own several systems (e.g. a missile's guidance + impact); all of them are
+   * created when the component is used in a scene. Takes precedence over
+   * `system` when both are given.
+   */
+  systems?: (new (eventBus: EventBus) => System)[];
+}
+
+/** Normalize a single-or-array system argument to an array. */
+function toSystemArray(
+  s?:
+    | (new (eventBus: EventBus) => System)
+    | (new (eventBus: EventBus) => System)[],
+): (new (eventBus: EventBus) => System)[] {
+  return s == null ? [] : Array.isArray(s) ? s : [s];
 }
 
 // ============================================
@@ -203,7 +219,9 @@ export class SceneLoader {
   registerComponent(
     name: string,
     componentClass: new (data?: any) => Component,
-    systemClass?: new (eventBus: EventBus) => System,
+    systemClass?:
+      | (new (eventBus: EventBus) => System)
+      | (new (eventBus: EventBus) => System)[],
   ): void {
     // Stamp the registry name as the class's stable, minification-safe type id
     // (unless the class declares its own). This is what Entity.get/has match on,
@@ -211,7 +229,7 @@ export class SceneLoader {
     stampComponentType(componentClass, name);
     this.componentRegistry.set(name, {
       component: componentClass,
-      system: systemClass,
+      systems: toSystemArray(systemClass),
     });
   }
 
@@ -231,7 +249,10 @@ export class SceneLoader {
   registerComponents(components: Record<string, ComponentEntry>): void {
     for (const [name, entry] of Object.entries(components)) {
       if (entry.component) stampComponentType(entry.component, name);
-      this.componentRegistry.set(name, entry);
+      this.componentRegistry.set(name, {
+        component: entry.component,
+        systems: entry.systems ?? toSystemArray(entry.system),
+      });
     }
   }
 
@@ -252,7 +273,7 @@ export class SceneLoader {
    * @returns The System class, or undefined if not registered
    */
   getSystemClass(name: string): typeof System | undefined {
-    return this.componentRegistry.get(name)?.system;
+    return this.componentRegistry.get(name)?.systems?.[0] as typeof System | undefined;
   }
 
   /**
@@ -455,16 +476,19 @@ export class SceneLoader {
       for (const componentType of usedComponents) {
         const entry = this.componentRegistry.get(componentType);
 
-        // Create system if registered and not already created
-        if (entry?.system && !systemsCreated.has(componentType)) {
-          const system = new entry.system(this.eventBus);
-          systems.push(system);
-          systemsCreated.add(componentType);
+        // Create every system this component drives (guidance + impact, …),
+        // once per component.
+        if (entry?.systems?.length && !systemsCreated.has(componentType)) {
+          for (const SystemClass of entry.systems) {
+            const system = new SystemClass(this.eventBus);
+            systems.push(system);
 
-          this.eventBus.emit(SceneLoaderEvents.SYSTEM_CREATED, {
-            systemName: entry.system.name,
-            componentType,
-          });
+            this.eventBus.emit(SceneLoaderEvents.SYSTEM_CREATED, {
+              systemName: SystemClass.name,
+              componentType,
+            });
+          }
+          systemsCreated.add(componentType);
         }
       }
     }
