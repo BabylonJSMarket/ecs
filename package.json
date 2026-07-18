@@ -37,8 +37,6 @@
   },
   "files": [
     "dist",
-    ".claude-plugin",
-    "skills",
     "README.md"
   ],
   "publishConfig": {
