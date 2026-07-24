@@ -59,7 +59,7 @@ import type {
   Quaternion,
   ScreenPoint,
   Vec3,
-  // Phase-3 (Wingman) visual capabilities.
+  // Phase-3 visual capabilities.
   ProceduralMeshSpec,
   DynamicTextureSpec,
   ParticleBurstSpec,
@@ -96,7 +96,7 @@ function sphericalToCartesian(alpha: number, beta: number, radius: number, targe
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase-3 (Wingman) shared pure math. These are ENGINE-FREE so the displaced
+// Phase-3 shared pure math. These are ENGINE-FREE so the displaced
 // rock geometry the adapter tessellates and the surface point
 // `sampleProceduralSurface` reports come from ONE function — collision/occlusion
 // code and the renderer therefore agree on a single silhouette. The hash + octave
@@ -104,7 +104,7 @@ function sphericalToCartesian(alpha: number, beta: number, radius: number, targe
 // yields the same rock on every engine (Babylon/Three/Mock).
 // ─────────────────────────────────────────────────────────────────────────
 
-/** Deterministic [0,1) hash of three integers — the Wingman asteroid noise source. */
+/** Deterministic [0,1) hash of three integers — the asteroid noise source. */
 function rockHash3(a: number, b: number, c: number): number {
   let n = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
   n = Math.imul(n ^ (n >>> 13), 1274126177);
@@ -278,7 +278,7 @@ export class ThreeAdapter implements RendererAdapter {
   private _tfNdc?: THREE.Vector2;
   private _tfUpY?: THREE.Vector3;
 
-  // ─── Phase-3 (Wingman) state ───
+  // ─── Phase-3 state ───
   /**
    * Dynamic textures (CPU pixel buffer → DataTexture) deduped by the caller's
    * key. The texture object itself lives in the shared `textures` map so the
@@ -1447,7 +1447,7 @@ export class ThreeAdapter implements RendererAdapter {
   /**
    * Measure-and-normalize a loaded GLB hierarchy per {@link ModelFitSpec}: filter
    * to the wanted body, scale its longest horizontal extent to `fitLength`, and
-   * apply yaw/pitch + yOffset so it faces +Z. Mirrors the Wingman BabylonRenderer's
+   * apply yaw/pitch + yOffset so it faces +Z. Mirrors the BabylonRenderer's
    * `setupShipGlb` fit-up. (Phase 3 just DISPLAYS — no blow-apart proxy.)
    */
   private applyModelFit(root: THREE.Object3D, fit: ModelFitSpec, spec?: ModelInstantiateSpec): void {
@@ -2226,7 +2226,7 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Phase-3 (Wingman) visual capabilities.
+  // Phase-3 visual capabilities.
   // ═══════════════════════════════════════════════════════════════════════
 
   // ─── Procedural seeded geometry ───
@@ -3018,7 +3018,7 @@ function clamp01(v: number): number {
 /**
  * Two-segment color-over-life lerp `c1 → c2 → dead` at `t∈[0,1]`, written into
  * `out` (RGBA). The first half blends start→mid, the second half mid→dead — the
- * Wingman fire/energy color ramp.
+ * fire/energy color ramp.
  */
 function lerpColor4(c1: Color4, c2: Color4, dead: Color4, t: number, out: Color4): Color4 {
   let a: Color4, b: Color4, f: number;

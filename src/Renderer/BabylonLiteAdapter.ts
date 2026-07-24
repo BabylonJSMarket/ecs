@@ -67,7 +67,7 @@ import type {
   Quaternion,
   ScreenPoint,
   Vec3,
-  // ─── Phase-3 (Wingman) visual capabilities ───
+  // ─── Phase-3 visual capabilities ───
   ProceduralMeshSpec,
   DynamicTextureSpec,
   ParticleBurstSpec,
@@ -233,7 +233,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
    */
   private pivotOffsets = new Map<MeshHandle, number>();
 
-  // ─── Phase-3 (Wingman) visual state ───
+  // ─── Phase-3 visual state ───
   /** Dynamic textures (CPU pixel buffer → GPU), deduped by key like loadTexture. */
   private dynamicTextures = new Map<string, TextureHandle>();
   /** Handle → live Texture2D, so updateDynamicTexture can re-upload pixels. */

@@ -256,7 +256,7 @@ export class BabylonAdapter implements RendererAdapter {
    */
   private textures = new Map<TextureHandle, Texture>();
   private texturesByKey = new Map<string, TextureHandle>();
-  // ─── Phase-3 (Wingman) visual state ───
+  // ─── Phase-3 visual state ───
   /** RawTextures built from CPU pixel buffers, deduped by the caller's key. */
   private dynamicTexturesByKey = new Map<string, TextureHandle>();
   /**
@@ -1118,7 +1118,7 @@ export class BabylonAdapter implements RendererAdapter {
     if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
     if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
     if (spec?.scale !== undefined) root.scaling.setAll(spec.scale);
-    // Auto-fit a displayed GLB (the Wingman ships): measure-and-normalize the
+    // Auto-fit a displayed GLB (the display ships): measure-and-normalize the
     // longest horizontal extent to fit.fitLength (overriding spec.scale), apply
     // the yaw/pitch facing correction (nose → +Z), and filter to one body when a
     // GLB carries several (freighter.glb holds TrainCar + TrainEngine).
@@ -2253,7 +2253,7 @@ export class BabylonAdapter implements RendererAdapter {
 
   // ─── Phase-3: procedural seeded geometry ───
   /**
-   * Build a deterministic, seed-driven Wingman mesh and register it like any
+   * Build a deterministic, seed-driven procedural mesh and register it like any
    * other mesh. Rock shapes (asteroid / oil-blob / asteroid-drop) displace an
    * icosphere through the SHARED {@link asteroidSurfacePosition} field (so the
    * geometry matches {@link sampleProceduralSurface} byte-for-byte); the named
@@ -2272,13 +2272,13 @@ export class BabylonAdapter implements RendererAdapter {
     let mesh: Mesh;
     switch (spec.shape) {
       case 'asteroid':
-        mesh = buildWingmanAsteroid(scene, id, spec.size[0], color, seed, spec.cutAxis, spec.cutDepth, spec.subdivisions);
+        mesh = buildAsteroid(scene, id, spec.size[0], color, seed, spec.cutAxis, spec.cutDepth, spec.subdivisions);
         break;
       case 'oil-blob':
-        mesh = buildWingmanOilBlob(scene, id, spec.size[0], color, seed);
+        mesh = buildOilBlob(scene, id, spec.size[0], color, seed);
         break;
       case 'asteroid-drop':
-        mesh = buildWingmanAsteroidDrop(scene, id, spec.size, color);
+        mesh = buildAsteroidDrop(scene, id, spec.size, color);
         break;
       case 'spaceplane':
         mesh = buildSpaceplane(scene, id, color);
@@ -2297,7 +2297,7 @@ export class BabylonAdapter implements RendererAdapter {
         mesh = buildMissile(scene, id, spec.size[0], spec.size[2], color);
         break;
       case 'waypoint':
-        mesh = buildWingmanWaypoint(scene, id, spec.size[0], color, spec.emissive ?? 0);
+        mesh = buildWaypoint(scene, id, spec.size[0], color, spec.emissive ?? 0);
         break;
       default:
         throw new Error(`BabylonAdapter.createProceduralMesh: unknown shape "${(spec as ProceduralMeshSpec).shape}"`);
@@ -2732,8 +2732,7 @@ function toV3Lines(lines: Vec3[][]): Vector3[][] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase-3 (Wingman) builders + helpers. Lifted from the bespoke
-// games/.../adapter/babylon builders so the space-sim shapes run on the shared
+// Phase-3 builders + helpers for the space-sim shapes, kept on the shared
 // adapter. Kept renderer-local (only this file may import @babylonjs/*). The
 // custom-material ripple/jet shaders + lens flare + nebula sky are Phase-3b.
 // All shapes are +Z forward, +Y up (right-handed; matches the locked camera).
@@ -2770,7 +2769,7 @@ function wrapAddressMode(wrap?: 'wrap' | 'clamp' | 'mirror'): number {
  * the SAME {@link asteroidSurfacePosition} the sampler uses, so geometry and
  * collision agree. The shared-material / ripple-plugin path is Phase-3b.
  */
-function buildWingmanAsteroid(
+function buildAsteroid(
   scene: Scene, id: string, radius: number, color: Color3, seed: number,
   cutAxis?: Vec3, cutDepth?: number, subdivisions = 14,
 ): Mesh {
@@ -2781,7 +2780,7 @@ function buildWingmanAsteroid(
     // Capture the pre-displacement unit directions before overwriting positions.
     const directions = new Float32Array(positions.length);
     for (let i = 0; i < positions.length; i++) directions[i] = positions[i];
-    applyWingmanAsteroidDisplacement(mesh, positions, directions, shape, radius);
+    applyAsteroidDisplacement(mesh, positions, directions, shape, radius);
     mesh.refreshBoundingInfo();
   }
   // Asteroids are huge (up to ~400u) and few — never cull them; per-pixel GPU
@@ -2806,7 +2805,7 @@ function buildWingmanAsteroid(
  * vertices (the icosphere keeps per-triangle UV copies) are grouped by hashed
  * direction so the mesh stays watertight and lighting smooth across edges.
  */
-function applyWingmanAsteroidDisplacement(
+function applyAsteroidDisplacement(
   mesh: Mesh,
   positions: number[] | Float32Array,
   directions: Float32Array,
@@ -2876,7 +2875,7 @@ function applyWingmanAsteroidDisplacement(
 }
 
 /** Oil blob: a unit icosphere scaled to `radius`. The Worthington-jet plugin is Phase-3b. */
-function buildWingmanOilBlob(scene: Scene, id: string, radius: number, color: Color3, seed: number): Mesh {
+function buildOilBlob(scene: Scene, id: string, radius: number, color: Color3, seed: number): Mesh {
   const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions: 12, flat: false }, scene);
   mesh.scaling.set(radius, radius, radius);
   mesh.isPickable = false;
@@ -2895,7 +2894,7 @@ function buildWingmanOilBlob(scene: Scene, id: string, radius: number, color: Co
 }
 
 /** Asteroid chip: a low-poly icosphere stretched along `size` for a teardrop. */
-function buildWingmanAsteroidDrop(scene: Scene, id: string, size: Vec3, color: Color3): Mesh {
+function buildAsteroidDrop(scene: Scene, id: string, size: Vec3, color: Color3): Mesh {
   const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions: 3, flat: false }, scene);
   mesh.scaling.set(size[0], size[1] || size[0], size[2] || size[0]);
   mesh.alwaysSelectAsActiveMesh = true;
@@ -2913,7 +2912,7 @@ function buildWingmanAsteroidDrop(scene: Scene, id: string, size: Vec3, color: C
  * state colour (cyan / yellow / green) shows exactly as written rather than
  * filtered through PBR lighting; depth-tested bloom handles the glow.
  */
-function buildWingmanWaypoint(scene: Scene, id: string, sx: number, color: Color3, emissive: number): Mesh {
+function buildWaypoint(scene: Scene, id: string, sx: number, color: Color3, emissive: number): Mesh {
   const mesh = MeshBuilder.CreateTorus(id, {
     diameter: sx * 2,
     thickness: Math.max(2, sx * 0.08),

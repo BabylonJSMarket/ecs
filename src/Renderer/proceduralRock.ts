@@ -1,7 +1,7 @@
 /**
  * proceduralRock — renderer-free seeded-asteroid surface math.
  *
- * Lifted (1:1) from the bespoke Wingman `game/data/asteroidShape.ts` so the
+ * The seeded displacement math is defined here ONCE so the
  * BabylonAdapter's `createProceduralMesh` (which displaces an icosphere) and its
  * `sampleProceduralSurface` (which collision/occlusion code calls) evaluate ONE
  * shared displacement function. That's what makes the contract's determinism
@@ -150,7 +150,7 @@ export function asteroidSurfacePosition(
 /** Cheap deterministic [0, 1) hash for seed-driven generation. */
 export function hash(seed: number, salt: number): number {
   // Mulberry32-ish — good enough for vertex offsets, no allocation. Kept
-  // bit-for-bit identical to the Wingman original so geometry reproduces.
+  // bit-for-bit stable so geometry reproduces.
   let n = (seed | 0) * 374761393 + (salt | 0) * 668265263;
   n = (n ^ (n >>> 13)) * 1274126177;
   n = n ^ (n >>> 16);

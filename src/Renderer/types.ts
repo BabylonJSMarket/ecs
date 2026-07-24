@@ -231,7 +231,7 @@ export interface ModelInstantiateSpec {
   /**
    * Optional auto-fit (measure-and-normalize + facing correction + mesh filter)
    * for a displayed ship GLB. When `fit.fitLength` is set it overrides `scale`.
-   * See {@link ModelFitSpec}. The Wingman ships use this to show a 6–19 MB model
+   * See {@link ModelFitSpec}. The display ships use this to show a 6–19 MB model
    * at the right size/heading regardless of how the asset was authored.
    */
   fit?: ModelFitSpec;
@@ -427,12 +427,12 @@ export interface CardMeshSpec {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phase-3 (Wingman) visual capabilities. Procedural seeded geometry, runtime
+// Phase-3 visual capabilities. Procedural seeded geometry, runtime
 // dynamic textures, particle systems, post-process glow/bloom, and a
-// camera-following sun — the surface the bespoke Wingman BabylonRenderer
-// exposed, lifted onto the shared adapter so the space-sim components run on
-// every engine. Handedness is locked elsewhere (identity camera → +Z forward,
-// RIGHT-handed geometry); all placement below must stay consistent with it.
+// camera-following sun — the surface the renderer exposes so the space-sim
+// components run on every engine. Handedness is locked elsewhere (identity
+// camera → +Z forward, RIGHT-handed geometry); all placement below must stay
+// consistent with it.
 // ─────────────────────────────────────────────────────────────────────────
 
 /** An RGBA color tuple in 0..1 (particle start/mid/dead colors carry alpha). */
@@ -445,7 +445,7 @@ export type ParticleEmitterHandle = { readonly __particleEmitter: unique symbol 
  * Named procedural mesh shapes built by {@link RendererAdapter.createProceduralMesh}.
  * `asteroid` / `oil-blob` / `asteroid-drop` are seeded rock geometry (a
  * subdivided icosphere displaced by deterministic multi-octave noise); the
- * remaining shapes are the bespoke Wingman ship / projectile / gate silhouettes
+ * remaining shapes are the ship / projectile / gate silhouettes
  * built from welded primitive groups. Every shape is `+Z` forward, `+Y` up.
  */
 export type ProceduralMeshShape =
@@ -462,7 +462,7 @@ export type ProceduralMeshShape =
 /**
  * Spec for {@link RendererAdapter.createProceduralMesh}: a deterministic,
  * seed-driven mesh. `createMesh` builds engine PRIMITIVES (box/sphere/…);
- * this builds the Wingman shapes — seeded asteroids/oil-blobs whose surface is
+ * this builds the procedural shapes — seeded asteroids/oil-blobs whose surface is
  * displaced by an integer-seeded noise field (same `seed` ⇒ byte-identical
  * geometry, so the same rock renders the same on every client and frame), plus
  * the named ship/missile/waypoint silhouettes. The pure surface-displacement
@@ -506,7 +506,7 @@ export interface ProceduralMeshSpec {
 
 /**
  * Auto-fit transform for a displayed GLB ship, layered on top of
- * {@link ModelInstantiateSpec}'s base position/rotation/scale. The Wingman ships
+ * {@link ModelInstantiateSpec}'s base position/rotation/scale. The display ships
  * are authored at wildly different scales and facings, so the adapter measures
  * the loaded hierarchy's bounding box and normalizes its longest HORIZONTAL
  * (X or Z) extent to {@link fitLength}, then applies {@link yaw}/{@link pitch}
@@ -517,7 +517,7 @@ export interface ModelFitSpec {
   /**
    * Normalize the longest horizontal extent of the loaded model to this world
    * length. When set, it OVERRIDES {@link ModelInstantiateSpec.scale} (which is
-   * a fixed multiplier). The Wingman fighters fit to ~5; the freighter cars to ~12.
+   * a fixed multiplier). The fighters fit to ~5; the freighter cars to ~12.
    */
   fitLength?: number;
   /** Extra yaw (radians) so the model's nose aligns to `+Z`. Default 0. */
@@ -635,7 +635,7 @@ export interface ParticleEmitterSpec {
   gravity?: Vec3;
   /**
    * Re-seat the emitter at the ACTIVE camera's world position every frame, so
-   * the field is always "around you" (Wingman space dust). With floating-origin
+   * the field is always "around you" (the space-dust field). With floating-origin
    * world streaming this avoids spawning/culling real entities. Default false.
    */
   followCamera?: boolean;
@@ -650,7 +650,7 @@ export interface ParticleEmitterSpec {
  * so explosions/trails/stars don't smear. Pass `null` to disable.
  */
 export interface GlowSpec {
-  /** Glow strength. Wingman uses ~0.9. */
+  /** Glow strength. Typically ~0.9. */
   intensity: number;
   /** Glow RTT downsample ratio (cheaper/blurrier as it drops). Default 0.5. */
   textureRatio?: number;
@@ -685,7 +685,7 @@ export interface BloomSpec {
 export interface MeshRenderOptions {
   /**
    * Draw bucket. Group 0 (default) renders first; higher groups render after,
-   * on top. The Wingman HUD plane + light gizmo use group 1 so asteroids can't
+   * on top. The HUD plane + light gizmo use group 1 so asteroids can't
    * occlude them.
    */
   renderingGroupId?: number;
@@ -1014,7 +1014,7 @@ export interface RendererAdapter {
    * UNTOUCHED — when the point is BEHIND the active camera, so HUD callers can
    * branch to an off-screen arrow instead of drawing a bracket at a mirrored
    * phantom position. The inverse of {@link screenToWorldPoint}; it drives the
-   * entire Wingman HUD (target brackets, crosshair, lead diamond, off-screen
+   * entire HUD (target brackets, crosshair, lead diamond, off-screen
    * arrows, sun marker). Babylon: `Vector3.Project`; Three: `Vector3.project`
    * then NDC→pixels. Uses the active perspective camera and the adapter's current
    * render size.
@@ -1281,7 +1281,7 @@ export interface RendererAdapter {
 
   // ─── Phase-3: procedural seeded geometry ───
   /**
-   * Build a deterministic, seed-driven mesh (Wingman asteroids/oil-blobs + the
+   * Build a deterministic, seed-driven mesh (asteroids/oil-blobs + the
    * named ship/missile/waypoint silhouettes) and register it under `id` so the
    * standard mesh ops (`setMeshPosition`/`setMeshRotation`/`setMeshScale`/
    * `setMeshVisible`/`disposeMesh`, `setMeshEmissiveById`, `attachShadowCaster`)

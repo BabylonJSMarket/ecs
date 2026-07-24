@@ -59,7 +59,7 @@ import type { Color } from './types';
 /**
  * Deterministic [0,1) hash of three integers — the Mock's reference noise
  * source for {@link MockRendererAdapter.sampleProceduralSurface}. Mirrors the
- * Wingman asteroid hash so seeded geometry is reproducible without an engine.
+ * asteroid hash so seeded geometry is reproducible without an engine.
  */
 function mockHash3(a: number, b: number, c: number): number {
   let n = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
