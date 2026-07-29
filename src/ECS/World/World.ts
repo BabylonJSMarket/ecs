@@ -377,6 +377,8 @@ export class World {
 
     this._initialized = true;
     this.systems.forEach(system => system.initialize());
+    // Re-sort: a system may have set its priority during initialize.
+    this.sortSystems();
     this.eventBus.emit('world.initialized', { world: this });
   }
 
@@ -682,13 +684,19 @@ export class World {
     (instance as any).setWorld(this);
 
     this.systems.push(instance);
-    // Sort by priority descending (higher priority runs first)
-    this.systems.sort((a, b) => b.priority - a.priority);
 
     // Initialize immediately if world is already initialized
     if (this._initialized) {
       instance.initialize();
     }
+
+    // Sort AFTER initialize, not before. A system is entitled to set its
+    // priority in `onInitialize` — several do — and sorting first pinned them
+    // at the default while their real priority was assigned a moment later and
+    // never re-read. PoolSystem asked for 900 that way and ran mid-pack, so
+    // other systems reached its blueprint entities before it captured them and
+    // three pools in the spaceshooter silently never existed.
+    this.sortSystems();
 
     // Add existing entities to the new system
     this.entities.forEach(entity => {
@@ -696,6 +704,14 @@ export class World {
     });
 
     this.eventBus.emit('world.system.added', { world: this, system: instance });
+  }
+
+  /**
+   * Order systems by priority, highest first. Called after any change that can
+   * affect priority — adding a system, or initializing the world.
+   */
+  private sortSystems(): void {
+    this.systems.sort((a, b) => b.priority - a.priority);
   }
 
   /**

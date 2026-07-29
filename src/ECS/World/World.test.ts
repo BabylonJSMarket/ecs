@@ -759,3 +759,71 @@ describe('World', () => {
     });
   });
 });
+
+describe('World — system order respects a priority set during initialize', () => {
+  it('re-sorts after initialize, so onInitialize can set priority', () => {
+    // Systems are entitled to set their priority in onInitialize, and several
+    // do. Sorting only at addSystem time pinned those at the default while the
+    // real value was assigned a moment later and never re-read — PoolSystem
+    // asked for 900 that way and ran mid-pack, so other systems reached its
+    // blueprint entities first and three pools silently never existed.
+    const ran: string[] = [];
+
+    class Late extends System {
+      protected onInitialize(): void {
+        this.priority = 900;
+      }
+      protected onUpdate(): void {
+        ran.push('late');
+      }
+    }
+    class Eager extends System {
+      constructor(bus: EventBus) {
+        super(bus);
+        this.priority = 50;
+      }
+      protected onUpdate(): void {
+        ran.push('eager');
+      }
+    }
+
+    const eventBus = new EventBus();
+    const world = new World({ eventBus });
+    world.addSystem(new Late(eventBus));
+    world.addSystem(new Eager(eventBus));
+    world.initialize();
+    world.update(1 / 60);
+
+    expect(ran).toEqual(['late', 'eager']);
+  });
+
+  it('also honours it for a system added after the world is initialized', () => {
+    const ran: string[] = [];
+    class Late extends System {
+      protected onInitialize(): void {
+        this.priority = 900;
+      }
+      protected onUpdate(): void {
+        ran.push('late');
+      }
+    }
+    class Eager extends System {
+      constructor(bus: EventBus) {
+        super(bus);
+        this.priority = 50;
+      }
+      protected onUpdate(): void {
+        ran.push('eager');
+      }
+    }
+
+    const eventBus = new EventBus();
+    const world = new World({ eventBus });
+    world.initialize();
+    world.addSystem(new Eager(eventBus));
+    world.addSystem(new Late(eventBus));
+    world.update(1 / 60);
+
+    expect(ran).toEqual(['late', 'eager']);
+  });
+});
