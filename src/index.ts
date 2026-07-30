@@ -38,3 +38,21 @@ export type {
 
 export * from './Renderer/raceTrackingAdapter';
 export * from './Renderer/MockRendererAdapter';
+
+/**
+ * Seeded rock geometry, exported because GAMEPLAY has to agree with it.
+ *
+ * The adapter displaces an icosphere by `asteroidStretch(seed)` to build a rock,
+ * and a component that spawns rocks must derive their collision half-extents from
+ * the SAME function — otherwise the box you can shoot and the box you crash into
+ * drift away from the shape you can see, and a bullet passes through a visible
+ * boulder. Reimplementing the stretch in the component is exactly that bug with
+ * extra steps, so the one source of truth is shared instead.
+ */
+export {
+  asteroidStretch,
+  asteroidShape,
+  asteroidSurfacePosition,
+  ASTEROID_RIPPLE_DURATION,
+  type AsteroidShape,
+} from './Renderer/proceduralRock';
