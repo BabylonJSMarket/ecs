@@ -85,6 +85,7 @@ import type {
   PrimitiveSpec,
   RendererAdapter,
   PbrMaterialSpec,
+  MeshSkinSpec,
   RendererInitOptions,
   ShadowCasterHandle,
   SkyboxHandle,
@@ -1107,7 +1108,20 @@ export class BabylonAdapter implements RendererAdapter {
     // instances) the rig here — each clone gets its own skeleton and its own
     // animation groups retargeted to it, which is exactly the per-enemy
     // isolation we need. `cloneMaterials=false` shares the one material.
-    const entries = container.instantiateModelsToScene((n) => `${id}_${n}`, false);
+    //
+    // A skin needs the opposite on both counts, so it opts into the expensive
+    // clone path: `cloneMaterials=true` (this clone gets its OWN materials to
+    // repaint) AND `doNotInstantiate` (Babylon would otherwise back static
+    // meshes with `InstancedMesh`, which read `sourceMesh.material` and so
+    // can't hold a per-clone skin at all). Costs a real draw call per mesh
+    // instead of an instanced one — fine for a room of cabinets, which is why
+    // it stays opt-in rather than the default.
+    const skin = spec?.skin;
+    const entries = skin
+      ? container.instantiateModelsToScene((n) => `${id}_${n}`, true, {
+          doNotInstantiate: true,
+        })
+      : container.instantiateModelsToScene((n) => `${id}_${n}`, false);
     this.instantiatedModels.set(id, entries);
 
     const root = entries.rootNodes[0] as TransformNode | undefined;
@@ -1123,6 +1137,9 @@ export class BabylonAdapter implements RendererAdapter {
     // the yaw/pitch facing correction (nose → +Z), and filter to one body when a
     // GLB carries several (freighter.glb holds TrainCar + TrainEngine).
     if (spec?.fit) this.applyModelFit(root, spec.fit);
+    // Repaint this clone's own (just-cloned) materials before it is revealed,
+    // so it never flashes the template's art for a frame.
+    if (skin) this.skinMaterialTree(root, skin);
     // Start parked/hidden — the model System reveals it when the entity is live.
     root.setEnabled(false);
 
@@ -1248,6 +1265,74 @@ export class BabylonAdapter implements RendererAdapter {
     }
     if (spec.environmentIntensity !== undefined) mat.environmentIntensity = spec.environmentIntensity;
     mesh.material = mat;
+  }
+
+  setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
+    const node = this.meshes.get(handle);
+    if (!node || !this.scene) return;
+    this.skinMaterialTree(node as unknown as TransformNode, spec);
+  }
+
+  /**
+   * Shared body of {@link setMeshSkin} — also called straight from
+   * `instantiateModel`, which already holds the clone root before it has a
+   * handle.
+   *
+   * Dedupe by material identity: one material is bound to many meshes, and
+   * re-skinning it once per mesh would rebuild (and leak) the same textures
+   * over and over.
+   */
+  private skinMaterialTree(root: TransformNode, spec: MeshSkinSpec): void {
+    const scene = this.scene;
+    if (!scene) return;
+    const emissiveUrl = spec.emissiveTexture ?? spec.albedoTexture;
+    const seen = new Set<PBRMaterial>();
+    const meshes = [root, ...root.getChildMeshes(false)] as unknown as Array<{
+      material?: unknown;
+    }>;
+    for (const mesh of meshes) {
+      const mat = mesh.material;
+      if (mat instanceof PBRMaterial) seen.add(mat);
+    }
+
+    for (const mat of seen) {
+      // Only atlas-routed materials when the caller named a flag — the packer
+      // tags those in glTF extras so metal/plastic/frame stay untouched.
+      if (spec.extrasFlag) {
+        const extras = (mat.metadata as { gltf?: { extras?: Record<string, unknown> } } | undefined)
+          ?.gltf?.extras;
+        if (!extras?.[spec.extrasFlag]) continue;
+      }
+
+      // Carry the OLD texture's UV transform onto the new one. The atlas
+      // regions are addressed entirely by these offsets/scales (written by the
+      // packer as KHR_texture_transform), so dropping them would make every
+      // surface sample the wrong slot.
+      const swap = (current: unknown, url: string, assign: (t: Texture) => void): void => {
+        if (!(current instanceof Texture)) return;
+        const next = new Texture(url, scene, undefined, false);
+        next.uOffset = current.uOffset;
+        next.vOffset = current.vOffset;
+        next.uScale = current.uScale;
+        next.vScale = current.vScale;
+        next.wrapU = current.wrapU;
+        next.wrapV = current.wrapV;
+        next.coordinatesIndex = current.coordinatesIndex;
+        next.hasAlpha = false;
+        assign(next);
+        if (current !== next) current.dispose();
+      };
+
+      swap(mat.albedoTexture, spec.albedoTexture, (t) => {
+        mat.albedoTexture = t;
+      });
+      // Emissive only where the material already had one — that's what marks a
+      // part as authored-to-glow. Adding one everywhere would make the whole
+      // cabinet self-lit.
+      swap(mat.emissiveTexture, emissiveUrl, (t) => {
+        mat.emissiveTexture = t;
+      });
+    }
   }
 
   /**

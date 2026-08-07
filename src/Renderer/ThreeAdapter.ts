@@ -49,6 +49,7 @@ import type {
   SkyboxSpec,
   EnvironmentTextureOpts,
   PbrMaterialSpec,
+  MeshSkinSpec,
   ThinFieldHandle,
   ThinFieldSpec,
   TextureHandle,
@@ -1413,6 +1414,19 @@ export class ThreeAdapter implements RendererAdapter {
     }
     const root = template.root.clone(true);
     root.name = id;
+    // `Object3D.clone()` copies the hierarchy but shares material objects by
+    // reference, so repainting this clone would repaint every other one. A skin
+    // therefore needs its own copies first.
+    if (spec?.skin) {
+      root.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!mesh.material) return;
+        mesh.material = Array.isArray(mesh.material)
+          ? mesh.material.map((m) => m.clone())
+          : mesh.material.clone();
+      });
+      this.skinMaterialTree(root, spec.skin);
+    }
     if (spec?.fit) {
       // Auto-fit a displayed ship GLB: measure the natural hierarchy (root still
       // at clone-identity), normalize its longest HORIZONTAL extent to fitLength,
@@ -2065,6 +2079,69 @@ export class ThreeAdapter implements RendererAdapter {
   setEnvironmentTexture(_url: string, _opts?: EnvironmentTextureOpts): void {}
   clearEnvironmentTexture(): void {}
   applyPbrMaterial(_handle: MeshHandle, _spec: PbrMaterialSpec): void {}
+
+  setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
+    const obj = this.meshes.get(handle);
+    if (!obj) return;
+    this.skinMaterialTree(obj, spec);
+  }
+
+  /**
+   * Shared body of {@link setMeshSkin}, also called from `instantiateModel`
+   * before the clone is revealed.
+   *
+   * `GLTFLoader` parks glTF material `extras` on `material.userData` and bakes
+   * `KHR_texture_transform` into each texture's offset/repeat/rotation — so the
+   * atlas-region addressing we must preserve lives on the OLD texture object,
+   * and the new one is a `.clone()` of it with only the image swapped.
+   */
+  private skinMaterialTree(root: THREE.Object3D, spec: MeshSkinSpec): void {
+    const T = this.THREE;
+    if (!T) return;
+    const emissiveUrl = spec.emissiveTexture ?? spec.albedoTexture;
+    const loader = new T.TextureLoader();
+    // One material is bound to many meshes; re-skinning per mesh would reload
+    // the same atlas repeatedly.
+    const seen = new Set<THREE.Material>();
+
+    root.traverse((node) => {
+      const mat = (node as THREE.Mesh).material;
+      if (!mat) return;
+      for (const m of Array.isArray(mat) ? mat : [mat]) seen.add(m);
+    });
+
+    for (const mat of seen) {
+      if (spec.extrasFlag && !(mat.userData as Record<string, unknown>)?.[spec.extrasFlag]) continue;
+      const std = mat as THREE.MeshStandardMaterial;
+
+      const swap = (current: THREE.Texture | null, url: string): THREE.Texture | null => {
+        if (!current) return current;
+        // Clone carries offset/repeat/rotation/center/wrap — i.e. the atlas
+        // region — then we point it at the new image and re-upload.
+        const next = current.clone();
+        next.image = loader.load(url, () => {
+          next.needsUpdate = true;
+        }).image;
+        next.colorSpace = current.colorSpace;
+        next.needsUpdate = true;
+        return next;
+      };
+
+      const nextAlbedo = swap(std.map ?? null, spec.albedoTexture);
+      if (nextAlbedo && nextAlbedo !== std.map) {
+        std.map?.dispose();
+        std.map = nextAlbedo;
+      }
+      // Emissive only where one already exists — that's what marks a part as
+      // authored-to-glow.
+      const nextEmissive = swap(std.emissiveMap ?? null, emissiveUrl);
+      if (nextEmissive && nextEmissive !== std.emissiveMap) {
+        std.emissiveMap?.dispose();
+        std.emissiveMap = nextEmissive;
+      }
+      std.needsUpdate = true;
+    }
+  }
 
   createLabel(id: string, spec: LabelSpec): LabelHandle {
     const T = this.requireThree();

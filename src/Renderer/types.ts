@@ -235,6 +235,14 @@ export interface ModelInstantiateSpec {
    * at the right size/heading regardless of how the asset was authored.
    */
   fit?: ModelFitSpec;
+  /**
+   * Re-skin this clone (see {@link MeshSkinSpec}). Because a skin is PER-CLONE,
+   * an adapter honoring this must give the clone its own material copies —
+   * clones normally share the template's materials, and a shared material would
+   * bleed one clone's skin onto every other. Adapters that cannot clone
+   * materials must ignore this rather than repaint the shared template.
+   */
+  skin?: MeshSkinSpec;
 }
 
 export interface SkyboxSpec {
@@ -358,6 +366,41 @@ export interface PbrMaterialSpec {
   roughness?: number;
   albedoColor?: Color;
   environmentIntensity?: number;
+}
+
+/**
+ * A "skin": replacement texture maps swapped onto a mesh's ALREADY-LOADED
+ * materials, for {@link RendererAdapter.setMeshSkin} and
+ * {@link ModelInstantiateSpec.skin}.
+ *
+ * This is the texture-variant technique — one model, many liveries. The asset
+ * is authored so every re-skinnable surface reads from a single ATLAS image,
+ * each surface indexing its own region through a per-material UV transform
+ * (glTF `KHR_texture_transform`). Swapping just the atlas image therefore
+ * re-dresses the whole model at once, and the adapter must PRESERVE each
+ * material's existing UV transform or every region would sample the wrong
+ * slot. (The arcade cabinet works exactly this way: marquee, side art, control
+ * panel, bezel and CRT all index one 2048² sheet.)
+ *
+ * `extrasFlag` is what keeps the swap from repainting the whole model: the
+ * packer tags only atlas-routed materials in their glTF `extras`, so metal,
+ * plastic and frame materials are left alone.
+ */
+export interface MeshSkinSpec {
+  /** Replacement atlas URL for matching materials' albedo (base-color) map. */
+  albedoTexture: string;
+  /**
+   * Replacement for the emissive map. Applied ONLY to matching materials that
+   * already have one — parts authored to glow (marquee, CRT, coin slot) keep
+   * glowing with the new art instead of the old skin bleeding through. Defaults
+   * to `albedoTexture` when omitted, which is the single-atlas case.
+   */
+  emissiveTexture?: string;
+  /**
+   * Re-skin only materials whose glTF `extras` carry this key set to true.
+   * Omit to re-skin every textured material on the mesh.
+   */
+  extrasFlag?: string;
 }
 
 /**
@@ -1089,6 +1132,20 @@ export interface RendererAdapter {
    * adapter boundary so Systems don't import engine material types directly.
    */
   applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void;
+
+  /**
+   * Swap the texture maps on an already-loaded mesh's materials — see
+   * {@link MeshSkinSpec}. Walks the handle's material tree, keeps each
+   * material's existing UV transform (so atlas regions still index correctly),
+   * and touches only materials matching `spec.extrasFlag`.
+   *
+   * No-op for an unknown handle, a mesh with no materials, or an adapter with
+   * no PBR pipeline. Note this mutates whatever material objects the handle
+   * currently references: to skin one clone of a shared template, instantiate
+   * it with {@link ModelInstantiateSpec.skin} instead, which copies the
+   * materials first.
+   */
+  setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void;
 
   /**
    * Skeletal/GLTF animation controls keyed by mesh + clip name. Additive:

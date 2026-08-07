@@ -768,6 +768,45 @@ export function runRendererAdapterContract(
     });
 
     // ---------------------------------------------------------------------
+    // Skins. The real payoff (atlas swap preserving each material's UV
+    // transform) needs a fetched GLB, which headless can't do — so, like the
+    // block above, the contract pins the SURFACE: every adapter accepts the
+    // call and stays safe on meshes that have no skinnable materials, whether
+    // it implements the swap (Babylon/Three) or documents a no-op (Lite).
+    // ---------------------------------------------------------------------
+    describe('skins', () => {
+      it('setMeshSkin is smoke-safe on an unknown handle and on a primitive mesh', () => {
+        const bogus = adapter.createMesh('skin-decoy', { kind: 'box' });
+        expect(() => {
+          adapter.setMeshSkin(bogus, { albedoTexture: '/skins/galaga.webp' });
+          adapter.setMeshSkin(bogus, {
+            albedoTexture: '/skins/frogger.webp',
+            emissiveTexture: '/skins/frogger.webp',
+            extrasFlag: 'cabinetAtlas',
+          });
+        }).not.toThrow();
+        adapter.disposeMesh(bogus);
+        // Still safe once the handle no longer resolves.
+        expect(() =>
+          adapter.setMeshSkin(bogus, { albedoTexture: '/skins/pacman.webp' }),
+        ).not.toThrow();
+      });
+
+      it('an extrasFlag skin leaves an untagged primitive material alone', () => {
+        // A primitive box carries no glTF extras, so a flagged skin must match
+        // nothing — the guard that stops a cabinet skin repainting its chrome.
+        const box = adapter.createMesh('skin-guard', { kind: 'box' }, { diffuse: [1, 0, 0] });
+        expect(() =>
+          adapter.setMeshSkin(box, {
+            albedoTexture: '/skins/tmnt.webp',
+            extrasFlag: 'cabinetAtlas',
+          }),
+        ).not.toThrow();
+        adapter.disposeMesh(box);
+      });
+    });
+
+    // ---------------------------------------------------------------------
     // Thin-instance fields (opt-out for engine adapters that can't fetch a GLB
     // in the headless test env). The Mock adapter runs the full sequence.
     // ---------------------------------------------------------------------

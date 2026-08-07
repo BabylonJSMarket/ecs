@@ -34,6 +34,7 @@ import type {
   SkyboxSpec,
   EnvironmentTextureOpts,
   PbrMaterialSpec,
+  MeshSkinSpec,
   ThinFieldHandle,
   ThinFieldSpec,
   TextureHandle,
@@ -627,6 +628,9 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void {
     this.record('applyPbrMaterial', handle, spec);
+  }
+  setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
+    this.record('setMeshSkin', handle, spec);
   }
 
   /**

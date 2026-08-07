@@ -47,6 +47,7 @@ import type {
   MeshLoadSpec,
   ModelInstantiateSpec,
   PbrMaterialSpec,
+  MeshSkinSpec,
   PhysicsBodyOpts,
   PhysicsBodySnapshot,
   PickOptions,
@@ -1233,6 +1234,15 @@ export class BabylonLiteAdapter implements RendererAdapter {
     });
     mesh.material = pbr;
   }
+
+  /**
+   * No-op. A skin is inherently PER-CLONE, and this adapter has no container
+   * clone API — `instantiateModel` above reuses the template's own root as the
+   * instance. Repainting it here would therefore repaint the shared template
+   * (and so every "clone" of it) rather than one model, which the contract
+   * explicitly forbids. Revisit when Babylon Lite ships a clone helper.
+   */
+  setMeshSkin(_handle: MeshHandle, _spec: MeshSkinSpec): void {}
 
   // ─── GLB / animation ───
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
