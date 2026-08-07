@@ -23,6 +23,7 @@ import type {
   CardMeshSpec,
   DirectionalLightSpec,
   HemisphericLightSpec,
+  PointLightSpec,
   LabelSpec,
   MaterialSpec,
   PerspectiveCameraSpec,
@@ -182,6 +183,22 @@ export function runRendererAdapterContract(
         const out: Vec3 = [0, 0, 0];
         const returned = adapter.getMeshWorldPosition(h, out);
         expect(returned).toBe(out);
+      });
+
+      it('a plane honors width AND height independently', () => {
+        // A plane is a RECTANGLE. Babylon's builder takes a `size` shortcut that
+        // squares it, which silently turned every non-square plane (a neon
+        // strip, a banner, a sign) into a slab. Asserting via the bounding box
+        // keeps all adapters honest without reaching into engine types.
+        const h = adapter.createMesh('billboard', { kind: 'plane', width: 4, height: 1 });
+        adapter.setMeshPosition(h, 0, 0, 0);
+        const box = adapter.getMeshBoundingBoxExtents(h);
+        // Adapters that don't compute bounds headlessly return null — the
+        // no-throw construction above is still the shared guarantee.
+        if (box) {
+          expect(box.max[0] - box.min[0]).toBeCloseTo(4, 3);
+          expect(box.max[1] - box.min[1]).toBeCloseTo(1, 3);
+        }
       });
 
       it('setMeshRotation / setMeshColor / setMeshVisible are smoke-safe', () => {
@@ -434,6 +451,48 @@ export function runRendererAdapterContract(
         const a = adapter.createDirectionalLight('sun', dirSpec);
         const b = adapter.createHemisphericLight('ambient', hemSpec);
         expect(a).not.toBe(b);
+      });
+
+      const pointSpec: PointLightSpec = {
+        position: [1, 2, 3],
+        intensity: 2,
+        diffuse: [1, 0.2, 0.6],
+        specular: [1, 1, 1],
+        range: 8,
+      };
+
+      it('createPointLight returns a handle; intensity/dispose are smoke-safe', () => {
+        const h = adapter.createPointLight('neon', pointSpec);
+        expect(h).toBeDefined();
+        expect(() => adapter.updateLightIntensity(h, 0.25)).not.toThrow();
+        expect(() => adapter.disposeLight(h)).not.toThrow();
+      });
+
+      it('point lights are distinct per id and distinct from other light kinds', () => {
+        const a = adapter.createPointLight('neon-a', pointSpec);
+        const b = adapter.createPointLight('neon-b', pointSpec);
+        const dir = adapter.createDirectionalLight('sun', dirSpec);
+        expect(a).not.toBe(b);
+        expect(a).not.toBe(dir);
+      });
+
+      it('setLightPosition moves a point light and no-ops on a positionless one', () => {
+        const point = adapter.createPointLight('neon-move', pointSpec);
+        expect(() => adapter.setLightPosition(point, -4, 1.5, 2)).not.toThrow();
+        // A hemispheric light has no meaningful position — the call must be
+        // accepted and ignored rather than fabricate one or throw.
+        const hem = adapter.createHemisphericLight('ambient', hemSpec);
+        expect(() => adapter.setLightPosition(hem, 0, 0, 0)).not.toThrow();
+      });
+
+      it('an omitted range is accepted (engine-default falloff)', () => {
+        const h = adapter.createPointLight('neon-unbounded', {
+          position: [0, 2, 0],
+          intensity: 1,
+          diffuse: [0.2, 0.9, 1],
+        });
+        expect(h).toBeDefined();
+        expect(() => adapter.disposeLight(h)).not.toThrow();
       });
     });
 

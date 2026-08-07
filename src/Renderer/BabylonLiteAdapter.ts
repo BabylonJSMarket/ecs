@@ -47,6 +47,7 @@ import type {
   MeshLoadSpec,
   ModelInstantiateSpec,
   PbrMaterialSpec,
+  PointLightSpec,
   MeshSkinSpec,
   PhysicsBodyOpts,
   PhysicsBodySnapshot,
@@ -167,7 +168,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private meshes = new Map<MeshHandle, LiteMesh>();
   /** Parallel meshId → mesh lookup used by physics/animation methods. */
   private meshesByMeshId = new Map<string, LiteMesh>();
-  private lights = new Map<LightHandle, BLNS.DirectionalLight | BLNS.HemisphericLight>();
+  private lights = new Map<LightHandle, BLNS.DirectionalLight | BLNS.HemisphericLight | BLNS.PointLight>();
   private cameras = new Map<CameraHandle, { camera: BLNS.ArcRotateCamera; detach?: () => void }>();
   /**
    * Free 6-DOF perspective cameras (chase / flight), kept separate from the
@@ -850,6 +851,27 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const handle = this.makeHandle<LightHandle>('hemLight', id);
     this.lights.set(handle, light);
     return handle;
+  }
+  createPointLight(id: string, spec: PointLightSpec): LightHandle {
+    const scene = this.requireScene();
+    // Z negated like every other position that crosses this seam — Lite is
+    // left-handed internally while the ECS frame is right-handed.
+    const light = BL.createPointLight(
+      [spec.position[0], spec.position[1], -spec.position[2]],
+      spec.intensity,
+    );
+    light.diffuse = [spec.diffuse[0], spec.diffuse[1], spec.diffuse[2]];
+    if (spec.specular) light.specular = [spec.specular[0], spec.specular[1], spec.specular[2]];
+    if (spec.range) light.range = spec.range;
+    BL.addToScene(scene, light);
+
+    const handle = this.makeHandle<LightHandle>('pointLight', id);
+    this.lights.set(handle, light);
+    return handle;
+  }
+  setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
+    const light = this.lights.get(h) as { position?: [number, number, number] } | undefined;
+    if (light?.position) light.position = [x, y, -z];
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     const light = this.lights.get(h);

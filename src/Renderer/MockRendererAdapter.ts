@@ -34,6 +34,7 @@ import type {
   SkyboxSpec,
   EnvironmentTextureOpts,
   PbrMaterialSpec,
+  PointLightSpec,
   MeshSkinSpec,
   ThinFieldHandle,
   ThinFieldSpec,
@@ -107,6 +108,8 @@ export class MockRendererAdapter implements RendererAdapter {
   /** Per-camera angles / target stub; tests can preload values. */
   cameraAngles = new Map<CameraHandle, { alpha: number; beta: number; radius: number }>();
   cameraTargets = new Map<CameraHandle, Vec3>();
+  /** Positions of positioned lights, so tests can assert where a lamp landed. */
+  lightPositions = new Map<LightHandle, Vec3>();
 
   private record(method: string, ...args: unknown[]): void {
     this.calls.push({ method, args });
@@ -324,6 +327,20 @@ export class MockRendererAdapter implements RendererAdapter {
     const h = makeHandle<LightHandle>('hemLight', id);
     this.record('createHemisphericLight', id, spec);
     return h;
+  }
+  createPointLight(id: string, spec: PointLightSpec): LightHandle {
+    const h = makeHandle<LightHandle>('pointLight', id);
+    this.lightPositions.set(h, [...spec.position] as Vec3);
+    this.record('createPointLight', id, spec);
+    return h;
+  }
+  setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
+    this.lightPositions.set(h, [x, y, z]);
+    this.record('setLightPosition', h, x, y, z);
+  }
+  /** Last position recorded for a light, so tests can assert placement. */
+  getLightPosition(h: LightHandle): Vec3 | undefined {
+    return this.lightPositions.get(h);
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     this.record('updateLightIntensity', h, intensity);

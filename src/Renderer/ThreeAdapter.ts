@@ -49,6 +49,7 @@ import type {
   SkyboxSpec,
   EnvironmentTextureOpts,
   PbrMaterialSpec,
+  PointLightSpec,
   MeshSkinSpec,
   ThinFieldHandle,
   ThinFieldSpec,
@@ -1602,6 +1603,25 @@ export class ThreeAdapter implements RendererAdapter {
     const handle = this.makeHandle<LightHandle>('hemLight', id);
     this.lights.set(handle, light);
     return handle;
+  }
+  createPointLight(id: string, spec: PointLightSpec): LightHandle {
+    const T = this.requireThree();
+    // Three's `distance` is Babylon's `range`; 0 means "never cut off" in both.
+    const light = new T.PointLight(
+      new T.Color().setRGB(spec.diffuse[0], spec.diffuse[1], spec.diffuse[2], T.SRGBColorSpace),
+      spec.intensity,
+      spec.range ?? 0,
+    );
+    light.name = `PointLight_${id}`;
+    light.position.set(spec.position[0], spec.position[1], spec.position[2]);
+    this.scene!.add(light);
+
+    const handle = this.makeHandle<LightHandle>('pointLight', id);
+    this.lights.set(handle, light);
+    return handle;
+  }
+  setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
+    this.lights.get(h)?.position.set(x, y, z);
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     const light = this.lights.get(h);

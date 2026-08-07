@@ -756,6 +756,32 @@ describe('MockRendererAdapter', () => {
       expect(renderer.calls[0]).toMatchObject({ method: 'clearEnvironmentTexture', args: [] });
     });
 
+    it('point lights record their spec and round-trip their position', () => {
+      const h = renderer.createPointLight('neon', {
+        position: [1, 2, 3],
+        intensity: 4,
+        diffuse: [1, 0.2, 0.6],
+        range: 7,
+      });
+      expect(renderer.getLightPosition(h)).toEqual([1, 2, 3]);
+      renderer.setLightPosition(h, -5, 1.5, 0);
+      expect(renderer.getLightPosition(h)).toEqual([-5, 1.5, 0]);
+      const methods = renderer.calls.map((c) => c.method);
+      expect(methods).toContain('createPointLight');
+      expect(methods).toContain('setLightPosition');
+    });
+
+    it('getLightPosition is undefined for a light it never placed', () => {
+      const h = renderer.createHemisphericLight('ambient', {
+        direction: [0, 1, 0],
+        intensity: 1,
+        diffuse: [1, 1, 1],
+        groundColor: [0, 0, 0],
+        specular: [0, 0, 0],
+      });
+      expect(renderer.getLightPosition(h)).toBeUndefined();
+    });
+
     it('applyPbrMaterial records the call with handle and spec', () => {
       const h = renderer.createMesh('sphere', { kind: 'sphere', diameter: 1 });
       const spec = { albedoColor: [1, 0, 0], metallic: 0.8, roughness: 0.2 };

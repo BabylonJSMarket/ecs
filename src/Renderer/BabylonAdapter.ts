@@ -22,6 +22,7 @@ import {
   MeshBuilder,
   StandardMaterial,
   PBRMaterial,
+  PointLight,
   ShaderMaterial,
   HemisphericLight as BabylonHemisphericLight,
   DirectionalLight as BabylonDirectionalLight,
@@ -85,6 +86,7 @@ import type {
   PrimitiveSpec,
   RendererAdapter,
   PbrMaterialSpec,
+  PointLightSpec,
   MeshSkinSpec,
   RendererInitOptions,
   ShadowCasterHandle,
@@ -183,7 +185,7 @@ export class BabylonAdapter implements RendererAdapter {
   private havokInitPromise: Promise<void> | null = null;
   /** Pending create requests queued while Havok is still initializing. */
   private pendingPhysicsCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
-  private lights = new Map<LightHandle, BabylonHemisphericLight | BabylonDirectionalLight>();
+  private lights = new Map<LightHandle, BabylonHemisphericLight | BabylonDirectionalLight | PointLight>();
   private cameras = new Map<CameraHandle, ArcRotateCamera>();
   /**
    * Free 6-DOF perspective cameras (the chase / flight camera), kept in their
@@ -394,8 +396,14 @@ export class BabylonAdapter implements RendererAdapter {
         if (prim.pivotAtBottom) this.applyPivotAtBottom(mesh, (prim.height ?? 1) / 2);
         break;
       case 'plane':
+        // width AND height, not `size` — a plane is a rectangle. Passing only
+        // `size` silently squared every plane, so a 1.8 × 0.34 neon strip came
+        // out as a 1.8 m slab. Three and Lite already read both; this keeps all
+        // three agreeing. Height falls back to width so a lone `width` still
+        // means "square", as before.
         mesh = MeshBuilder.CreatePlane(`${id}_plane`, {
-          size: prim.width ?? 10,
+          width: prim.width ?? 10,
+          height: prim.height ?? prim.width ?? 10,
           sideOrientation: Mesh.DOUBLESIDE,
         }, scene);
         break;
@@ -466,6 +474,9 @@ export class BabylonAdapter implements RendererAdapter {
         if (mat.specular) material.specularColor = Color3.FromArray(mat.specular);
         if (mat.emissive) material.emissiveColor = Color3.FromArray(mat.emissive);
         if (mat.alpha !== undefined) material.alpha = mat.alpha;
+        if (mat.maxSimultaneousLights !== undefined) {
+          material.maxSimultaneousLights = mat.maxSimultaneousLights;
+        }
         mesh.material = material;
       }
     }
@@ -1387,6 +1398,9 @@ export class BabylonAdapter implements RendererAdapter {
     else pbr.metallic = 0;
     if (mat.roughness !== undefined) pbr.roughness = mat.roughness;
     if (mat.alpha !== undefined) pbr.alpha = mat.alpha;
+    if (mat.maxSimultaneousLights !== undefined) {
+      pbr.maxSimultaneousLights = mat.maxSimultaneousLights;
+    }
     return pbr;
   }
 
@@ -1464,6 +1478,28 @@ export class BabylonAdapter implements RendererAdapter {
     const handle = this.makeHandle<LightHandle>('hemLight', id);
     this.lights.set(handle, light);
     return handle;
+  }
+  createPointLight(id: string, spec: PointLightSpec): LightHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createPointLight: call init() first');
+    const light = new PointLight(
+      `PointLight_${id}`,
+      new Vector3(spec.position[0], spec.position[1], spec.position[2]),
+      this.scene,
+    );
+    light.intensity = spec.intensity;
+    light.diffuse = Color3.FromArray(spec.diffuse);
+    if (spec.specular) light.specular = Color3.FromArray(spec.specular);
+    if (spec.range) light.range = spec.range;
+
+    const handle = this.makeHandle<LightHandle>('pointLight', id);
+    this.lights.set(handle, light);
+    return handle;
+  }
+  setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
+    const light = this.lights.get(h) as { position?: Vector3 } | undefined;
+    // Hemispheric/directional lights have no meaningful position — skip rather
+    // than fabricate one.
+    if (light?.position) light.position.set(x, y, z);
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     const light = this.lights.get(h);

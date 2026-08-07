@@ -103,6 +103,20 @@ export interface MaterialSpec {
   /** Texture tiling repeated across the surface (UV scale). Applied to every map. */
   uScale?: number;
   vScale?: number;
+  /**
+   * How many lights may light this surface at once.
+   *
+   * Real-time renderers compile a shader per light count and cap it (Babylon's
+   * default is 4) — past the cap, extra lights are silently DROPPED for that
+   * material, which reads as "my new lamp does nothing" rather than as an
+   * error. A room lit by several small lights (neon signs, lamps, fires) plus a
+   * key and a fill needs this raised on the big surfaces they land on.
+   *
+   * Raise it only where it matters: each extra light costs shader work on every
+   * pixel of that surface. Adapters that recompile per light count (Three) can
+   * ignore it.
+   */
+  maxSimultaneousLights?: number;
 }
 
 export interface DirectionalLightSpec {
@@ -125,6 +139,29 @@ export interface HemisphericLightSpec {
   diffuse: Color;
   groundColor: Color;
   specular: Color;
+}
+
+/**
+ * An omnidirectional light at a POINT, falling off with distance — the local
+ * pool of light a lamp, a fire or a neon sign casts on nearby surfaces. Unlike
+ * a directional light (parallel rays, no position, lights the whole scene) this
+ * one has a place in the room and a reach.
+ *
+ * Practical note: real-time renderers cap how many lights may affect one
+ * material (Babylon's default is 4). A room with many of these needs that cap
+ * raised on the materials they touch, or distant lamps will silently drop out.
+ */
+export interface PointLightSpec {
+  position: Vec3;
+  intensity: number;
+  diffuse: Color;
+  specular?: Color;
+  /**
+   * Distance at which the light stops contributing. 0 / omitted = engine
+   * default (unbounded falloff). Bounding it is what keeps a roomful of small
+   * lamps affordable.
+   */
+  range?: number;
 }
 
 export interface ArcCameraSpec {
@@ -965,6 +1002,10 @@ export interface RendererAdapter {
 
   createDirectionalLight(id: string, spec: DirectionalLightSpec): LightHandle;
   createHemisphericLight(id: string, spec: HemisphericLightSpec): LightHandle;
+  /** A positioned, distance-attenuated light — see {@link PointLightSpec}. */
+  createPointLight(id: string, spec: PointLightSpec): LightHandle;
+  /** Move an existing point light. No-op for lights that have no position. */
+  setLightPosition(h: LightHandle, x: number, y: number, z: number): void;
   updateLightIntensity(h: LightHandle, intensity: number): void;
   disposeLight(h: LightHandle): void;
 
