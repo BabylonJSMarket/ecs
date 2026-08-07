@@ -743,6 +743,25 @@ export function runRendererAdapterContract(
     // ---------------------------------------------------------------------
     if (!options.skipLabels) {
       describe('labels', () => {
+        it('a world-fixed label is accepted and still drives the label setters', () => {
+          // Signs on walls don't turn to face you. Adapters that can only
+          // billboard must still accept the flag rather than throw — the
+          // orientation is a quality difference, not an API difference.
+          const h = adapter.createLabel('wall-sign', {
+            text: "BJ's Arcade",
+            billboard: false,
+            rotation: [0, Math.PI / 2, 0],
+            color: [1, 0.15, 0.55],
+          });
+          expect(h).toBeDefined();
+          expect(() => {
+            adapter.setLabelPosition(h, 1, 2, 3);
+            adapter.setLabelText(h, 'OPEN');
+            adapter.setLabelVisible(h, false);
+            adapter.disposeLabel(h);
+          }).not.toThrow();
+        });
+
         const spec: LabelSpec = { text: 'hi', color: [1, 1, 1], fontSize: 24, scale: 1 };
 
         it('createLabel returns a handle and setters / dispose are smoke-safe', () => {

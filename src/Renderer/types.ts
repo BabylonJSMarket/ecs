@@ -325,6 +325,21 @@ export interface LabelSpec {
    * is also set. Omit → no border.
    */
   borderColor?: string;
+  /**
+   * Whether the quad turns to face the camera. Default TRUE — a floating
+   * nameplate or damage number should always be readable.
+   *
+   * Pass `false` for text that belongs to the WORLD rather than to the viewer:
+   * a sign screwed to a wall, lettering painted on the floor. Such a label
+   * needs `rotation` to place it on its surface, and it is legitimately edge-on
+   * (invisible) when viewed from the side — which is the point.
+   */
+  billboard?: boolean;
+  /**
+   * Euler rotation (radians) for a non-billboard label. Ignored while
+   * `billboard` is true, since the camera owns the orientation then.
+   */
+  rotation?: Vec3;
 }
 
 export interface EnvironmentTextureOpts {

@@ -1962,11 +1962,23 @@ export class BabylonAdapter implements RendererAdapter {
       { width: baseHeight * aspect, height: baseHeight },
       this.scene,
     );
-    plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
+    if (spec.billboard === false) {
+      // A world-fixed label (a sign on a wall). Keep it in the DEFAULT
+      // rendering group: group 1 draws after everything else, which for a
+      // billboard is what stops nameplates being occluded, but for a sign
+      // screwed to a wall would let it show THROUGH the geometry in front of
+      // it — including from outside the room.
+      plane.billboardMode = Mesh.BILLBOARDMODE_NONE;
+      if (spec.rotation) {
+        plane.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+      }
+    } else {
+      plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
+      // Labels should not occlude each other or z-fight with world geometry;
+      // draw in a later rendering group and skip the depth write.
+      plane.renderingGroupId = 1;
+    }
     plane.isPickable = false;
-    // Labels should not occlude each other or z-fight with world geometry; draw
-    // in a later rendering group and skip the depth write.
-    plane.renderingGroupId = 1;
 
     const material = new StandardMaterial(`Label_${id}_mat`, this.scene);
     material.diffuseTexture = texture;

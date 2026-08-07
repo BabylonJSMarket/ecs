@@ -184,8 +184,9 @@ export class ThreeAdapter implements RendererAdapter {
   private _perspLookFlip?: THREE.Quaternion;
   private shadowCasters = new Map<ShadowCasterHandle, { light: LightHandle; mesh: MeshHandle }>();
   private labels = new Map<LabelHandle, {
-    sprite: THREE.Sprite;
-    material: THREE.SpriteMaterial;
+    /** Sprite (billboard) or Mesh (world-fixed sign) — both are Object3D. */
+    sprite: THREE.Object3D;
+    material: THREE.SpriteMaterial | THREE.MeshBasicMaterial;
     texture: THREE.CanvasTexture;
     canvas: HTMLCanvasElement;
     baseScale: number;
@@ -2188,19 +2189,39 @@ export class ThreeAdapter implements RendererAdapter {
       depthWrite: false,
     });
 
-    const sprite = new T.Sprite(material);
-    sprite.name = `Label_${id}`;
     const aspect = texW / texH;
     const scale = spec.scale ?? 1;
-    sprite.scale.set(scale * aspect, scale, 1);
-    // Draw sprites after meshes so the label doesn't get occluded in-plane.
-    sprite.renderOrder = 999;
+    // A Sprite ALWAYS faces the camera — right for a nameplate, wrong for a
+    // sign fixed to a wall. The world-fixed path builds a real quad instead,
+    // and keeps the default render order so geometry in front of it occludes
+    // it properly.
+    let sprite: THREE.Object3D;
+    let mat: THREE.SpriteMaterial | THREE.MeshBasicMaterial = material;
+    if (spec.billboard === false) {
+      mat = new T.MeshBasicMaterial({
+        map: texture,
+        color: material.color,
+        transparent: true,
+        depthWrite: false,
+        side: T.DoubleSide,
+      });
+      sprite = new T.Mesh(new T.PlaneGeometry(scale * aspect, scale), mat);
+      if (spec.rotation) {
+        sprite.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+      }
+    } else {
+      sprite = new T.Sprite(material);
+      sprite.scale.set(scale * aspect, scale, 1);
+      // Draw sprites after meshes so the label doesn't get occluded in-plane.
+      sprite.renderOrder = 999;
+    }
+    sprite.name = `Label_${id}`;
     this.scene!.add(sprite);
 
     const handle = this.makeHandle<LabelHandle>('label', id);
     this.labels.set(handle, {
       sprite,
-      material,
+      material: mat,
       texture,
       canvas,
       baseScale: scale,
