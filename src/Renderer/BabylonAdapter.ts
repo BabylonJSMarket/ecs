@@ -1310,7 +1310,25 @@ export class BabylonAdapter implements RendererAdapter {
       // surface sample the wrong slot.
       const swap = (current: unknown, url: string, assign: (t: Texture) => void): void => {
         if (!(current instanceof Texture)) return;
-        const next = new Texture(url, scene, undefined, false);
+        // A missing skin must degrade to the model's OWN art, not to the engine's
+        // "texture not found" checkerboard — the skin pack is a separate download,
+        // so "not fetched yet" is an ordinary state, not a bug. Hence: keep the
+        // original alive until the replacement actually loads, then dispose it;
+        // on failure put the original back and drop the broken texture.
+        const next = new Texture(
+          url,
+          scene,
+          undefined,
+          false,
+          undefined,
+          () => {
+            if (current !== next) current.dispose();
+          },
+          () => {
+            assign(current);
+            next.dispose();
+          },
+        );
         next.uOffset = current.uOffset;
         next.vOffset = current.vOffset;
         next.uScale = current.uScale;
@@ -1320,7 +1338,6 @@ export class BabylonAdapter implements RendererAdapter {
         next.coordinatesIndex = current.coordinatesIndex;
         next.hasAlpha = false;
         assign(next);
-        if (current !== next) current.dispose();
       };
 
       swap(mat.albedoTexture, spec.albedoTexture, (t) => {
