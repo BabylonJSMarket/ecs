@@ -50,7 +50,7 @@ class CameraTarget extends Component {
 These two hooks are the only ones a Component gets. `onUpdate`, `onInitialize`, `onShutdown`, `onEntityAdded` and `onEntityRemoved` belong to System, and TypeScript will happily let you declare any of them here — the method just never runs. The base class watches for that. The first time you construct a Component carrying a System hook it warns on the console and names the offending method:
 
 ```text
-[ECS] SpinComponent extends Component but defines onUpdate() — System hook.
+[ECS] SpinComponent extends Component but defines the System hook onUpdate().
 Nothing will call it on a Component. Move that logic to the matching System,
 or use onAttachOverride()/onDetachOverride() if it is per-entity setup.
 ```

@@ -91,11 +91,14 @@ function warnOnForeignHooks(
   const offenders = foreignHooks.filter(hook => declared.has(hook));
   if (offenders.length === 0) return;
 
+  // ASCII only, and one flat line: this lands in a terminal as often as a
+  // browser console.
   const list = offenders.map(hook => `${hook}()`).join(', ');
+  const one = offenders.length === 1;
   console.warn(
     `[ECS] ${(ctor as { name?: string }).name ?? kind} extends ${kind} but defines ` +
-      `${list} — ${otherKind} ${offenders.length === 1 ? 'hook' : 'hooks'}. ` +
-      `Nothing will call ${offenders.length === 1 ? 'it' : 'them'} on a ${kind}. ${advice}`,
+      `the ${otherKind} ${one ? 'hook' : 'hooks'} ${list}. ` +
+      `Nothing will call ${one ? 'it' : 'them'} on a ${kind}. ${advice}`,
   );
 }
 
