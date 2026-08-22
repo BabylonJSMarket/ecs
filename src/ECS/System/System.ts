@@ -3,6 +3,7 @@ import { Entity } from '../Entity/Entity';
 import { EventBus } from '../EventBus/EventBus';
 import type { EventCallback, UnsubscribeFn } from '../EventBus/EventBus';
 import type { World } from '../World/World';
+import { guardSystemHooks } from '../hookGuard';
 
 /**
  * Query interface for filtering which entities a system processes.
@@ -126,6 +127,9 @@ export abstract class System {
     // Optional: World.addSystem injects the bus (via setWorld) before the
     // system initializes. Passing one explicitly still works.
     if (eventBus) this.eventBus = eventBus;
+    // A Component hook written on a System is never called by anything. Say so
+    // once, the first time the class is constructed.
+    guardSystemHooks(this, System.prototype);
   }
 
   /**

@@ -7,6 +7,7 @@ export * from './ECS/World/World';
 export * from './ECS/SceneLoader/SceneLoader';
 export * from './ECS/SaveLoad/SaveLoad';
 export * from './ECS/Race/RaceDetector';
+export * from './ECS/hookGuard';
 
 export type {
   MeshHandle,

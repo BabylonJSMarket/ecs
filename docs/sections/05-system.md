@@ -70,6 +70,8 @@ class HealthSystem extends System {
 }
 ```
 
+The mirror of the Component warning applies here. `onAttachOverride` and `onDetachOverride` are Component hooks, and nothing calls them on a System — write one and the base class says so on the console the first time the System is constructed. A System reacts to entities in `onEntityAdded`/`onEntityRemoved` and sets itself up in `onInitialize`.
+
 ## Listening to events
 
 Systems coordinate via the EventBus rather than holding references to each other. Subscribe in `onInitialize` with `this.listen()` — the subscription's lifetime is tied to the System, so it's unsubscribed automatically when the System is removed:

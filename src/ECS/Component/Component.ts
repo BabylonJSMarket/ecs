@@ -1,5 +1,6 @@
 import type { EntityId } from '../types';
 import { EventBus } from '../EventBus/EventBus';
+import { guardComponentHooks } from '../hookGuard';
 
 /**
  * Component - The base class for all ECS components.
@@ -46,6 +47,13 @@ export abstract class Component {
    * Internal enabled state. Use the `enabled` getter/setter to access.
    */
   private _enabled: boolean = true;
+
+  constructor() {
+    // A System hook written on a Component is never called by anything. Say so
+    // once, the first time the class is constructed, instead of letting the
+    // feature quietly do nothing.
+    guardComponentHooks(this, Component.prototype);
+  }
 
   /**
    * Whether this component is enabled.

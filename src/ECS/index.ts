@@ -7,3 +7,4 @@ export * from './World/World';
 export * from './SceneLoader/SceneLoader';
 export * from './SaveLoad/SaveLoad';
 export * from './Race/RaceDetector';
+export * from './hookGuard';

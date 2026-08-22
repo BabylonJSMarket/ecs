@@ -47,6 +47,16 @@ class CameraTarget extends Component {
 
 `onAttachOverride` fires after the Component is added to an Entity and the Entity is in a World — `this.eventBus` is safe to use. `onDetachOverride` fires when the Component is removed or the Entity is destroyed.
 
+These two hooks are the only ones a Component gets. `onUpdate`, `onInitialize`, `onShutdown`, `onEntityAdded` and `onEntityRemoved` belong to System, and TypeScript will happily let you declare any of them here — the method just never runs. The base class watches for that. The first time you construct a Component carrying a System hook it warns on the console and names the offending method:
+
+```text
+[ECS] SpinComponent extends Component but defines onUpdate() — System hook.
+Nothing will call it on a Component. Move that logic to the matching System,
+or use onAttachOverride()/onDetachOverride() if it is per-entity setup.
+```
+
+It warns once per class, not once per instance, so a pool that spawns a thousand entities still prints one line. `setHookGuardEnabled(false)` turns the check off.
+
 ## Naming convention
 
 By convention, every Component in this ecosystem follows the same shape:
