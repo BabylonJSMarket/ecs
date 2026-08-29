@@ -829,6 +829,39 @@ export function runRendererAdapterContract(
     });
 
     // ---------------------------------------------------------------------
+    // Skeleton introspection (degrade contract — real bones need a loaded GLB,
+    // which the headless env can't fetch; the pose semantics are covered by
+    // each engine's browser path and the Mock's own seeded-rig unit tests)
+    // ---------------------------------------------------------------------
+    describe('skeleton', () => {
+      it('listBones returns [] for an unknown or boneless mesh id', () => {
+        expect(adapter.listBones('ghost')).toEqual([]);
+        adapter.createMesh('prop', { kind: 'box' });
+        expect(adapter.listBones('prop')).toEqual([]);
+      });
+
+      it('getBoneWorldPose returns false and LEAVES the outs untouched on a miss', () => {
+        // Systems poll this every frame while a host model is still loading —
+        // a miss that zeroed the outs would flicker an attachment to the origin.
+        const outPos: Vec3 = [7, 8, 9];
+        const outQ: Quaternion = { x: 0.5, y: 0.5, z: 0.5, w: 0.5 };
+        expect(adapter.getBoneWorldPose('ghost', 'LeftHand', outPos, outQ)).toBe(false);
+        expect(outPos).toEqual([7, 8, 9]);
+        expect(outQ).toEqual({ x: 0.5, y: 0.5, z: 0.5, w: 0.5 });
+      });
+
+      it('setMeshOrientation is smoke-safe on live and unknown handles', () => {
+        const h = adapter.createMesh('oriented', { kind: 'box' });
+        const q: Quaternion = { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 };
+        expect(() => {
+          adapter.setMeshOrientation(h, q);
+          adapter.disposeMesh(h);
+          adapter.setMeshOrientation(h, q); // disposed handle must no-op
+        }).not.toThrow();
+      });
+    });
+
+    // ---------------------------------------------------------------------
     // Instanced models (smoke only — instantiating needs a real loaded asset,
     // which the headless test environment can't fetch). We only assert the
     // park/dispose surface is safe on ids/handles the adapter doesn't know.

@@ -465,6 +465,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const mesh = this.meshes.get(h);
     if (mesh) this.applyEulerQuat(mesh, x, y, z);
   }
+  setMeshOrientation(h: MeshHandle, orientation: Quaternion): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    // RH→LH conjugation by diag(1,1,−1): negate X and Y, keep Z and W — same
+    // reflection applyEulerQuat bakes in, applied to the caller's quaternion.
+    mesh.rotationQuaternion.set(-orientation.x, -orientation.y, orientation.z, orientation.w);
+  }
 
   /**
    * Set a mesh's orientation from an RH Euler triple via quaternion. We build the
@@ -1399,6 +1406,20 @@ export class BabylonLiteAdapter implements RendererAdapter {
   setAnimationSpeed(meshId: string, clipName: string, speed: number): void {
     const g = this.animationGroups.get(`${meshId}/${clipName}`);
     if (g) g.speedRatio = speed;
+  }
+
+  // Lite's glTF loader carries no skeletons, so every mesh honestly reports
+  // "no bones" — the same answer the full adapters give for an unrigged prop.
+  listBones(_meshId: string): string[] {
+    return [];
+  }
+  getBoneWorldPose(
+    _meshId: string,
+    _boneName: string,
+    _outPosition: Vec3,
+    _outOrientation: Quaternion,
+  ): boolean {
+    return false;
   }
   playAnimationOnce(meshId: string, clipName: string): number {
     const g = this.animationGroups.get(`${meshId}/${clipName}`);

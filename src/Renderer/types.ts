@@ -870,6 +870,16 @@ export interface RendererAdapter {
   setMeshPosition(h: MeshHandle, x: number, y: number, z: number): void;
   setMeshRotation(h: MeshHandle, x: number, y: number, z: number): void;
   /**
+   * Set the mesh's world orientation from a unit QUATERNION — the mesh twin of
+   * {@link setCameraPose}. Quaternion, not Euler, on purpose: the two engines
+   * disagree on Euler composition order (Babylon `mesh.rotation` is YXZ, Three's
+   * default is XYZ), so any system composing rotations — forward kinematics,
+   * bone-following props, 6-DOF debris — must hand the adapter a quaternion or
+   * render differently per engine. Single-axis callers can keep using
+   * `setMeshRotation`; the orders agree there.
+   */
+  setMeshOrientation(h: MeshHandle, orientation: Quaternion): void;
+  /**
    * Visual scale multiplier on the mesh. Affects rendering only — physics
    * shapes / bounding-box extents don't follow. Used by HealthBar to
    * shrink the fill bar, PinballLayout to fit walls/floor to live table
@@ -1224,6 +1234,35 @@ export interface RendererAdapter {
   setAnimationWeight(meshId: string, clipName: string, weight: number): void;
   /** Playback rate multiplier for the named clip. 1 = normal. */
   setAnimationSpeed(meshId: string, clipName: string, speed: number): void;
+
+  /**
+   * Skeleton introspection for a mesh loaded under `meshId` (via `loadMesh`).
+   * The generic "attach something to a character" primitive: a system reads a
+   * bone's live world pose each frame and pins its own mesh there — a weapon in
+   * a palm, a hat on a head, a snap-on articulated hand on a wrist — without
+   * ever seeing an engine bone type.
+   *
+   * `listBones` returns the skeleton's bone names in hierarchy order, `[]` when
+   * the mesh is unknown or carries no skeleton (a prop GLB, a primitive, an
+   * adapter without skeletal support).
+   */
+  listBones(meshId: string): string[];
+  /**
+   * Read the CURRENT world-space pose of one bone: position into `outPosition`,
+   * unit orientation quaternion into `outOrientation` (out-params, same shape
+   * as {@link getCameraPose}). "World-space" means the same space
+   * `setMeshPosition`/{@link setMeshOrientation} write, with the mesh's own
+   * transform and any playing animation folded in — so a mesh given this pose
+   * verbatim sits ON the bone. Returns `false` — leaving the outs untouched —
+   * when the mesh or bone is unknown, so callers can degrade instead of
+   * flickering to the origin.
+   */
+  getBoneWorldPose(
+    meshId: string,
+    boneName: string,
+    outPosition: Vec3,
+    outOrientation: Quaternion,
+  ): boolean;
 
   /**
    * Instanced model loading for pools of animated characters that share one

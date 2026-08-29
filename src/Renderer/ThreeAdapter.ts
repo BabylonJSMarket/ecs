@@ -241,6 +241,14 @@ export class ThreeAdapter implements RendererAdapter {
    * semantics as BabylonAdapter.
    */
   private animationMixers = new Map<string, THREE.AnimationMixer>();
+  /**
+   * Bones by name per skeleton-carrying model, keyed by meshId (populated by
+   * `loadMesh`). Backs `listBones`/`getBoneWorldPose`.
+   */
+  private bonesByMeshId = new Map<string, Map<string, THREE.Bone>>();
+  // Reused by getBoneWorldPose so per-frame bone reads never allocate.
+  private _boneVec?: THREE.Vector3;
+  private _boneQuat?: THREE.Quaternion;
   private animationActions = new Map<string, THREE.AnimationAction>();
   /**
    * Instanced-model templates loaded once per url by `loadModelTemplate`, then
@@ -585,6 +593,10 @@ export class ThreeAdapter implements RendererAdapter {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.rotation.set(x, y, z);
   }
+  setMeshOrientation(h: MeshHandle, orientation: Quaternion): void {
+    const mesh = this.meshes.get(h);
+    if (mesh) mesh.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+  }
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     const T = this.THREE;
     const mesh = this.meshes.get(h);
@@ -675,6 +687,7 @@ export class ThreeAdapter implements RendererAdapter {
       if (m === mesh) {
         this.physicsDestroyBody(id);
         this.meshesByMeshId.delete(id);
+        this.bonesByMeshId.delete(id);
       }
     }
     mesh.geometry.dispose();
@@ -740,22 +753,19 @@ export class ThreeAdapter implements RendererAdapter {
     const T = this.requireThree();
     if (!this.scene) throw new Error('ThreeAdapter.loadThinField: call init() first');
 
-    // GLTFLoader + BufferGeometryUtils live in the addons bundle; loaded via
-    // non-literal specifiers so Vite's import analyzer leaves them alone (same
-    // trick as loadMesh / OrbitControls).
-    const loaderSpec = 'three/addons/loaders/GLTFLoader.js';
+    // BufferGeometryUtils lives in the addons bundle; loaded via a non-literal
+    // specifier so Vite's import analyzer leaves it alone (same trick as
+    // OrbitControls). The glTF load itself goes through the shared
+    // Draco-capable loader.
     const utilSpec = 'three/addons/utils/BufferGeometryUtils.js';
     let gltf: { scene: THREE.Object3D };
     let mergeGeometries: (geoms: THREE.BufferGeometry[], useGroups?: boolean) => THREE.BufferGeometry | null;
     try {
-      const loaderMod = (await import(/* @vite-ignore */ loaderSpec)) as unknown as {
-        GLTFLoader: new () => { loadAsync(url: string): Promise<{ scene: THREE.Object3D }> };
-      };
       const utilMod = (await import(/* @vite-ignore */ utilSpec)) as unknown as {
         mergeGeometries: (geoms: THREE.BufferGeometry[], useGroups?: boolean) => THREE.BufferGeometry | null;
       };
       mergeGeometries = utilMod.mergeGeometries;
-      const loader = new loaderMod.GLTFLoader();
+      const loader = await this.gltfLoader();
       gltf = await loader.loadAsync(spec.src);
     } catch (err) {
       console.error('[ThreeAdapter] loadThinField failed to load', spec.src, err);
@@ -1318,18 +1328,7 @@ export class ThreeAdapter implements RendererAdapter {
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
     const T = this.requireThree();
     if (!this.scene) throw new Error('ThreeAdapter.loadMesh: call init() first');
-    // GLTFLoader lives in the addons bundle; loaded via non-literal specifier
-    // so Vite's import analyzer leaves it alone (same trick as OrbitControls).
-    const spec2 = 'three/addons/loaders/GLTFLoader.js';
-    const mod = (await import(/* @vite-ignore */ spec2)) as unknown as {
-      GLTFLoader: new () => {
-        loadAsync(url: string): Promise<{
-          scene: THREE.Object3D;
-          animations: THREE.AnimationClip[];
-        }>;
-      };
-    };
-    const loader = new mod.GLTFLoader();
+    const loader = await this.gltfLoader();
     const gltf = await loader.loadAsync(spec.url);
 
     // Treat the imported scene root as a "mesh" for the interface's purposes.
@@ -1347,6 +1346,16 @@ export class ThreeAdapter implements RendererAdapter {
 
     const handle = this.makeHandle<MeshHandle>('loadedMesh', id);
     this.meshes.set(handle, root);
+    this.meshesByMeshId.set(id, root);
+
+    // Index the rig's bones by name (traverse is depth-first — hierarchy
+    // order) so listBones/getBoneWorldPose can address them by meshId.
+    const bones = new Map<string, THREE.Bone>();
+    root.traverse((obj) => {
+      const bone = obj as THREE.Bone;
+      if (bone.isBone && !bones.has(bone.name)) bones.set(bone.name, bone);
+    });
+    if (bones.size > 0) this.bonesByMeshId.set(id, bones);
 
     // Wire animations. A single AnimationMixer per mesh drives all clips.
     const animationNames: string[] = [];
@@ -1392,13 +1401,7 @@ export class ThreeAdapter implements RendererAdapter {
     if (!this.scene) throw new Error('ThreeAdapter.loadModelTemplate: call init() first');
     const cached = this.modelTemplates.get(url);
     if (cached) return { animationNames: cached.animations.map((c) => c.name) };
-    const spec2 = 'three/addons/loaders/GLTFLoader.js';
-    const mod = (await import(/* @vite-ignore */ spec2)) as unknown as {
-      GLTFLoader: new () => {
-        loadAsync(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }>;
-      };
-    };
-    const loader = new mod.GLTFLoader();
+    const loader = await this.gltfLoader();
     const gltf = await loader.loadAsync(url);
     // Keep the template OFF the scene; instantiateModel clones from it.
     this.modelTemplates.set(url, { root: gltf.scene, animations: gltf.animations });
@@ -1525,6 +1528,37 @@ export class ThreeAdapter implements RendererAdapter {
       if (key.startsWith(`${id}/`)) this.animationActions.delete(key);
     }
     this.meshes.delete(h);
+    this.bonesByMeshId.delete(id);
+  }
+
+  listBones(meshId: string): string[] {
+    const bones = this.bonesByMeshId.get(meshId);
+    return bones ? Array.from(bones.keys()) : [];
+  }
+
+  getBoneWorldPose(
+    meshId: string,
+    boneName: string,
+    outPosition: Vec3,
+    outOrientation: Quaternion,
+  ): boolean {
+    const bone = this.bonesByMeshId.get(meshId)?.get(boneName);
+    if (!bone) return false;
+    const T = this.requireThree();
+    if (!this._boneVec) this._boneVec = new T.Vector3();
+    if (!this._boneQuat) this._boneQuat = new T.Quaternion();
+    // getWorld* refresh the ancestor chain themselves (updateWorldMatrix), so
+    // a System reading mid-frame sees the mixer's latest bone transforms.
+    bone.getWorldPosition(this._boneVec);
+    bone.getWorldQuaternion(this._boneQuat);
+    outPosition[0] = this._boneVec.x;
+    outPosition[1] = this._boneVec.y;
+    outPosition[2] = this._boneVec.z;
+    outOrientation.x = this._boneQuat.x;
+    outOrientation.y = this._boneQuat.y;
+    outOrientation.z = this._boneQuat.z;
+    outOrientation.w = this._boneQuat.w;
+    return true;
   }
 
   playAnimationOnce(meshId: string, clipName: string): number {
@@ -1538,6 +1572,44 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
   private _tmpThreeVec?: THREE.Vector3;
+
+  /**
+   * Shared glTF loader with Draco wired in. The Meshy asset pipeline
+   * compresses its GLBs with Draco; Babylon decodes those out of the box, so
+   * Three must too or the same marketplace asset loads on one engine and
+   * errors on the other. The decoder comes from Google's versioned CDN and is
+   * only fetched when a compressed file actually needs it. Loaded via
+   * non-literal specifiers so Vite's import analyzer leaves them alone (same
+   * trick as OrbitControls).
+   */
+  private _gltfLoader?: {
+    loadAsync(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }>;
+  };
+  private async gltfLoader(): Promise<{
+    loadAsync(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }>;
+  }> {
+    if (this._gltfLoader) return this._gltfLoader;
+    const loaderSpec = 'three/addons/loaders/GLTFLoader.js';
+    const dracoSpec = 'three/addons/loaders/DRACOLoader.js';
+    const [loaderMod, dracoMod] = (await Promise.all([
+      import(/* @vite-ignore */ loaderSpec),
+      import(/* @vite-ignore */ dracoSpec),
+    ])) as unknown as [
+      {
+        GLTFLoader: new () => {
+          setDRACOLoader(d: unknown): void;
+          loadAsync(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }>;
+        };
+      },
+      { DRACOLoader: new () => { setDecoderPath(p: string): unknown } },
+    ];
+    const loader = new loaderMod.GLTFLoader();
+    const draco = new dracoMod.DRACOLoader();
+    draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+    loader.setDRACOLoader(draco);
+    this._gltfLoader = loader;
+    return loader;
+  }
 
   private requireThree(): typeof THREE {
     if (!this.THREE) throw new Error('ThreeAdapter: call init() first');

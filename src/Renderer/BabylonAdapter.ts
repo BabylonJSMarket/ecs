@@ -49,7 +49,7 @@ import {
   GlowLayer,
   DefaultRenderingPipeline,
 } from '@babylonjs/core';
-import type { AssetContainer, InstantiatedEntries, TransformNode } from '@babylonjs/core';
+import type { AssetContainer, Bone, InstantiatedEntries, TransformNode } from '@babylonjs/core';
 import type { Observer } from '@babylonjs/core';
 import '@babylonjs/loaders';
 // GPU particle backends — registered as side effects so GPUParticleSystem can
@@ -166,6 +166,17 @@ export class BabylonAdapter implements RendererAdapter {
    * used by `playAnimation` etc.), the inner Map's key is the clip name.
    */
   private loadedAnimationGroups = new Map<string, Map<string, AnimationGroup>>();
+  /**
+   * Bones by name per skeleton-carrying model, keyed by meshId. Populated by
+   * `loadMesh` and `instantiateModel` (each clone owns its skeleton). Backs
+   * `listBones`/`getBoneWorldPose` without an engine type crossing the seam.
+   */
+  private bonesByMeshId = new Map<string, Map<string, Bone>>();
+  // Reused by getBoneWorldPose so per-frame bone reads never allocate.
+  private readonly _boneScale = new Vector3();
+  private readonly _bonePos = new Vector3();
+  private readonly _boneQuat = new Quaternion();
+  private readonly _boneMat = Matrix.Identity();
   /**
    * Off-scene asset containers for instanced models, keyed by url. Loaded once
    * via `loadModelTemplate`; `instantiateModel` clones from them. The in-flight
@@ -525,6 +536,14 @@ export class BabylonAdapter implements RendererAdapter {
       mesh.rotation.set(x, y, z);
     }
   }
+  setMeshOrientation(h: MeshHandle, orientation: QuaternionSpec): void {
+    const mesh = this.meshes.get(h);
+    if (!mesh) return;
+    // Once a quaternion is assigned Babylon ignores mesh.rotation, which is
+    // what we want here — the caller has committed to quaternion control.
+    const q = (mesh.rotationQuaternion ??= new Quaternion());
+    q.set(orientation.x, orientation.y, orientation.z, orientation.w);
+  }
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
     const mesh = this.meshes.get(h);
     if (!mesh) return;
@@ -605,6 +624,7 @@ export class BabylonAdapter implements RendererAdapter {
         if (m === mesh) {
           this.physicsDestroyBody(id);
           this.meshesByMeshId.delete(id);
+          this.bonesByMeshId.delete(id);
         }
       }
       mesh.material?.dispose();
@@ -981,6 +1001,13 @@ export class BabylonAdapter implements RendererAdapter {
     }
     this.loadedAnimationGroups.set(id, byName);
 
+    // Index the skeleton's bones by name (hierarchy order preserved) so
+    // listBones/getBoneWorldPose can address them by meshId.
+    const skeleton = result.skeletons[0];
+    if (skeleton) {
+      this.bonesByMeshId.set(id, new Map(skeleton.bones.map((b) => [b.name, b])));
+    }
+
     // Cast a shadow from the loaded meshes (mirrors instantiateModel). A GLB
     // player model otherwise floats shadow-less while its invisible collision
     // proxy has its own caster disabled.
@@ -1175,6 +1202,14 @@ export class BabylonAdapter implements RendererAdapter {
     });
     this.loadedAnimationGroups.set(id, byName);
 
+    // The clone owns its skeleton; index its bones like loadMesh does. Clone
+    // bone names keep the source names (only nodes/groups get the id prefix),
+    // so callers address `LeftHand` the same on a clone as on a loadMesh model.
+    const cloneSkeleton = entries.skeletons[0];
+    if (cloneSkeleton) {
+      this.bonesByMeshId.set(id, new Map(cloneSkeleton.bones.map((b) => [b.name, b])));
+    }
+
     // Route shadows to the clone's skinned meshes (the invisible sphere proxy
     // has its caster disabled, so the humanoid casts the shadow, not a sphere).
     const gen = this.shadowGenerators.values().next().value as ShadowGenerator | undefined;
@@ -1247,6 +1282,45 @@ export class BabylonAdapter implements RendererAdapter {
     }
     this.meshes.delete(h);
     this.loadedAnimationGroups.delete(id);
+    this.bonesByMeshId.delete(id);
+  }
+
+  listBones(meshId: string): string[] {
+    const bones = this.bonesByMeshId.get(meshId);
+    return bones ? Array.from(bones.keys()) : [];
+  }
+
+  getBoneWorldPose(
+    meshId: string,
+    boneName: string,
+    outPosition: Vec3,
+    outOrientation: QuaternionSpec,
+  ): boolean {
+    const bone = this.bonesByMeshId.get(meshId)?.get(boneName);
+    if (!bone) return false;
+    const node = bone.getTransformNode();
+    if (node) {
+      // glTF rigs animate the linked TransformNodes directly — their world
+      // matrix IS the bone's world transform. Force a fresh compute: a System
+      // reads this mid-frame, before the render pass updates matrices.
+      node.computeWorldMatrix(true).decompose(this._boneScale, this._boneQuat, this._bonePos);
+    } else {
+      // Non-glTF skeleton: absolute (skeleton-space) matrix composed with the
+      // model root's world matrix.
+      const root = this.meshesByMeshId.get(meshId);
+      if (!root) return false;
+      bone.getSkeleton().computeAbsoluteMatrices(true);
+      bone.getAbsoluteMatrix().multiplyToRef(root.computeWorldMatrix(true), this._boneMat);
+      this._boneMat.decompose(this._boneScale, this._boneQuat, this._bonePos);
+    }
+    outPosition[0] = this._bonePos.x;
+    outPosition[1] = this._bonePos.y;
+    outPosition[2] = this._bonePos.z;
+    outOrientation.x = this._boneQuat.x;
+    outOrientation.y = this._boneQuat.y;
+    outOrientation.z = this._boneQuat.z;
+    outOrientation.w = this._boneQuat.w;
+    return true;
   }
 
   playAnimationOnce(meshId: string, clipName: string): number {

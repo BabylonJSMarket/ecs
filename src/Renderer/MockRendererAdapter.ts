@@ -156,6 +156,12 @@ export class MockRendererAdapter implements RendererAdapter {
   setMeshRotation(h: MeshHandle, x: number, y: number, z: number): void {
     this.record('setMeshRotation', h, x, y, z);
   }
+  /** Last quaternion applied per mesh, surfaced for assertions. */
+  meshOrientations = new Map<MeshHandle, Quaternion>();
+  setMeshOrientation(h: MeshHandle, orientation: Quaternion): void {
+    this.meshOrientations.set(h, { ...orientation });
+    this.record('setMeshOrientation', h, orientation);
+  }
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     this.record('setMeshColor', h, r, g, b);
   }
@@ -552,6 +558,49 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   setAnimationSpeed(meshId: string, clipName: string, speed: number): void {
     this.record('setAnimationSpeed', meshId, clipName, speed);
+  }
+
+  /**
+   * Skeleton stub. Tests seed a fake rig with `setMockBones(meshId, bones)`;
+   * `listBones`/`getBoneWorldPose` then answer from it exactly like a real
+   * adapter would from a loaded GLB. Unseeded meshes report no skeleton.
+   */
+  mockBones = new Map<string, Map<string, { position: Vec3; orientation: Quaternion }>>();
+  setMockBones(
+    meshId: string,
+    bones: Array<{ name: string; position?: Vec3; orientation?: Quaternion }>,
+  ): void {
+    const byName = new Map<string, { position: Vec3; orientation: Quaternion }>();
+    for (const b of bones) {
+      byName.set(b.name, {
+        position: b.position ? ([...b.position] as Vec3) : [0, 0, 0],
+        orientation: b.orientation ? { ...b.orientation } : { x: 0, y: 0, z: 0, w: 1 },
+      });
+    }
+    this.mockBones.set(meshId, byName);
+  }
+  listBones(meshId: string): string[] {
+    this.record('listBones', meshId);
+    const bones = this.mockBones.get(meshId);
+    return bones ? Array.from(bones.keys()) : [];
+  }
+  getBoneWorldPose(
+    meshId: string,
+    boneName: string,
+    outPosition: Vec3,
+    outOrientation: Quaternion,
+  ): boolean {
+    this.record('getBoneWorldPose', meshId, boneName);
+    const bone = this.mockBones.get(meshId)?.get(boneName);
+    if (!bone) return false;
+    outPosition[0] = bone.position[0];
+    outPosition[1] = bone.position[1];
+    outPosition[2] = bone.position[2];
+    outOrientation.x = bone.orientation.x;
+    outOrientation.y = bone.orientation.y;
+    outOrientation.z = bone.orientation.z;
+    outOrientation.w = bone.orientation.w;
+    return true;
   }
 
   /** Tests can preload the clip names `loadModelTemplate` resolves with. */
