@@ -1390,6 +1390,12 @@ export class ThreeAdapter implements RendererAdapter {
   addClipAction(meshId: string, name: string, action: THREE.AnimationAction): void {
     this.animationActions.set(`${meshId}/${name}`, action);
   }
+  /** The root Object3D a mesh was loaded under, keyed by meshId — the Three
+   *  twin of BabylonAdapter.getMeshRoot, for plugins that must reach skinned
+   *  meshes/skeletons (e.g. the Hand rig graft). */
+  getMeshRootObject(meshId: string): THREE.Object3D | undefined {
+    return this.meshesByMeshId.get(meshId);
+  }
 
   async loadModelTemplate(
     url: string,
