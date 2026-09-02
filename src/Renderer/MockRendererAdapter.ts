@@ -55,6 +55,10 @@ import type {
   BloomSpec,
   MeshRenderOptions,
   SunSpec,
+  SpotLightSpec,
+  FogSpec,
+  SoundSpec,
+  SoundHandle,
 } from './types';
 import type { Color } from './types';
 
@@ -110,6 +114,8 @@ export class MockRendererAdapter implements RendererAdapter {
   cameraTargets = new Map<CameraHandle, Vec3>();
   /** Positions of positioned lights, so tests can assert where a lamp landed. */
   lightPositions = new Map<LightHandle, Vec3>();
+  /** Last fog applied via `setFog` (`null` = disabled), surfaced for assertions. */
+  fog: FogSpec | null = null;
 
   private record(method: string, ...args: unknown[]): void {
     this.calls.push({ method, args });
@@ -324,6 +330,11 @@ export class MockRendererAdapter implements RendererAdapter {
     return { meshId: id, handle: h, animationNames: [] };
   }
 
+  setFog(spec: FogSpec | null): void {
+    this.fog = spec;
+    this.record('setFog', spec);
+  }
+
   createDirectionalLight(id: string, spec: DirectionalLightSpec): LightHandle {
     const h = makeHandle<LightHandle>('dirLight', id);
     this.record('createDirectionalLight', id, spec);
@@ -340,6 +351,13 @@ export class MockRendererAdapter implements RendererAdapter {
     this.record('createPointLight', id, spec);
     return h;
   }
+  createSpotLight(id: string, spec: SpotLightSpec): LightHandle {
+    const h = makeHandle<LightHandle>('spotLight', id);
+    // Positioned like a point light, so getLightPosition works on it too.
+    this.lightPositions.set(h, [...spec.position] as Vec3);
+    this.record('createSpotLight', id, spec);
+    return h;
+  }
   setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
     this.lightPositions.set(h, [x, y, z]);
     this.record('setLightPosition', h, x, y, z);
@@ -347,6 +365,12 @@ export class MockRendererAdapter implements RendererAdapter {
   /** Last position recorded for a light, so tests can assert placement. */
   getLightPosition(h: LightHandle): Vec3 | undefined {
     return this.lightPositions.get(h);
+  }
+  setLightDirection(h: LightHandle, x: number, y: number, z: number): void {
+    this.record('setLightDirection', h, x, y, z);
+  }
+  setLightColor(h: LightHandle, r: number, g: number, b: number): void {
+    this.record('setLightColor', h, r, g, b);
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     this.record('updateLightIntensity', h, intensity);
@@ -395,8 +419,17 @@ export class MockRendererAdapter implements RendererAdapter {
     return out;
   }
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
-    // Right-handed convention (matches ThreeAdapter). Tests pick Babylon or
-    // Three by setting cameraAngles; basis direction follows RH cross.
+    // Right-handed convention (matches ThreeAdapter / BabylonAdapter, whose
+    // scene is right-handed): right = forward × up. For a free perspective
+    // camera that is `q · (−X)` — at identity the camera looks down +Z, so
+    // world +X is on its LEFT. Tests pick Babylon or Three by setting
+    // cameraAngles; basis direction follows the RH cross either way.
+    const persp = this.perspectiveCameras.get(h);
+    if (persp) {
+      const r = rotateByQuat([-1, 0, 0], persp.orientation);
+      out[0] = r[0]; out[1] = r[1]; out[2] = r[2];
+      return out;
+    }
     const a = this.cameraAngles.get(h);
     const alpha = a?.alpha ?? 0;
     out[0] = Math.sin(alpha);
@@ -487,10 +520,15 @@ export class MockRendererAdapter implements RendererAdapter {
       ? this.perspectiveCameras.get(this.activePerspectiveCamera)
       : undefined;
     if (!cam) return false;
-    // Camera basis from the quaternion. Babylon LH convention: an identity
-    // orientation looks down +Z, +X is right, +Y is up.
+    // Camera basis from the quaternion. CANONICAL = a RIGHT-handed world seen
+    // through a proper (non-mirroring) view: an identity orientation looks
+    // down +Z with +Y up, which puts world +X on the camera's LEFT
+    // (right = forward × up = (+Z) × (+Y) = −X). Yaw the camera π to look
+    // down −Z and +X is on its right. This is what a real glTF renderer does
+    // (Three, Babylon with useRightHandedSystem); the old `+X` here was a
+    // left-handed basis that mirrored the picture — lettering read backwards.
     const fwd = rotateByQuat([0, 0, 1], cam.orientation);
-    const right = rotateByQuat([1, 0, 0], cam.orientation);
+    const right = rotateByQuat([-1, 0, 0], cam.orientation);
     const up = rotateByQuat([0, 1, 0], cam.orientation);
     const rx = x - cam.position[0];
     const ry = y - cam.position[1];
@@ -864,7 +902,11 @@ export class MockRendererAdapter implements RendererAdapter {
   }
 
   // ─── Phase-3: glow / bloom / emissive / render ordering ───
-  /** Last glow / bloom config + glow whitelist, surfaced for assertions. */
+  /**
+   * Last glow / bloom config + glow whitelist, surfaced for assertions. The
+   * whitelist holds handles: with no scene graph to walk, a model root's handle
+   * stands for its whole subtree (the engines enrol the descendants for real).
+   */
   glow: GlowSpec | null = null;
   bloom: BloomSpec | null = null;
   glowMeshes = new Set<MeshHandle>();
@@ -920,6 +962,36 @@ export class MockRendererAdapter implements RendererAdapter {
     out[1] = this.sunWorldPosition[1];
     out[2] = this.sunWorldPosition[2];
     return out;
+  }
+
+  // ─── Spatial audio: recorded, with a synthetic handle so tests can drive the
+  // full play / stop / volume / attach / dispose surface without an AudioContext.
+  initAudio(): Promise<boolean> {
+    this.record('initAudio');
+    return Promise.resolve(true);
+  }
+  attachAudioListener(camera: CameraHandle): void {
+    this.record('attachAudioListener', camera);
+  }
+  createSound(id: string, spec: SoundSpec): Promise<SoundHandle | null> {
+    const h = makeHandle<SoundHandle>('sound', id);
+    this.record('createSound', id, spec);
+    return Promise.resolve(h);
+  }
+  playSound(handle: SoundHandle): void {
+    this.record('playSound', handle);
+  }
+  stopSound(handle: SoundHandle): void {
+    this.record('stopSound', handle);
+  }
+  setSoundVolume(handle: SoundHandle, volume: number): void {
+    this.record('setSoundVolume', handle, volume);
+  }
+  attachSoundToMesh(handle: SoundHandle, mesh: MeshHandle): void {
+    this.record('attachSoundToMesh', handle, mesh);
+  }
+  disposeSound(handle: SoundHandle): void {
+    this.record('disposeSound', handle);
   }
 
   startLoop(onFrame: (dtSeconds: number) => void): void {

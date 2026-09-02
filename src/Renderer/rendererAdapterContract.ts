@@ -20,10 +20,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type {
   ArcCameraSpec,
+  CameraHandle,
   CardMeshSpec,
   DirectionalLightSpec,
   HemisphericLightSpec,
   PointLightSpec,
+  SpotLightSpec,
+  LightHandle,
+  MeshHandle,
+  SoundHandle,
   LabelSpec,
   MaterialSpec,
   PerspectiveCameraSpec,
@@ -79,18 +84,43 @@ export interface RendererAdapterContractOptions {
    */
   skipTextureLoad?: boolean;
   /**
-   * Engine adapters can't run a meaningful screen projection in the headless
-   * test env (Babylon's NullEngine reports a zero-size viewport; Three under
-   * jsdom has no real canvas), so a fixed pixel-projection isn't comparable.
-   * Set this to skip the NUMERIC `worldToScreen` assertions (in-front projection
-   * + behind→false + the center/right/up basis check). The Mock adapter (a
-   * deterministic Babylon-convention pinhole) runs the full battery as the
-   * reference; engines still run a no-throw smoke check. The camera-FORWARD
-   * convention (identity → +Z) IS locked on every adapter via the ungated
-   * getCameraForward case (no viewport needed); the pose round-trip and
-   * floating-origin round-trip are likewise NOT gated. Default false.
+   * Set this only for an engine that genuinely cannot project to pixels in the
+   * headless test env. It skips the NUMERIC `worldToScreen` assertions (finite
+   * pixels + the "+X lands right of centre when looking −Z / left at identity"
+   * basis checks). Babylon's NullEngine reports a real render size, so the
+   * Babylon contract runs them; Three under jsdom falls back to window
+   * dimensions and runs them too — the gate exists for a future adapter, not
+   * for those. NEVER gated: the camera-FORWARD convention (identity → +Z), the
+   * camera-RIGHT convention (+X is right when looking −Z, left at identity —
+   * the right-handed picture), the boolean in-front/behind answer of
+   * `worldToScreen`, the pose round-trip and the floating-origin round-trip.
+   * Default false.
    */
   skipProjection?: boolean;
+  /**
+   * Engine adapters can't open a WebAudio `AudioContext` in the headless test
+   * env (jsdom ships none), so the audio block — `initAudio` resolving a
+   * boolean, `createSound` resolving a handle or null, and the play / stop /
+   * volume / attach / dispose calls never throwing (a null result included) —
+   * is gated behind this flag. The Mock (synthetic handle, no I/O) runs it, as
+   * does Lite's pre-device subset (documented silent stubs). The engines'
+   * headless-degrade path (initAudio → false, createSound → null, ops safe) is
+   * locked in their own test files instead. Default false.
+   */
+  skipAudio?: boolean;
+  /**
+   * Adapters whose scene graph can be read headlessly report how much of the
+   * subtree under the mesh registered as `meshId` — that node when it is a
+   * mesh, plus every mesh beneath it — sits in the glow whitelist right now
+   * (`handle` is the same root's handle, for an adapter that tracks by
+   * handle). Drives the enrolment assertions of the model-root glow case;
+   * leave it undefined and that case runs as smoke only.
+   */
+  glowEnrolled?: (
+    adapter: RendererAdapter,
+    meshId: string,
+    handle: MeshHandle,
+  ) => { enrolled: number; total: number };
   /**
    * Optional async setup hook called once per test (after the factory). Use
    * it to drive `adapter.init(canvas)` if the adapter is engine-coupled.
@@ -494,7 +524,150 @@ export function runRendererAdapterContract(
         expect(h).toBeDefined();
         expect(() => adapter.disposeLight(h)).not.toThrow();
       });
+
+      const spotSpec: SpotLightSpec = {
+        position: [0, 4, 0],
+        direction: [0, -1, 0],
+        angle: Math.PI / 4,
+        exponent: 4,
+        intensity: 1.5,
+        diffuse: [1, 0.9, 0.7],
+        specular: [1, 1, 1],
+        range: 12,
+      };
+
+      it('createSpotLight returns a handle distinct per id and from other light kinds', () => {
+        const a = adapter.createSpotLight('can-a', spotSpec);
+        const b = adapter.createSpotLight('can-b', spotSpec);
+        const point = adapter.createPointLight('neon', pointSpec);
+        expect(a).toBeDefined();
+        expect(a).not.toBe(b);
+        expect(a).not.toBe(point);
+      });
+
+      it('intensity / position / direction / colour / dispose are all smoke-safe on a spot light', () => {
+        const spot = adapter.createSpotLight('can', spotSpec);
+        expect(() => {
+          adapter.updateLightIntensity(spot, 0.5);
+          adapter.setLightPosition(spot, 1, 3, -2);
+          adapter.setLightDirection(spot, 0.2, -1, 0.1);
+          adapter.setLightColor(spot, 0.1, 0.4, 1);
+          adapter.disposeLight(spot);
+        }).not.toThrow();
+      });
+
+      it('a spot light accepts a minimal spec (defaults for angle / exponent / colours / range)', () => {
+        const h = adapter.createSpotLight('can-min', { position: [0, 3, 0], direction: [0, -1, 0] });
+        expect(h).toBeDefined();
+        expect(() => adapter.disposeLight(h)).not.toThrow();
+      });
+
+      it('setLightDirection / setLightColor are smoke-safe on every light kind and on an unknown handle', () => {
+        const hem = adapter.createHemisphericLight('ambient', hemSpec);
+        const dir = adapter.createDirectionalLight('sun', dirSpec);
+        const point = adapter.createPointLight('neon', pointSpec);
+        const bogus = {} as unknown as LightHandle;
+        expect(() => {
+          // A hemispheric / point light has no direction — accepted and ignored,
+          // never fabricated or thrown on. Colour applies to every kind.
+          adapter.setLightDirection(hem, 1, 0, 0);
+          adapter.setLightColor(hem, 1, 0, 0);
+          adapter.setLightDirection(point, 0, 1, 0);
+          adapter.setLightColor(point, 0, 1, 0);
+          adapter.setLightDirection(dir, 0, -1, 0.3);
+          adapter.setLightColor(dir, 1, 0.9, 0.8);
+          adapter.setLightDirection(bogus, 0, 1, 0);
+          adapter.setLightColor(bogus, 0, 1, 0);
+        }).not.toThrow();
+      });
     });
+
+    // ---------------------------------------------------------------------
+    // Fog
+    // ---------------------------------------------------------------------
+    describe('fog', () => {
+      it('setFog accepts each mode and null (disable) without throwing', () => {
+        expect(() => {
+          adapter.setFog({ mode: 'linear', color: [0.1, 0.1, 0.12], start: 5, end: 60 });
+          adapter.setFog({ mode: 'exp', color: [0.1, 0.1, 0.12], density: 0.02 });
+          adapter.setFog({ mode: 'exp2', color: [0.1, 0.1, 0.12] }); // engine-default density
+          adapter.setFog(null);
+          adapter.setFog(null); // disabling twice is harmless
+        }).not.toThrow();
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Audio — Mock + Lite stubs; engines can't open an AudioContext headlessly
+    // ---------------------------------------------------------------------
+    if (!options.skipAudio) {
+      describe('audio', () => {
+        const camSpec: ArcCameraSpec = {
+          alpha: Math.PI / 4,
+          beta: Math.PI / 3,
+          radius: 10,
+          minRadius: 1,
+          maxRadius: 100,
+          minBeta: 0.01,
+          maxBeta: Math.PI - 0.01,
+          target: [0, 1, 0],
+          inertia: 0.9,
+          wheelPrecision: 50,
+          angularSensibility: 1000,
+        };
+        const bedSpec = { url: 'https://example.invalid/attract.ogg', loop: true, volume: 0.5 };
+
+        it('initAudio resolves a boolean and is idempotent', async () => {
+          const first = await adapter.initAudio();
+          const second = await adapter.initAudio();
+          expect(typeof first).toBe('boolean');
+          expect(second).toBe(first);
+        });
+
+        it('attachAudioListener accepts a camera handle (and an unknown one) without throwing', () => {
+          const cam = adapter.createArcCamera('cam', camSpec);
+          expect(() => {
+            adapter.attachAudioListener(cam);
+            adapter.attachAudioListener({} as unknown as CameraHandle);
+          }).not.toThrow();
+        });
+
+        it('createSound resolves a handle or null; play / stop / volume / attach / dispose never throw on the result', async () => {
+          const h = await adapter.createSound('attract', {
+            ...bedSpec,
+            spatial: { minDistance: 1, maxDistance: 20, rolloff: 1, distanceModel: 'inverse' },
+          });
+          expect(h === null || typeof h === 'object').toBe(true);
+          // Callers pass the result straight through, so a null (load failure /
+          // no engine) must be exactly as safe as a real handle.
+          const target = h as SoundHandle;
+          const mesh = adapter.createMesh('cabinet', { kind: 'box', width: 1, height: 2, depth: 1 });
+          expect(() => {
+            adapter.playSound(target);
+            adapter.setSoundVolume(target, 0.25);
+            adapter.attachSoundToMesh(target, mesh);
+            adapter.stopSound(target);
+            adapter.disposeSound(target);
+            adapter.disposeSound(target); // idempotent
+          }).not.toThrow();
+        });
+
+        it('a flat 2D bed (no `spatial`) is accepted; sound ops no-op on an unknown handle', async () => {
+          const h = await adapter.createSound('music', bedSpec);
+          expect(h === null || typeof h === 'object').toBe(true);
+          const bogus = {} as unknown as SoundHandle;
+          const mesh = adapter.createMesh('box', { kind: 'box', width: 1 });
+          expect(() => {
+            adapter.playSound(bogus);
+            adapter.stopSound(bogus);
+            adapter.setSoundVolume(bogus, 1);
+            adapter.attachSoundToMesh(bogus, mesh);
+            adapter.disposeSound(bogus);
+            if (h) adapter.attachSoundToMesh(h, mesh); // 2D bed: accepted, ignored
+          }).not.toThrow();
+        });
+      });
+    }
 
     // ---------------------------------------------------------------------
     // Camera
@@ -635,54 +808,96 @@ export function runRendererAdapterContract(
         expect(Math.abs(fwd[1])).toBeLessThan(0.02);
       });
 
+      // ── Handedness of the picture ─────────────────────────────────────
+      // CANONICAL is a RIGHT-handed world (glTF's) seen through a proper,
+      // non-mirroring view. With identity orientation the camera looks down
+      // +Z and +Y is up, which puts world +X on the camera's LEFT
+      // (right = forward × up = (+Z) × (+Y) = −X). Yaw it π to look down −Z
+      // and +X is on its RIGHT — exactly what Three and a right-handed
+      // Babylon scene draw, and what real lettering needs: a glTF cabinet
+      // facing +Z, viewed from +Z, reads its marquee left-to-right ONLY if
+      // +X lands screen-right. An adapter (or this Mock) that answers "+X is
+      // right at identity" is describing a mirror image. Locked here in
+      // vector form for every adapter, and in pixel form below wherever the
+      // engine can project headless.
+      const lookDownNegZ: Quaternion = { x: 0, y: 1, z: 0, w: 0 }; // yaw π
+
+      it('a perspective camera looking down −Z (yaw π) has world +X on its right; at identity (+Z) on its left', () => {
+        const h = adapter.createPerspectiveCamera('side', persp);
+        const right: Vec3 = [0, 0, 0];
+        adapter.setCameraPose(h, [0, 0, 0], lookDownNegZ);
+        adapter.getCameraRight(h, right);
+        expect(right[0]).toBeGreaterThan(0.99); // +X is screen-right when looking −Z
+        expect(Math.abs(right[2])).toBeLessThan(0.02);
+        adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+        adapter.getCameraRight(h, right);
+        expect(right[0]).toBeLessThan(-0.99); // +X is screen-LEFT when looking +Z
+        expect(Math.abs(right[2])).toBeLessThan(0.02);
+      });
+
+      it('worldToScreen answers true for a point in front of the camera and false (out untouched) for one behind', () => {
+        // The boolean alone needs no viewport, so this runs on every adapter —
+        // including the engines that skip the pixel assertions. It is what
+        // caught BabylonAdapter rejecting every VISIBLE point: its behind-
+        // camera test had the sign of view-space z backwards for a
+        // right-handed scene, so the HUD never got a bracket.
+        const h = adapter.createPerspectiveCamera('hud', persp);
+        adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+        const front: ScreenPoint = { x: NaN, y: NaN };
+        expect(adapter.worldToScreen(0, 0, 10, front)).toBe(true);
+        const behind: ScreenPoint = { x: 123, y: 456 };
+        expect(adapter.worldToScreen(0, 0, -10, behind)).toBe(false);
+        expect(behind.x).toBe(123); // untouched on a behind-camera miss
+        expect(behind.y).toBe(456);
+        // And the same question once the camera has turned round.
+        adapter.setCameraPose(h, [0, 0, 0], lookDownNegZ);
+        expect(adapter.worldToScreen(0, 0, -10, front)).toBe(true);
+        expect(adapter.worldToScreen(0, 0, 10, behind)).toBe(false);
+        expect(behind.x).toBe(123);
+      });
+
       if (!options.skipProjection) {
-        it('worldToScreen projects an in-front point to finite pixels and returns true', () => {
+        it('worldToScreen projects an in-front point to finite pixels', () => {
           const h = adapter.createPerspectiveCamera('hud', persp);
-          // Camera at origin, identity orientation → looks down +Z (Mock's
-          // Babylon-convention basis). A point ahead must project on-screen.
           adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
           const out: ScreenPoint = { x: NaN, y: NaN };
-          const visible = adapter.worldToScreen(0, 0, 10, out);
-          expect(visible).toBe(true);
+          expect(adapter.worldToScreen(0, 0, 10, out)).toBe(true);
           expect(Number.isFinite(out.x)).toBe(true);
           expect(Number.isFinite(out.y)).toBe(true);
         });
 
-        it('worldToScreen lands a straight-ahead +Z point near screen center, with +X right and +Y up', () => {
-          // Confirms the FULL canonical basis through the projection: a point dead
-          // ahead (0,0,10) maps near center; nudging it +X moves it right (larger
-          // pixel-x); nudging +Y moves it up (smaller pixel-y).
+        it('worldToScreen: looking down −Z, a world point at +X lands RIGHT of a dead-ahead point, +Y above it', () => {
+          // The picture a first-person camera in a glTF room actually draws:
+          // stand at the origin facing −Z; a cabinet at x = +2 is to your
+          // right. (Real lettering reads left-to-right only in this basis.)
+          const h = adapter.createPerspectiveCamera('room', persp);
+          adapter.setCameraPose(h, [0, 0, 0], lookDownNegZ);
+          const center: ScreenPoint = { x: NaN, y: NaN };
+          const plusX: ScreenPoint = { x: NaN, y: NaN };
+          const plusY: ScreenPoint = { x: NaN, y: NaN };
+          expect(adapter.worldToScreen(0, 0, -10, center)).toBe(true);
+          expect(adapter.worldToScreen(2, 0, -10, plusX)).toBe(true);
+          expect(adapter.worldToScreen(0, 2, -10, plusY)).toBe(true);
+          expect(plusX.x).toBeGreaterThan(center.x); // +X world → screen-right
+          expect(plusY.y).toBeLessThan(center.y); // +Y world → screen-up (smaller pixel-y)
+        });
+
+        it('worldToScreen: at identity (looking down +Z) a world point at +X lands LEFT of a dead-ahead point', () => {
+          // Same world, camera turned round: +X is now on the left. A mirror
+          // would put it on the right in BOTH poses (the old Mock did).
           const h = adapter.createPerspectiveCamera('center', persp);
           adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
           const center: ScreenPoint = { x: NaN, y: NaN };
-          const right: ScreenPoint = { x: NaN, y: NaN };
-          const up: ScreenPoint = { x: NaN, y: NaN };
+          const plusX: ScreenPoint = { x: NaN, y: NaN };
+          const plusY: ScreenPoint = { x: NaN, y: NaN };
           expect(adapter.worldToScreen(0, 0, 10, center)).toBe(true);
-          expect(adapter.worldToScreen(2, 0, 10, right)).toBe(true);
-          expect(adapter.worldToScreen(0, 2, 10, up)).toBe(true);
-          expect(right.x).toBeGreaterThan(center.x); // +X world → screen-right
-          expect(up.y).toBeLessThan(center.y); // +Y world → screen-up (smaller pixel-y)
-        });
-
-        it('worldToScreen returns false for a point behind the camera and leaves `out` untouched', () => {
-          const h = adapter.createPerspectiveCamera('hud', persp);
-          adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
-          const out: ScreenPoint = { x: 123, y: 456 };
-          const visible = adapter.worldToScreen(0, 0, -10, out);
-          expect(visible).toBe(false);
-          expect(out.x).toBe(123); // untouched on a behind-camera miss
-          expect(out.y).toBe(456);
-        });
-      } else {
-        it('worldToScreen returns a boolean without throwing (engine smoke)', () => {
-          const h = adapter.createPerspectiveCamera('hud', persp);
-          adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
-          const out: ScreenPoint = { x: 0, y: 0 };
-          let r: boolean | undefined;
-          expect(() => {
-            r = adapter.worldToScreen(0, 0, 10, out);
-          }).not.toThrow();
-          expect(typeof r).toBe('boolean');
+          expect(adapter.worldToScreen(2, 0, 10, plusX)).toBe(true);
+          expect(adapter.worldToScreen(0, 2, 10, plusY)).toBe(true);
+          expect(plusX.x).toBeLessThan(center.x); // +X world → screen-LEFT
+          expect(plusY.y).toBeLessThan(center.y); // +Y world → screen-up
+          // Sanity: the dead-ahead point is near the middle of the frame, not
+          // flung off by a bad viewport.
+          expect(Math.abs(center.x - plusX.x)).toBeGreaterThan(1);
         });
       }
     });
@@ -1262,6 +1477,45 @@ export function runRendererAdapterContract(
           adapter.setGlowLayer(null);
           adapter.addGlowMesh(m); // no-op after disable
         }).not.toThrow();
+      });
+
+      it('addGlowMesh / removeGlowMesh on a model root reach the meshes under it, not just the root', () => {
+        // A loaded model hands the System ONE handle — its root — while the
+        // surfaces that should bloom (a cabinet's CRT, marquee, coin slot) are
+        // meshes UNDER it. Engines can't fetch a GLB headlessly, so the root is
+        // stood up the way a model looks to the adapter: a node with meshes
+        // parented beneath it (createDebugBox parents a real mesh on every
+        // scene-graph adapter). Smoke-safe everywhere; an adapter that can be
+        // read (options.glowEnrolled) also proves the whole subtree was
+        // enrolled, then released — a mesh parented under the root AFTER the
+        // call included, which removal must not leave glowing either.
+        const root = adapter.createMesh('cabinet', { kind: 'box' });
+        adapter.createDebugBox('cabinet-screen', root, [1, 1, 1]);
+        adapter.createDebugBox('cabinet-marquee', root, [1, 1, 1]);
+        // A second, unrelated enrolment that stays put: on Babylon an EMPTY
+        // include list means "everything glows", so releasing the only root
+        // would read as enrolled again. Keeping the list non-empty keeps the
+        // read selective.
+        const lamp = adapter.createMesh('lamp', { kind: 'sphere' });
+        adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.5 });
+        adapter.addGlowMesh(lamp);
+        expect(() => adapter.addGlowMesh(root)).not.toThrow();
+        if (options.glowEnrolled) {
+          const r = options.glowEnrolled(adapter, 'cabinet', root);
+          expect(r.total).toBeGreaterThan(0);
+          expect(r.enrolled).toBe(r.total);
+        }
+        expect(() => adapter.createDebugBox('cabinet-coin', root, [1, 1, 1])).not.toThrow();
+        expect(() => adapter.removeGlowMesh(root)).not.toThrow();
+        if (options.glowEnrolled) expect(options.glowEnrolled(adapter, 'cabinet', root).enrolled).toBe(0);
+        expect(() => {
+          adapter.addGlowMesh(root);
+          adapter.setGlowLayer(null); // disabling the layer releases the subtree too
+          adapter.addGlowMesh(root); // no-op after disable
+          adapter.removeGlowMesh(root);
+        }).not.toThrow();
+        if (options.glowEnrolled) expect(options.glowEnrolled(adapter, 'cabinet', root).enrolled).toBe(0);
+        if (options.glowEnrolled) expect(options.glowEnrolled(adapter, 'lamp', lamp).enrolled).toBe(0);
       });
 
       it('setMeshEmissiveById no-ops on an unknown id; setMeshRenderingOptions is smoke-safe', () => {

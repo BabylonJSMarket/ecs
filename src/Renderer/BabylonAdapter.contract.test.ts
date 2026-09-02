@@ -18,7 +18,8 @@
  *     the Arcade panel tests instead.
  */
 
-import { NullEngine, Scene } from '@babylonjs/core';
+import { AbstractMesh, NullEngine, Scene } from '@babylonjs/core';
+import type { GlowLayer } from '@babylonjs/core';
 import { BabylonAdapter } from './BabylonAdapter';
 import { runRendererAdapterContract } from './rendererAdapterContract';
 
@@ -31,9 +32,24 @@ runRendererAdapterContract(
     skipThinField: true,
     skipMeshLoad: true, // needs a real GLB fetch; covered by the browser demo
     skipTextureLoad: true, // needs a real image fetch; covered by the browser demo
-    skipProjection: true, // NullEngine reports a 0-size viewport; numeric
-    // worldToScreen is covered by the Mock reference + the browser demo. The
-    // pose round-trip + floating-origin round-trip still run here.
+    skipAudio: true, // jsdom has no AudioContext; the headless-degrade path is locked in BabylonAdapter.test.ts
+    // Projection is NOT skipped: NullEngine reports a real render size (its
+    // default 512×256), so the pixel-basis cases run on Babylon's own view /
+    // projection math. That is what pins the right-handed picture and the
+    // in-front/behind sign of worldToScreen to the real engine.
+    glowEnrolled(adapter, meshId) {
+      // Read the real GlowLayer's include list: the registered node (when it is
+      // a mesh) plus every mesh under it, as Babylon's per-mesh whitelist sees them.
+      const ba = adapter as BabylonAdapter;
+      const root = ba.getMeshRoot(meshId);
+      if (!root) return { enrolled: 0, total: 0 };
+      const layer = ba.scene?.effectLayers.find((l) => l.name === 'glow') as GlowLayer | undefined;
+      const meshes = [root, ...root.getChildMeshes(false)].filter((n) => n instanceof AbstractMesh);
+      return {
+        total: meshes.length,
+        enrolled: layer ? meshes.filter((m) => layer.hasMesh(m)).length : 0,
+      };
+    },
     setup(adapter) {
       // Bypass init() — it builds a `new Engine(canvas, ...)` that needs
       // a real WebGL context. NullEngine is a Babylon Engine subclass

@@ -73,6 +73,10 @@ import type {
   SunSpec,
   Color4,
   ModelFitSpec,
+  SpotLightSpec,
+  FogSpec,
+  SoundSpec,
+  SoundHandle,
 } from './types';
 import type { Color } from './types';
 
@@ -159,6 +163,16 @@ function sampleRockSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number,
   return out;
 }
 
+/**
+ * True when the host exposes WebAudio. Absent under jsdom / node, where the
+ * audio surface must degrade to silence instead of letting Three's
+ * `AudioListener` throw on a missing `AudioContext`.
+ */
+function hasWebAudio(): boolean {
+  const g = globalThis as { AudioContext?: unknown; webkitAudioContext?: unknown };
+  return typeof g.AudioContext === 'function' || typeof g.webkitAudioContext === 'function';
+}
+
 export class ThreeAdapter implements RendererAdapter {
   readonly kind = 'three' as const;
 
@@ -172,6 +186,17 @@ export class ThreeAdapter implements RendererAdapter {
   /** Parallel meshId → mesh lookup used by the physics adapter methods. */
   private meshesByMeshId = new Map<string, THREE.Mesh>();
   private lights = new Map<LightHandle, THREE.Light>();
+  /**
+   * Aim targets of the spot lights this adapter created. Three aims a spot at a
+   * separate `target` Object3D that has to live in the scene, so it is tracked
+   * here for disposeLight to remove alongside the light.
+   */
+  private spotTargets = new Map<LightHandle, THREE.Object3D>();
+  // ─── Spatial audio (THREE.AudioListener + Audio / PositionalAudio) ───
+  /** The one listener (the "ears"); built lazily by ensureAudioListener, null with no WebAudio. */
+  private audioListener: THREE.AudioListener | null = null;
+  /** Loaded sounds; `spatial` remembers whether the clip was created positional. */
+  private sounds = new Map<SoundHandle, { audio: THREE.Audio | THREE.PositionalAudio; spatial: boolean }>();
   private cameras = new Map<CameraHandle, { camera: THREE.PerspectiveCamera; controls?: unknown; orientation?: { x: number; y: number; z: number; w: number } }>();
   /**
    * 180° rotation about +Y, lazily built from `this.THREE`. Post-multiplied onto
@@ -309,6 +334,15 @@ export class ThreeAdapter implements RendererAdapter {
   private glowSpec: GlowSpec | null = null;
   private bloomSpec: BloomSpec | null = null;
   private glowMeshes = new Set<MeshHandle>();
+  /**
+   * A mesh parented under an enrolled root AFTER addGlowMesh (a debug box, a
+   * plugin's graft) joins the layer too. Three raises `childadded` on the
+   * PARENT only, so every node of an enrolled subtree carries this listener;
+   * one shared function keeps add/remove idempotent (EventDispatcher dedupes).
+   */
+  private readonly onGlowChildAdded = (event: { child?: THREE.Object3D }): void => {
+    if (event.child) this.enrolGlowSubtree(event.child);
+  };
   /**
    * The post-process composer (RenderPass → UnrealBloomPass → OutputPass), built
    * lazily once a real WebGLRenderer + the three/addons postprocessing bundle are
@@ -1494,11 +1528,27 @@ export class ThreeAdapter implements RendererAdapter {
     // contaminated by our own fit transform).
     const size = new T.Box3().setFromObject(root).getSize(new T.Vector3());
     const longest = Math.max(size.x, size.z, 1e-4); // longest HORIZONTAL extent
-    const scale = fit.fitLength !== undefined ? fit.fitLength / longest : (spec?.scale ?? 1);
+    const height = Math.max(size.y, 1e-4);
+    // fitHeight (a standing cabinet) wins over fitLength (a ship); either one
+    // overrides the fixed scale multiplier.
+    const scale =
+      fit.fitHeight !== undefined
+        ? fit.fitHeight / height
+        : fit.fitLength !== undefined
+          ? fit.fitLength / longest
+          : (spec?.scale ?? 1);
     root.scale.setScalar(scale);
     root.rotation.set(fit.pitch ?? 0, fit.yaw ?? 0, 0);
     const p = spec?.position ?? [0, 0, 0];
-    root.position.set(p[0], p[1] + (fit.yOffset ?? 0), p[2]);
+    root.position.set(p[0], p[1], p[2]);
+    if (fit.seatOnGround) {
+      // Re-measure at the fitted scale + facing (both move the box) and lift/
+      // drop the root so the box's floor lands on the instantiate Y.
+      root.updateMatrixWorld(true);
+      const minY = new T.Box3().setFromObject(root).min.y;
+      if (Number.isFinite(minY)) root.position.y += p[1] - minY;
+    }
+    root.position.y += fit.yOffset ?? 0;
   }
 
   setModelVisible(h: MeshHandle, visible: boolean): void {
@@ -1627,6 +1677,23 @@ export class ThreeAdapter implements RendererAdapter {
   }
   private handleCounter = 0;
 
+  // ─── Fog ───
+  setFog(spec: FogSpec | null): void {
+    const T = this.THREE;
+    if (!T || !this.scene) return; // safe before init, like setClearColor
+    if (!spec) {
+      this.scene.fog = null;
+      return;
+    }
+    const color = new T.Color().setRGB(spec.color[0], spec.color[1], spec.color[2], T.SRGBColorSpace);
+    // Three has a single exponential curve (FogExp2, e^-(d·density)²), so
+    // `exp` maps onto it too — same colour/density, a slightly faster roll-off.
+    this.scene.fog =
+      spec.mode === 'linear'
+        ? new T.Fog(color, spec.start ?? 10, spec.end ?? 100)
+        : new T.FogExp2(color, spec.density ?? 0.05);
+  }
+
   createDirectionalLight(id: string, spec: DirectionalLightSpec): LightHandle {
     const T = this.requireThree();
     const light = new T.DirectionalLight(
@@ -1699,8 +1766,55 @@ export class ThreeAdapter implements RendererAdapter {
     this.lights.set(handle, light);
     return handle;
   }
+  createSpotLight(id: string, spec: SpotLightSpec): LightHandle {
+    const T = this.requireThree();
+    const diffuse = spec.diffuse ?? [1, 1, 1];
+    const exponent = spec.exponent ?? 2;
+    // Three's `angle` is the HALF-angle (the spec carries the full aperture,
+    // Babylon-style) and it has no falloff exponent — `penumbra` (0 = hard
+    // edge, 1 = fully soft) is the nearest knob, so a higher exponent maps to a
+    // smaller penumbra. `distance` is Babylon's `range`.
+    const light = new T.SpotLight(
+      new T.Color().setRGB(diffuse[0], diffuse[1], diffuse[2], T.SRGBColorSpace),
+      spec.intensity ?? 1,
+      spec.range ?? 10,
+      (spec.angle ?? Math.PI / 3) / 2,
+      Math.min(1, Math.max(0, 1 / (1 + exponent))),
+    );
+    light.name = `SpotLight_${id}`;
+    light.position.set(spec.position[0], spec.position[1], spec.position[2]);
+    // Three aims at a target Object3D that must be IN the scene, or the cone
+    // points at the origin regardless of `direction`.
+    light.target.position.set(
+      spec.position[0] + spec.direction[0],
+      spec.position[1] + spec.direction[1],
+      spec.position[2] + spec.direction[2],
+    );
+    this.scene!.add(light);
+    this.scene!.add(light.target);
+
+    const handle = this.makeHandle<LightHandle>('spotLight', id);
+    this.lights.set(handle, light);
+    this.spotTargets.set(handle, light.target);
+    return handle;
+  }
   setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
     this.lights.get(h)?.position.set(x, y, z);
+  }
+  setLightDirection(h: LightHandle, x: number, y: number, z: number): void {
+    const light = this.lights.get(h);
+    // Only the aimed kinds (spot, directional) own a target; Three has no
+    // direction field, so aim = park the target one `dir` past the light.
+    const target = (light as { target?: THREE.Object3D } | undefined)?.target;
+    if (!light || !target?.isObject3D) return;
+    target.position.set(light.position.x + x, light.position.y + y, light.position.z + z);
+  }
+  setLightColor(h: LightHandle, r: number, g: number, b: number): void {
+    const T = this.THREE;
+    const light = this.lights.get(h);
+    if (!light || !T) return;
+    // Every Three light carries `.color` (a HemisphereLight's is its sky colour).
+    light.color.setRGB(r, g, b, T.SRGBColorSpace);
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     const light = this.lights.get(h);
@@ -1712,6 +1826,11 @@ export class ThreeAdapter implements RendererAdapter {
     this.scene?.remove(light);
     light.dispose?.();
     this.lights.delete(h);
+    const target = this.spotTargets.get(h);
+    if (target) {
+      this.scene?.remove(target);
+      this.spotTargets.delete(h);
+    }
   }
 
   createArcCamera(id: string, spec: ArcCameraSpec): CameraHandle {
@@ -2788,7 +2907,10 @@ export class ThreeAdapter implements RendererAdapter {
   setGlowLayer(spec: GlowSpec | null): void {
     this.glowSpec = spec;
     if (!spec) {
-      for (const h of this.glowMeshes) this.meshes.get(h)?.layers.disable(BLOOM_LAYER);
+      for (const h of this.glowMeshes) {
+        const root = this.meshes.get(h);
+        if (root) this.releaseGlowSubtree(root);
+      }
       this.glowMeshes.clear();
     }
     this.refreshComposer();
@@ -2797,12 +2919,32 @@ export class ThreeAdapter implements RendererAdapter {
   addGlowMesh(h: MeshHandle): void {
     if (!this.glowSpec) return; // no-op when the glow layer is disabled
     this.glowMeshes.add(h);
-    this.meshes.get(h)?.layers.enable(BLOOM_LAYER);
+    // The layer mask is per-object and not inherited, and a loaded model's
+    // handle maps to its ROOT (gltf.scene — a Group with no geometry): the
+    // surfaces that should bloom are the meshes under it. Mark the subtree.
+    const root = this.meshes.get(h);
+    if (root) this.enrolGlowSubtree(root);
   }
 
   removeGlowMesh(h: MeshHandle): void {
     this.glowMeshes.delete(h);
-    this.meshes.get(h)?.layers.disable(BLOOM_LAYER);
+    const root = this.meshes.get(h);
+    if (root) this.releaseGlowSubtree(root);
+  }
+
+  /** Mark every mesh under `root` (root included) for the glow mask, and watch for late children. */
+  private enrolGlowSubtree(root: THREE.Object3D): void {
+    root.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) o.layers.enable(BLOOM_LAYER);
+      o.addEventListener('childadded', this.onGlowChildAdded);
+    });
+  }
+
+  private releaseGlowSubtree(root: THREE.Object3D): void {
+    root.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) o.layers.disable(BLOOM_LAYER);
+      o.removeEventListener('childadded', this.onGlowChildAdded);
+    });
   }
 
   setBloom(spec: BloomSpec | null): void {
@@ -3013,6 +3155,98 @@ export class ThreeAdapter implements RendererAdapter {
     return new T.Color().setRGB(rgb[0], rgb[1], rgb[2], T.SRGBColorSpace);
   }
 
+  // ─── Spatial audio ───
+  /**
+   * Build the listener on first use. Sync (Three's listener is a plain
+   * Object3D wrapping an AudioContext), so attachAudioListener / createSound
+   * share it without waiting on initAudio. Null when the host has no WebAudio
+   * (jsdom) or refuses to open a context — the silent-room path.
+   */
+  private ensureAudioListener(): THREE.AudioListener | null {
+    if (this.audioListener) return this.audioListener;
+    const T = this.THREE;
+    if (!T || !hasWebAudio()) return null;
+    try {
+      this.audioListener = new T.AudioListener();
+    } catch {
+      return null;
+    }
+    return this.audioListener;
+  }
+  initAudio(): Promise<boolean> {
+    // Idempotent by construction: ensureAudioListener caches the listener.
+    return Promise.resolve(this.ensureAudioListener() !== null);
+  }
+  attachAudioListener(camera: CameraHandle): void {
+    const entry = this.cameras.get(camera);
+    const listener = entry ? this.ensureAudioListener() : null;
+    if (!entry || !listener) return;
+    listener.removeFromParent();
+    entry.camera.add(listener);
+  }
+  async createSound(id: string, spec: SoundSpec): Promise<SoundHandle | null> {
+    const T = this.THREE;
+    const listener = this.ensureAudioListener();
+    if (!T || !listener) return null;
+    let buffer: AudioBuffer;
+    try {
+      buffer = await new T.AudioLoader().loadAsync(spec.url);
+    } catch {
+      return null; // fetch / decode failure — the room goes quiet, the scene stays up
+    }
+    const spatial = spec.spatial;
+    // `Audio<GainNode>` spelled out: the union target would otherwise make TS
+    // infer the node type as GainNode | PannerNode and reject the assignment.
+    const audio: THREE.Audio | THREE.PositionalAudio = spatial
+      ? new T.PositionalAudio(listener)
+      : new T.Audio<GainNode>(listener);
+    audio.name = `Sound_${id}`;
+    audio.setBuffer(buffer);
+    audio.setLoop(spec.loop ?? false);
+    audio.setVolume(spec.volume ?? 1);
+    if (spatial && audio instanceof T.PositionalAudio) {
+      audio.setRefDistance(spatial.minDistance ?? 1);
+      audio.setMaxDistance(spatial.maxDistance ?? 100);
+      audio.setRolloffFactor(spatial.rolloff ?? 1);
+      audio.setDistanceModel(spatial.distanceModel ?? 'inverse');
+    }
+    if (spec.autoplay) audio.play();
+    const handle = this.makeHandle<SoundHandle>('sound', id);
+    this.sounds.set(handle, { audio, spatial: !!spatial });
+    return handle;
+  }
+  playSound(handle: SoundHandle): void {
+    const entry = this.sounds.get(handle);
+    if (!entry) return;
+    // Three warns and ignores play-while-playing; stop first so the call means
+    // "from the top" every time, as the interface promises.
+    if (entry.audio.isPlaying) entry.audio.stop();
+    entry.audio.play();
+  }
+  stopSound(handle: SoundHandle): void {
+    const entry = this.sounds.get(handle);
+    if (entry?.audio.isPlaying) entry.audio.stop();
+  }
+  setSoundVolume(handle: SoundHandle, volume: number): void {
+    this.sounds.get(handle)?.audio.setVolume(volume);
+  }
+  attachSoundToMesh(handle: SoundHandle, mesh: MeshHandle): void {
+    const entry = this.sounds.get(handle);
+    const node = this.meshes.get(mesh);
+    // A 2D bed has no panner to move; only positional audio rides the mesh.
+    if (!entry || !node || !entry.spatial) return;
+    entry.audio.removeFromParent();
+    node.add(entry.audio);
+  }
+  disposeSound(handle: SoundHandle): void {
+    const entry = this.sounds.get(handle);
+    if (!entry) return;
+    if (entry.audio.isPlaying) entry.audio.stop();
+    entry.audio.removeFromParent();
+    entry.audio.disconnect();
+    this.sounds.delete(handle);
+  }
+
   startLoop(onFrame: (dtSeconds: number) => void): void {
     if (!this.renderer || !this.scene) {
       throw new Error('ThreeAdapter.startLoop: call init() first');
@@ -3128,6 +3362,15 @@ export class ThreeAdapter implements RendererAdapter {
       this.sun = undefined;
     }
     this.dynamicTexturesByKey.clear();
+    // Audio: detach sounds/listener from the scene graph before it goes.
+    for (const entry of this.sounds.values()) {
+      if (entry.audio.isPlaying) entry.audio.stop();
+      entry.audio.removeFromParent();
+    }
+    this.sounds.clear();
+    this.audioListener?.removeFromParent();
+    this.audioListener = null;
+    this.spotTargets.clear();
     this.renderer?.dispose();
     this.renderer = undefined;
     this.scene = undefined;
@@ -3204,7 +3447,7 @@ function flattenSegments(lines: Vec3[][]): number[] {
 // ─────────────────────────────────────────────────────────────────────────
 
 /** Three layer index used to mark glow-whitelisted meshes (selective-bloom mask). */
-const BLOOM_LAYER = 1;
+export const BLOOM_LAYER = 1;
 
 /** Clamp a scalar to [0,1]. */
 function clamp01(v: number): number {

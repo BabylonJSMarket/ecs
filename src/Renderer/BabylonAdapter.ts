@@ -23,6 +23,7 @@ import {
   StandardMaterial,
   PBRMaterial,
   PointLight,
+  SpotLight,
   ShaderMaterial,
   HemisphericLight as BabylonHemisphericLight,
   DirectionalLight as BabylonDirectionalLight,
@@ -30,6 +31,7 @@ import {
   UniversalCamera,
   ShadowGenerator,
   AnimationPropertiesOverride,
+  AbstractMesh,
   Mesh,
   LinesMesh,
   DynamicTexture,
@@ -49,7 +51,7 @@ import {
   GlowLayer,
   DefaultRenderingPipeline,
 } from '@babylonjs/core';
-import type { AssetContainer, Bone, InstantiatedEntries, TransformNode } from '@babylonjs/core';
+import type { AssetContainer, AudioEngineV2, Bone, InstancedMesh, InstantiatedEntries, Node, StaticSound, TransformNode } from '@babylonjs/core';
 import type { Observer } from '@babylonjs/core';
 import '@babylonjs/loaders';
 // GPU particle backends — registered as side effects so GPUParticleSystem can
@@ -107,10 +109,14 @@ import type {
   BloomSpec,
   MeshRenderOptions,
   SunSpec,
+  SpotLightSpec,
+  FogSpec,
+  SoundSpec,
+  SoundHandle,
   Vec3,
 } from './types';
 import type { Color } from './types';
-import { Matrix, Ray, Viewport } from '@babylonjs/core';
+import { Matrix, Ray, Viewport, CreateAudioEngineAsync, CreateSoundAsync, SoundState } from '@babylonjs/core';
 import {
   asteroidShape,
   asteroidSurfacePosition,
@@ -136,6 +142,16 @@ export function hardwareScalingLevelForDpr(dpr: number | undefined): number {
   if (!dpr || !Number.isFinite(dpr) || dpr <= 0) return 1;
   const clamped = Math.min(3, Math.max(1, dpr));
   return 1 / clamped;
+}
+
+/**
+ * True when the host exposes WebAudio. Absent under jsdom / node, where the
+ * audio surface must degrade to silence instead of letting Babylon's engine
+ * factory throw on a missing `AudioContext`.
+ */
+function hasWebAudio(): boolean {
+  const g = globalThis as { AudioContext?: unknown; webkitAudioContext?: unknown };
+  return typeof g.AudioContext === 'function' || typeof g.webkitAudioContext === 'function';
 }
 
 /** Read the current display's device pixel ratio, guarding for headless. */
@@ -196,7 +212,15 @@ export class BabylonAdapter implements RendererAdapter {
   private havokInitPromise: Promise<void> | null = null;
   /** Pending create requests queued while Havok is still initializing. */
   private pendingPhysicsCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
-  private lights = new Map<LightHandle, BabylonHemisphericLight | BabylonDirectionalLight | PointLight>();
+  private lights = new Map<LightHandle, BabylonHemisphericLight | BabylonDirectionalLight | PointLight | SpotLight>();
+  // ─── Spatial audio (Babylon AudioEngineV2, brought up lazily by initAudio) ───
+  private audioEngine: AudioEngineV2 | null = null;
+  /** The one-shot init, cached so initAudio is idempotent and createSound can await it. */
+  private audioInitPromise: Promise<boolean> | null = null;
+  /** Camera handed to attachAudioListener before the engine was up; applied once it is. */
+  private pendingListenerCamera: CameraHandle | null = null;
+  /** Loaded sounds; `spatial` remembers whether the clip was created positional. */
+  private sounds = new Map<SoundHandle, { sound: StaticSound; spatial: boolean }>();
   private cameras = new Map<CameraHandle, ArcRotateCamera>();
   /**
    * Free 6-DOF perspective cameras (the chase / flight camera), kept in their
@@ -288,6 +312,15 @@ export class BabylonAdapter implements RendererAdapter {
   private particleCounter = 0;
   /** The selective glow post-pass (empty whitelist until addGlowMesh). */
   private glowLayer: GlowLayer | null = null;
+  /**
+   * Nodes enrolled by addGlowMesh. The include list is per-MESH, so a handle is
+   * enrolled as its whole subtree (a loaded model's root has no geometry of its
+   * own — the emissive surfaces hang under it). The roots are remembered so a
+   * mesh parented under one AFTER the call joins too; see ensureGlowNewMeshWatch.
+   */
+  private glowRoots = new Set<Node>();
+  /** The new-mesh listener; registered only while some root is enrolled. */
+  private glowNewMeshObserver: Observer<AbstractMesh> | null = null;
   /** The HDR bloom pipeline, created lazily on the first setBloom call. */
   private renderPipeline: DefaultRenderingPipeline | null = null;
   /** Camera-following sun: emissive disc, its per-frame follow observer + offset. */
@@ -319,6 +352,7 @@ export class BabylonAdapter implements RendererAdapter {
   private readonly _projWorld = new Vector3();
   private readonly _projView = new Vector3();
   private readonly _projOut = new Vector3();
+  private readonly _projViewProj = new Matrix();
   private readonly _projViewport = new Viewport(0, 0, 0, 0);
   private onFrame?: (dt: number) => void;
   private lastTime = 0;
@@ -1233,26 +1267,50 @@ export class BabylonAdapter implements RendererAdapter {
         if (!child.name.includes(fit.meshNameFilter)) child.dispose();
       }
     }
-    if (fit.fitLength !== undefined) {
+    if (fit.fitHeight !== undefined || fit.fitLength !== undefined) {
       // Measure at scale 1 so the normalization is independent of any spec.scale.
       root.scaling.setAll(1);
-      root.computeWorldMatrix(true);
-      let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
-      for (const child of root.getChildMeshes(false)) {
-        child.computeWorldMatrix(true);
-        const bb = child.getBoundingInfo().boundingBox;
-        const lo = bb.minimumWorld, hi = bb.maximumWorld;
-        if (lo.x < minX) minX = lo.x;
-        if (hi.x > maxX) maxX = hi.x;
-        if (lo.z < minZ) minZ = lo.z;
-        if (hi.z > maxZ) maxZ = hi.z;
-      }
-      const horiz = Math.max(maxX - minX, maxZ - minZ);
-      if (Number.isFinite(horiz) && horiz > 1e-6) root.scaling.setAll(fit.fitLength / horiz);
+      const { min, max } = this.measureModelBounds(root);
+      // fitHeight pins the Y extent (a standing cabinet); fitLength the longest
+      // horizontal extent (a ship). Height wins when both are given.
+      const extent =
+        fit.fitHeight !== undefined ? max[1] - min[1] : Math.max(max[0] - min[0], max[2] - min[2]);
+      const target = fit.fitHeight ?? fit.fitLength!;
+      if (Number.isFinite(extent) && extent > 1e-6) root.scaling.setAll(target / extent);
     }
     root.rotation.y += fit.yaw ?? 0;
     root.rotation.x += fit.pitch ?? 0;
+    if (fit.seatOnGround) {
+      // Re-measure AFTER the scale + facing correction (both move the box), then
+      // lift/drop the root so the box's floor lands on the instantiate Y.
+      const { min } = this.measureModelBounds(root);
+      if (Number.isFinite(min[1])) root.position.y += root.position.y - min[1];
+    }
     if (fit.yOffset) root.position.y += fit.yOffset;
+  }
+
+  /**
+   * World-space AABB of every mesh under `root` at its CURRENT transform (world
+   * matrices forced up to date first). One measurement shared by the
+   * fit-length / fit-height normalization and the seat-on-ground pass so both
+   * read the same box. ±Infinity bounds for a root with no meshes.
+   */
+  private measureModelBounds(root: TransformNode): { min: Vec3; max: Vec3 } {
+    root.computeWorldMatrix(true);
+    const min: Vec3 = [Infinity, Infinity, Infinity];
+    const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (const child of root.getChildMeshes(false)) {
+      child.computeWorldMatrix(true);
+      const bb = child.getBoundingInfo().boundingBox;
+      const lo = bb.minimumWorld, hi = bb.maximumWorld;
+      if (lo.x < min[0]) min[0] = lo.x;
+      if (lo.y < min[1]) min[1] = lo.y;
+      if (lo.z < min[2]) min[2] = lo.z;
+      if (hi.x > max[0]) max[0] = hi.x;
+      if (hi.y > max[1]) max[1] = hi.y;
+      if (hi.z > max[2]) max[2] = hi.z;
+    }
+    return { min, max };
   }
 
   setModelVisible(h: MeshHandle, visible: boolean): void {
@@ -1498,6 +1556,22 @@ export class BabylonAdapter implements RendererAdapter {
     return a;
   }
 
+  // ─── Fog ───
+  setFog(spec: FogSpec | null): void {
+    const scene = this.scene;
+    if (!scene) return; // safe before init, like setClearColor
+    if (!spec) {
+      scene.fogMode = Scene.FOGMODE_NONE;
+      return;
+    }
+    scene.fogMode =
+      spec.mode === 'linear' ? Scene.FOGMODE_LINEAR : spec.mode === 'exp' ? Scene.FOGMODE_EXP : Scene.FOGMODE_EXP2;
+    scene.fogColor = Color3.FromArray(spec.color);
+    scene.fogDensity = spec.density ?? 0.05;
+    scene.fogStart = spec.start ?? 10;
+    scene.fogEnd = spec.end ?? 100;
+  }
+
   createDirectionalLight(id: string, spec: DirectionalLightSpec): LightHandle {
     if (!this.scene) throw new Error('BabylonAdapter.createDirectionalLight: call init() first');
     const light = new BabylonDirectionalLight(
@@ -1569,11 +1643,44 @@ export class BabylonAdapter implements RendererAdapter {
     this.lights.set(handle, light);
     return handle;
   }
+  createSpotLight(id: string, spec: SpotLightSpec): LightHandle {
+    if (!this.scene) throw new Error('BabylonAdapter.createSpotLight: call init() first');
+    // Babylon's SpotLight takes the FULL cone aperture + a falloff exponent —
+    // the spec's native convention, so both pass straight through.
+    const light = new SpotLight(
+      `SpotLight_${id}`,
+      new Vector3(spec.position[0], spec.position[1], spec.position[2]),
+      new Vector3(spec.direction[0], spec.direction[1], spec.direction[2]).normalize(),
+      spec.angle ?? Math.PI / 3,
+      spec.exponent ?? 2,
+      this.scene,
+    );
+    light.intensity = spec.intensity ?? 1;
+    light.diffuse = Color3.FromArray(spec.diffuse ?? [1, 1, 1]);
+    light.specular = Color3.FromArray(spec.specular ?? [1, 1, 1]);
+    light.range = spec.range ?? 10;
+
+    const handle = this.makeHandle<LightHandle>('spotLight', id);
+    this.lights.set(handle, light);
+    return handle;
+  }
   setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
     const light = this.lights.get(h) as { position?: Vector3 } | undefined;
     // Hemispheric/directional lights have no meaningful position — skip rather
     // than fabricate one.
     if (light?.position) light.position.set(x, y, z);
+  }
+  setLightDirection(h: LightHandle, x: number, y: number, z: number): void {
+    const light = this.lights.get(h);
+    // Only the aimed kinds (spot, directional — both ShadowLights) carry a
+    // direction; a point / hemispheric light is left alone rather than given one.
+    if (light instanceof SpotLight || light instanceof BabylonDirectionalLight) {
+      light.direction.set(x, y, z).normalize();
+    }
+  }
+  setLightColor(h: LightHandle, r: number, g: number, b: number): void {
+    const light = this.lights.get(h);
+    if (light) light.diffuse.set(r, g, b);
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     const light = this.lights.get(h);
@@ -1822,21 +1929,31 @@ export class BabylonAdapter implements RendererAdapter {
     const camera = scene?.activeCamera;
     if (!scene || !engine || !camera) return false;
     this._projWorld.set(x, y, z);
-    // Behind-camera reject FIRST, in VIEW space, BEFORE touching `out`: in this
-    // right-handed scene an identity-orientation camera looks down +Z, so a
-    // point whose view-space z is <= 0 sits behind the lens. Returning false
-    // (and leaving `out` untouched) lets the HUD draw an off-screen arrow
-    // instead of a mirrored phantom bracket where perspective division would
-    // fling the point.
-    Vector3.TransformCoordinatesToRef(this._projWorld, camera.getViewMatrix(), this._projView);
-    if (this._projView.z <= 0) return false;
+    // Behind-camera reject FIRST, in VIEW space, BEFORE touching `out`. This
+    // scene is right-handed, so Babylon's view space (LookAtRH) has the lens
+    // looking down its own −Z: a point IN FRONT has view-space z < 0, and one
+    // at z >= 0 sits on or behind the lens plane. (The CANONICAL "identity
+    // looks down +Z" is a world-space convention baked in via perspLookFlip;
+    // it says nothing about view-space sign.) Returning false — and leaving
+    // `out` untouched — lets the HUD draw an off-screen arrow instead of a
+    // mirrored phantom bracket where perspective division would fling the
+    // point. Locked by the contract's projection cases, which run on the real
+    // NullEngine math: the old `z <= 0` test here rejected everything visible.
+    const view = camera.getViewMatrix();
+    Vector3.TransformCoordinatesToRef(this._projWorld, view, this._projView);
+    if (this._projView.z >= 0) return false;
     // In front — project to pixels. Viewport is scaled to the live render
     // buffer; the world matrix is identity since we pass an absolute point.
+    // view × projection is composed here rather than read from
+    // scene.getTransformMatrix(), which is only refreshed by scene.render() —
+    // a HUD projecting between frames (or a headless test) would otherwise
+    // see a stale frame's matrix.
+    view.multiplyToRef(camera.getProjectionMatrix(), this._projViewProj);
     camera.viewport.toGlobalToRef(engine.getRenderWidth(), engine.getRenderHeight(), this._projViewport);
     Vector3.ProjectToRef(
       this._projWorld,
       this._tfIdentity,
-      scene.getTransformMatrix(),
+      this._projViewProj,
       this._projViewport,
       this._projOut,
     );
@@ -2698,6 +2815,8 @@ export class BabylonAdapter implements RendererAdapter {
     if (!spec) {
       this.glowLayer?.dispose();
       this.glowLayer = null;
+      this.glowRoots.clear();
+      this.stopGlowNewMeshWatch();
       return;
     }
     if (!this.glowLayer) {
@@ -2710,13 +2829,91 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   addGlowMesh(h: MeshHandle): void {
-    const mesh = this.meshes.get(h);
-    if (this.glowLayer && mesh) this.glowLayer.addIncludedOnlyMesh(mesh);
+    const node = this.meshes.get(h);
+    if (!this.glowLayer || !node) return;
+    // GlowLayer's include list is per-MESH. A primitive's handle maps to one
+    // mesh, so it enrols as before. A loaded model's handle maps to its ROOT —
+    // glTF's geometry-less `__root__`, or a clone's TransformNode — and what
+    // should bloom (a cabinet's CRT, marquee, coin slot) are the meshes UNDER
+    // it. So a handle enrols its whole subtree, and the root is remembered so
+    // meshes parented under it later join too.
+    for (const mesh of this.glowMeshesUnder(node)) this.glowLayer.addIncludedOnlyMesh(mesh as Mesh);
+    this.glowRoots.add(node);
+    this.ensureGlowNewMeshWatch();
   }
 
   removeGlowMesh(h: MeshHandle): void {
-    const mesh = this.meshes.get(h);
-    if (this.glowLayer && mesh) this.glowLayer.removeIncludedOnlyMesh(mesh);
+    const node = this.meshes.get(h);
+    if (!node) return;
+    this.glowRoots.delete(node);
+    if (this.glowRoots.size === 0) this.stopGlowNewMeshWatch();
+    if (!this.glowLayer) return;
+    for (const mesh of this.glowMeshesUnder(node)) this.glowLayer.removeIncludedOnlyMesh(mesh as Mesh);
+  }
+
+  /**
+   * The meshes the glow layer must be told about for `node` to bloom: the node
+   * itself when it is a mesh, plus every mesh under it. The include list keys
+   * by uniqueId and the render pass consults it on the RENDERING mesh, so an
+   * InstancedMesh — the glTF loader instances a repeated mesh; a non-skin
+   * clone from instantiateModel is one too — goes in twice: itself (so
+   * `hasMesh` answers for it) and its source (what actually draws). Every
+   * instance of that source blooms with it, which a row of identical
+   * cabinets wants.
+   */
+  private glowMeshesUnder(node: Node): Set<AbstractMesh> {
+    const out = new Set<AbstractMesh>();
+    const add = (mesh: AbstractMesh) => {
+      out.add(mesh);
+      if (mesh.isAnInstance) out.add((mesh as InstancedMesh).sourceMesh);
+    };
+    if (node instanceof AbstractMesh) add(node);
+    for (const child of node.getChildMeshes(false)) add(child);
+    return out;
+  }
+
+  /**
+   * Meshes can join an enrolled root AFTER addGlowMesh: a debug box or a
+   * plugin's graft (the Hand fists) is parented on later, a clone's hierarchy
+   * is built after its handle exists. Babylon announces every new mesh on
+   * `scene.onNewMeshAddedObservable`, and delivers it on a SetImmediate tick —
+   * after the constructor AND the `.parent =` that follows it in the same
+   * synchronous block — so the parent-chain walk can happen right in the
+   * callback. That is the cheap spot: one walk up the ancestry per NEW mesh,
+   * only while some root is enrolled (the listener exists only then), and
+   * nothing at all per frame. A scene-graph walk each frame would cost the
+   * same whether or not anything changed, so it stays out. (A mesh parented
+   * on a later tick still — an await between creating and parenting it — is
+   * not seen; re-enrol the root for that.)
+   */
+  private ensureGlowNewMeshWatch(): void {
+    const scene = this.scene;
+    if (this.glowNewMeshObserver || !scene) return;
+    this.glowNewMeshObserver = scene.onNewMeshAddedObservable.add((mesh) => this.enrolLateGlowMesh(mesh));
+  }
+
+  private stopGlowNewMeshWatch(): void {
+    if (!this.glowNewMeshObserver) return;
+    this.scene?.onNewMeshAddedObservable.remove(this.glowNewMeshObserver);
+    this.glowNewMeshObserver = null;
+  }
+
+  /** A mesh just joined the scene: enrol it when its ancestry runs through an enrolled root. */
+  private enrolLateGlowMesh(mesh: AbstractMesh): void {
+    const layer = this.glowLayer;
+    if (!layer || mesh.isDisposed()) return;
+    // A root disposed since it was enrolled can never parent a new mesh; drop it.
+    for (const root of this.glowRoots) if (root.isDisposed()) this.glowRoots.delete(root);
+    if (this.glowRoots.size === 0) {
+      this.stopGlowNewMeshWatch();
+      return;
+    }
+    for (let p: Node | null = mesh.parent; p; p = p.parent) {
+      if (this.glowRoots.has(p)) {
+        for (const m of this.glowMeshesUnder(mesh)) layer.addIncludedOnlyMesh(m as Mesh);
+        return;
+      }
+    }
   }
 
   setBloom(spec: BloomSpec | null): void {
@@ -2850,6 +3047,99 @@ export class BabylonAdapter implements RendererAdapter {
     return out;
   }
 
+  // ─── Spatial audio (AudioEngineV2) ───
+  initAudio(): Promise<boolean> {
+    if (this.audioInitPromise) return this.audioInitPromise;
+    this.audioInitPromise = (async () => {
+      // No WebAudio at all (jsdom, node, a locked-down browser) → a silent
+      // room. Checked up front so Babylon's engine factory never runs headlessly.
+      if (!hasWebAudio()) return false;
+      try {
+        this.audioEngine = await CreateAudioEngineAsync({ disableDefaultUI: true });
+      } catch {
+        return false;
+      }
+      // A listener requested before the engine existed is attached now.
+      if (this.pendingListenerCamera) {
+        const cam = this.pendingListenerCamera;
+        this.pendingListenerCamera = null;
+        this.attachAudioListener(cam);
+      }
+      return true;
+    })();
+    return this.audioInitPromise;
+  }
+  attachAudioListener(camera: CameraHandle): void {
+    const cam = this.resolveCamera(camera);
+    if (!cam) return;
+    if (!this.audioEngine) {
+      // Engine not up yet — remember the camera; initAudio applies it.
+      this.pendingListenerCamera = camera;
+      return;
+    }
+    this.audioEngine.listener.attach(cam);
+  }
+  async createSound(id: string, spec: SoundSpec): Promise<SoundHandle | null> {
+    if (!(await this.initAudio()) || !this.audioEngine) return null;
+    const spatial = spec.spatial;
+    try {
+      const sound = await CreateSoundAsync(
+        `Sound_${id}`,
+        spec.url,
+        {
+          loop: spec.loop ?? false,
+          autoplay: spec.autoplay ?? false,
+          volume: spec.volume ?? 1,
+          spatialEnabled: !!spatial,
+          ...(spatial
+            ? {
+                spatialDistanceModel: spatial.distanceModel ?? 'inverse',
+                spatialMinDistance: spatial.minDistance ?? 1,
+                spatialMaxDistance: spatial.maxDistance ?? 100,
+                spatialRolloffFactor: spatial.rolloff ?? 1,
+              }
+            : {}),
+        },
+        this.audioEngine,
+      );
+      const handle = this.makeHandle<SoundHandle>('sound', id);
+      this.sounds.set(handle, { sound, spatial: !!spatial });
+      return handle;
+    } catch {
+      // Fetch / decode failure — the room goes quiet, the scene stays up.
+      return null;
+    }
+  }
+  playSound(handle: SoundHandle): void {
+    const entry = this.sounds.get(handle);
+    if (!entry) return;
+    // Babylon ignores play() on a sound already Started; stop first so the
+    // call means "from the top" every time, as the interface promises.
+    if (entry.sound.state === SoundState.Started) entry.sound.stop();
+    entry.sound.play();
+  }
+  stopSound(handle: SoundHandle): void {
+    this.sounds.get(handle)?.sound.stop();
+  }
+  setSoundVolume(handle: SoundHandle, volume: number): void {
+    const entry = this.sounds.get(handle);
+    if (entry) entry.sound.volume = volume;
+  }
+  attachSoundToMesh(handle: SoundHandle, mesh: MeshHandle): void {
+    const entry = this.sounds.get(handle);
+    const node = this.meshes.get(mesh);
+    // Only a sound created with `spatial` has a panner to pin; a 2D bed has
+    // nowhere to go, so it is left alone rather than force-spatialized.
+    if (!entry || !node || !entry.spatial) return;
+    entry.sound.spatial.attach(node);
+  }
+  disposeSound(handle: SoundHandle): void {
+    const entry = this.sounds.get(handle);
+    if (!entry) return;
+    entry.sound.dispose();
+    this.sounds.delete(handle);
+  }
+
   startLoop(onFrame: (dtSeconds: number) => void): void {
     if (!this.engine || !this.scene) {
       throw new Error('BabylonAdapter.startLoop: call init() first');
@@ -2903,6 +3193,13 @@ export class BabylonAdapter implements RendererAdapter {
 
   dispose(): void {
     this.stopLoop();
+    // Audio first: sounds/listener reference scene nodes that are about to go.
+    for (const entry of this.sounds.values()) entry.sound.dispose();
+    this.sounds.clear();
+    this.audioEngine?.dispose();
+    this.audioEngine = null;
+    this.audioInitPromise = null;
+    this.pendingListenerCamera = null;
     for (const aggregate of this.physicsAggregates.values()) aggregate.dispose();
     this.physicsAggregates.clear();
     this.pendingPhysicsCreates = [];
@@ -2940,6 +3237,8 @@ export class BabylonAdapter implements RendererAdapter {
     this.dynamicTexturesByKey.clear();
     this.particleEmitters.clear();
     this.glowLayer = null;
+    this.glowRoots.clear();
+    this.glowNewMeshObserver = null;
     this.renderPipeline = null;
     this.sunDisc = null;
     this.sunObserver = null;

@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { CameraHandle, ProceduralMeshSpec, Quaternion, Vec3 } from './types';
+import type { CameraHandle, MeshHandle, ProceduralMeshSpec, Quaternion, SoundHandle, Vec3 } from './types';
 
 // @babylonjs/lite is a WebGPU-only preview engine: its bundle reads the
 // `GPUShaderStage` family of globals at MODULE-INIT (not just at device
@@ -100,6 +100,55 @@ describe('BabylonLiteAdapter (pre-device contract subset)', () => {
       adapter.getCameraPose(bogus, outPos, outQ); // unknown handle → leaves outs untouched
     }).not.toThrow();
     expect(outPos).toEqual([9, 9, 9]);
+  });
+
+  // ─── Room primitives that need NO device: the fog setter is safe before
+  // init (like setClearColor), and the audio surface is a documented set of
+  // silent stubs — Lite has no audio subsystem — so the shared contract's
+  // audio block runs here in its pre-device form (the engines skip it; see
+  // RendererAdapterContractOptions.skipAudio).
+  describe('fog + audio stubs (no device)', () => {
+    it('setFog is a safe no-op before init, for every mode and null', () => {
+      const adapter = new BabylonLiteAdapter();
+      expect(() => {
+        adapter.setFog({ mode: 'linear', color: [0.1, 0.1, 0.12], start: 5, end: 60 });
+        adapter.setFog({ mode: 'exp', color: [0.1, 0.1, 0.12], density: 0.02 });
+        adapter.setFog({ mode: 'exp2', color: [0.1, 0.1, 0.12] });
+        adapter.setFog(null);
+      }).not.toThrow();
+    });
+
+    it('initAudio resolves false (no audio subsystem) and is idempotent', async () => {
+      const adapter = new BabylonLiteAdapter();
+      expect(await adapter.initAudio()).toBe(false);
+      expect(await adapter.initAudio()).toBe(false);
+    });
+
+    it('createSound still resolves a handle; play / stop / volume / attach / dispose never throw, incl. on an unknown handle', async () => {
+      const adapter = new BabylonLiteAdapter();
+      const h = await adapter.createSound('attract', {
+        url: 'https://example.invalid/attract.ogg',
+        loop: true,
+        spatial: { minDistance: 1, maxDistance: 20 },
+      });
+      expect(h).not.toBeNull();
+      const bogusMesh = {} as unknown as MeshHandle;
+      const bogusSound = {} as unknown as SoundHandle;
+      expect(() => {
+        adapter.attachAudioListener({} as unknown as CameraHandle);
+        adapter.playSound(h as SoundHandle);
+        adapter.setSoundVolume(h as SoundHandle, 0.25);
+        adapter.attachSoundToMesh(h as SoundHandle, bogusMesh);
+        adapter.stopSound(h as SoundHandle);
+        adapter.disposeSound(h as SoundHandle);
+        adapter.disposeSound(h as SoundHandle); // idempotent
+        adapter.playSound(bogusSound);
+        adapter.stopSound(bogusSound);
+        adapter.setSoundVolume(bogusSound, 1);
+        adapter.attachSoundToMesh(bogusSound, bogusMesh);
+        adapter.disposeSound(bogusSound);
+      }).not.toThrow();
+    });
   });
 
   // ─── Phase-3: the seeded-surface displacement is PURE math (no GPU device),

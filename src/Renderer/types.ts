@@ -43,6 +43,13 @@ export type SkyboxHandle = { readonly __skybox: unique symbol };
 export type LineHandle = { readonly __line: unique symbol };
 export type ThinFieldHandle = { readonly __thinField: unique symbol };
 export type TextureHandle = { readonly __texture: unique symbol };
+/**
+ * Opaque handle for a loaded sound (see {@link RendererAdapter.createSound}).
+ * Distinct from the visual handles because a sound is neither drawn nor
+ * transformed directly — it is played, stopped, faded, and (when spatial)
+ * pinned to a mesh that carries its position.
+ */
+export type SoundHandle = { readonly __sound: unique symbol };
 
 export interface PrimitiveSpec {
   kind: 'box' | 'sphere' | 'cylinder' | 'capsule' | 'ground' | 'torus' | 'disc' | 'plane' | 'tube';
@@ -160,6 +167,46 @@ export interface PointLightSpec {
    * Distance at which the light stops contributing. 0 / omitted = engine
    * default (unbounded falloff). Bounding it is what keeps a roomful of small
    * lamps affordable.
+   */
+  range?: number;
+}
+
+/**
+ * A CONE of light from a point aimed along a direction — the pool a ceiling
+ * can-light throws on a cabinet, a stage spot, a torch beam. Where a
+ * {@link PointLightSpec} radiates in every direction, this one lights only
+ * what sits inside its aperture, so an arcade room can put a bright puddle on
+ * each machine without washing the whole floor.
+ *
+ * Same light-count caveat as point lights: each spot counts against the
+ * per-material simultaneous-light cap (see {@link MaterialSpec.maxSimultaneousLights}).
+ */
+export interface SpotLightSpec {
+  position: Vec3;
+  /** Direction the cone points along (need not be unit; adapters normalize). */
+  direction: Vec3;
+  /**
+   * Full cone aperture in RADIANS (Babylon convention — the whole cone, not
+   * the half-angle). Default π/3 (60°). Three's `SpotLight.angle` is the
+   * HALF-angle, so adapters halve it there.
+   */
+  angle?: number;
+  /**
+   * Falloff sharpness from the cone's center to its edge. Higher = a harder
+   * edge; lower = a soft pool. Default 2. Engines without an exponent knob map
+   * it onto their nearest edge-softness control (Three's `penumbra`).
+   */
+  exponent?: number;
+  /** Brightness multiplier. Default 1. */
+  intensity?: number;
+  /** Diffuse colour. Default white. */
+  diffuse?: Color;
+  /** Specular colour. Default white. */
+  specular?: Color;
+  /**
+   * Distance at which the light stops contributing. Default 10 — bounded on
+   * purpose (unlike a point light's engine default) because a spot is a LOCAL
+   * accent; an unbounded spot would leak down a whole corridor.
    */
   range?: number;
 }
@@ -615,6 +662,25 @@ export interface ModelFitSpec {
    * a fixed multiplier). The fighters fit to ~5; the freighter cars to ~12.
    */
   fitLength?: number;
+  /**
+   * Normalize the model's VERTICAL (Y) extent to this world height. The knob
+   * for standing things — an arcade cabinet, a figure, a lamp post — where
+   * "how tall is it" is the dimension an author actually knows, and where the
+   * footprint (which {@link fitLength} measures) is the wrong thing to pin.
+   * Like `fitLength` it OVERRIDES {@link ModelInstantiateSpec.scale}, and it
+   * takes precedence over `fitLength` when both are set.
+   */
+  fitHeight?: number;
+  /**
+   * After fitting, translate the model so its bounding-box MIN Y sits at the
+   * instantiate position's Y — i.e. the model stands ON the floor at
+   * `position`, whatever origin its author baked in. GLBs are authored with the
+   * origin at the feet, at the centre, or anywhere at all; this makes
+   * `position.y = floorY` mean the same thing for every one of them. Applied
+   * after the fit scale and the yaw/pitch correction, before {@link yOffset}.
+   * Default false.
+   */
+  seatOnGround?: boolean;
   /** Extra yaw (radians) so the model's nose aligns to `+Z`. Default 0. */
   yaw?: number;
   /** Extra pitch (radians). Default 0. */
@@ -834,6 +900,73 @@ export interface SunSpec {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Room-building primitives: scene fog and spatial audio. Together with the
+// spot light above, these are what an arcade room needs beyond meshes and
+// lights — atmosphere and sound — expressed generically so an ECS component
+// can build the whole room without touching an engine.
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Spec for {@link RendererAdapter.setFog}: scene-wide distance fog. Fog is what
+ * makes a room feel like it has AIR in it — far corners dim toward the fog
+ * colour instead of rendering pin-sharp — and it hides the hard edge where a
+ * large ground plane ends. One fog per scene; the mode picks the falloff curve.
+ */
+export interface FogSpec {
+  /**
+   * Falloff curve. `linear` fades between {@link start} and {@link end};
+   * `exp` fades by `e^-(d·density)`; `exp2` by `e^-(d·density)²` (clear near,
+   * then a faster roll-off — the usual pick for an interior). Engines without a
+   * separate `exp` curve (Three) treat `exp` as `exp2`.
+   */
+  mode: 'linear' | 'exp' | 'exp2';
+  /** Colour distant surfaces fade toward — normally the same as the clear colour so the horizon dissolves. */
+  color: Color;
+  /** Density for `exp` / `exp2`. Default 0.05. Ignored by `linear`. */
+  density?: number;
+  /** Distance where `linear` fog begins. Default 10. Ignored by the exp modes. */
+  start?: number;
+  /** Distance where `linear` fog is fully opaque. Default 100. Ignored by the exp modes. */
+  end?: number;
+}
+
+/**
+ * Spec for {@link RendererAdapter.createSound}: an audio clip, either a flat
+ * 2D bed (music, UI clicks) or — when {@link spatial} is present — a POSITIONAL
+ * source that pans and attenuates with distance from the listener, so a
+ * cabinet's attract-mode loop gets louder as you walk up to it.
+ */
+export interface SoundSpec {
+  /** App-resolved URL of the clip (mp3/ogg/wav — whatever the engine's loader accepts). */
+  url: string;
+  /** Loop the clip. Default false. */
+  loop?: boolean;
+  /**
+   * Start playing as soon as the clip is loaded. Default false. Browsers gate
+   * audio behind a user gesture, so an autoplay may sit silent until the first
+   * click — the adapter never throws for that.
+   */
+  autoplay?: boolean;
+  /** Gain 0..1 (may exceed 1 where the engine allows). Default 1. */
+  volume?: number;
+  /**
+   * Present = positional audio: the sound has a place in the world (set with
+   * {@link RendererAdapter.attachSoundToMesh}) and attenuates from it. Absent =
+   * a flat 2D bed heard at constant volume everywhere.
+   */
+  spatial?: {
+    /** Distance inside which the sound plays at full volume. Default 1. */
+    minDistance?: number;
+    /** Distance beyond which it attenuates no further (or, for `linear`, is silent). Default 100. */
+    maxDistance?: number;
+    /** How quickly volume falls with distance. Default 1. */
+    rolloff?: number;
+    /** WebAudio distance model. Default `'inverse'`. */
+    distanceModel?: 'linear' | 'inverse' | 'exponential';
+  };
+}
+
 export interface RendererAdapter {
   readonly kind: 'babylon' | 'three' | 'babylon-lite';
 
@@ -1029,8 +1162,23 @@ export interface RendererAdapter {
   createHemisphericLight(id: string, spec: HemisphericLightSpec): LightHandle;
   /** A positioned, distance-attenuated light — see {@link PointLightSpec}. */
   createPointLight(id: string, spec: PointLightSpec): LightHandle;
+  /** A positioned, aimed CONE of light — see {@link SpotLightSpec}. */
+  createSpotLight(id: string, spec: SpotLightSpec): LightHandle;
   /** Move an existing point light. No-op for lights that have no position. */
   setLightPosition(h: LightHandle, x: number, y: number, z: number): void;
+  /**
+   * Re-aim a spot or directional light along `(x, y, z)` (need not be unit).
+   * The runtime twin of the spec's `direction` — a spot that sweeps across a
+   * room, a sun that tracks time of day. No-op on point / hemispheric lights
+   * (they have no direction to set) and on an unknown handle; never throws.
+   */
+  setLightDirection(h: LightHandle, x: number, y: number, z: number): void;
+  /**
+   * Set a light's DIFFUSE colour at runtime, on every light kind — a neon sign
+   * that cycles hue, a lamp that flickers red on damage. `updateLightIntensity`
+   * changes how BRIGHT; this changes WHAT colour. No-op on an unknown handle.
+   */
+  setLightColor(h: LightHandle, r: number, g: number, b: number): void;
   updateLightIntensity(h: LightHandle, intensity: number): void;
   disposeLight(h: LightHandle): void;
 
@@ -1191,6 +1339,16 @@ export interface RendererAdapter {
    */
   setEnvironmentTexture(url: string, opts?: EnvironmentTextureOpts): void;
   clearEnvironmentTexture(): void;
+
+  /**
+   * Set (or, with `null`, disable) scene-wide distance fog — see
+   * {@link FogSpec}. Replaces any previous fog; there is exactly one per scene.
+   * Babylon: `scene.fogMode` + `fogColor`/`fogDensity`/`fogStart`/`fogEnd`;
+   * Three: `scene.fog = new Fog(...) | new FogExp2(...)`. Adapters without a
+   * fog pipeline record the spec. Safe to call before init (no-op until the
+   * scene exists).
+   */
+  setFog(spec: FogSpec | null): void;
 
   /**
    * Apply a physically-based material to a mesh by handle (e.g. a chrome ball).
@@ -1544,6 +1702,48 @@ export interface RendererAdapter {
    * no sun has been created.
    */
   getSunWorldPosition(out: Vec3): Vec3 | null;
+
+  // ─── Spatial audio ───
+  /**
+   * Bring up the audio engine. Idempotent — call it as often as you like; the
+   * first call does the work and later calls resolve the same answer. Resolves
+   * `false` (never rejects) when no audio engine is available: a headless /
+   * jsdom test, a build without WebAudio, an autoplay policy that refused the
+   * context. Callers treat `false` as "the room is silent" and carry on.
+   * {@link createSound} calls this itself, so an explicit call is only needed
+   * to warm the engine early (e.g. on the first user gesture).
+   */
+  initAudio(): Promise<boolean>;
+  /**
+   * Make the audio LISTENER follow this camera — the "ears" positional sounds
+   * attenuate and pan relative to. Without it, spatial sounds are judged from
+   * the world origin. May be called before {@link initAudio} resolves; the
+   * adapter applies it once the engine is up. No-op on an unknown handle.
+   */
+  attachAudioListener(camera: CameraHandle): void;
+  /**
+   * Load a clip (see {@link SoundSpec}) and register it under `id`. Resolves
+   * `null` — never rejects — when the file can't be fetched/decoded or there is
+   * no audio engine, so a missing sound degrades to silence instead of taking
+   * the scene down. Every sound method below accepts a `null`-derived or
+   * unknown handle without throwing, so a caller can pass the result straight
+   * through.
+   */
+  createSound(id: string, spec: SoundSpec): Promise<SoundHandle | null>;
+  /** Start (or restart from the top) a loaded sound. No-op on an unknown handle. */
+  playSound(handle: SoundHandle): void;
+  /** Stop a playing sound. No-op if it isn't playing / unknown handle. */
+  stopSound(handle: SoundHandle): void;
+  /** Set a sound's gain at runtime (fade a loop down as a menu opens). No-op on an unknown handle. */
+  setSoundVolume(handle: SoundHandle, volume: number): void;
+  /**
+   * Pin a POSITIONAL sound to a mesh so it tracks that mesh every frame —
+   * the attract-mode loop rides its cabinet. No-op for a non-spatial (2D) sound
+   * and on an unknown handle.
+   */
+  attachSoundToMesh(handle: SoundHandle, mesh: MeshHandle): void;
+  /** Stop, release and forget a sound. Idempotent; no-op on an unknown handle. */
+  disposeSound(handle: SoundHandle): void;
 
   startLoop(onFrame: (dtSeconds: number) => void): void;
   stopLoop(): void;

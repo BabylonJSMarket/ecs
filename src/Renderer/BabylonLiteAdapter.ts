@@ -79,6 +79,10 @@ import type {
   BloomSpec,
   MeshRenderOptions,
   SunSpec,
+  SpotLightSpec,
+  FogSpec,
+  SoundSpec,
+  SoundHandle,
 } from './types';
 
 /** Babylon Lite mesh-like node (Mesh extends SceneNode; both carry transforms). */
@@ -168,7 +172,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private meshes = new Map<MeshHandle, LiteMesh>();
   /** Parallel meshId → mesh lookup used by physics/animation methods. */
   private meshesByMeshId = new Map<string, LiteMesh>();
-  private lights = new Map<LightHandle, BLNS.DirectionalLight | BLNS.HemisphericLight | BLNS.PointLight>();
+  private lights = new Map<LightHandle, BLNS.DirectionalLight | BLNS.HemisphericLight | BLNS.PointLight | BLNS.SpotLight>();
+  /** Handles issued by the (silent) createSound stub — see the audio section. */
+  private sounds = new Set<SoundHandle>();
   private cameras = new Map<CameraHandle, { camera: BLNS.ArcRotateCamera; detach?: () => void }>();
   /**
    * Free 6-DOF perspective cameras (chase / flight), kept separate from the
@@ -809,6 +815,23 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return hgt > 0 ? w / hgt : 1;
   }
 
+  // ─── Fog ───
+  setFog(spec: FogSpec | null): void {
+    const scene = this.scene;
+    if (!scene) return; // safe before init, like setClearColor
+    // Lite's mode numbering matches Babylon's: 0 none, 1 exp, 2 exp2, 3 linear.
+    // Disabling goes through setFog with mode 0 (not `scene.fog = null`) so the
+    // scene-UBO contributor it registered keeps writing a consistent "none".
+    const mode: 0 | 1 | 2 | 3 = !spec ? 0 : spec.mode === 'exp' ? 1 : spec.mode === 'exp2' ? 2 : 3;
+    BL.setFog(scene, {
+      mode,
+      density: spec?.density ?? 0.05,
+      start: spec?.start ?? 10,
+      end: spec?.end ?? 100,
+      color: spec ? [spec.color[0], spec.color[1], spec.color[2]] : [0, 0, 0],
+    });
+  }
+
   // ─── Lights ───
   createDirectionalLight(id: string, spec: DirectionalLightSpec): LightHandle {
     const scene = this.requireScene();
@@ -876,9 +899,46 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.lights.set(handle, light);
     return handle;
   }
+  createSpotLight(id: string, spec: SpotLightSpec): LightHandle {
+    const scene = this.requireScene();
+    const diffuse = spec.diffuse ?? [1, 1, 1];
+    const specular = spec.specular ?? [1, 1, 1];
+    // Lite's spot takes the full aperture + exponent like Babylon's. Position
+    // AND direction cross the RH→LH seam, so both negate Z.
+    const light = BL.createSpotLight(
+      [spec.position[0], spec.position[1], -spec.position[2]],
+      [spec.direction[0], spec.direction[1], -spec.direction[2]],
+      spec.angle ?? Math.PI / 3,
+      spec.exponent ?? 2,
+      spec.intensity ?? 1,
+    );
+    light.diffuse = [diffuse[0], diffuse[1], diffuse[2]];
+    light.specular = [specular[0], specular[1], specular[2]];
+    light.range = spec.range ?? 10;
+    BL.addToScene(scene, light);
+
+    const handle = this.makeHandle<LightHandle>('spotLight', id);
+    this.lights.set(handle, light);
+    return handle;
+  }
   setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
     const light = this.lights.get(h) as { position?: [number, number, number] } | undefined;
     if (light?.position) light.position = [x, y, -z];
+  }
+  setLightDirection(h: LightHandle, x: number, y: number, z: number): void {
+    const light = this.lights.get(h);
+    // Only the aimed kinds (spot, directional) are re-aimed; a point /
+    // hemispheric light is left alone. Z negated: RH→LH.
+    if (light && (light.lightType === 'spot' || light.lightType === 'directional')) {
+      light.direction.set(x, y, -z);
+    }
+  }
+  setLightColor(h: LightHandle, r: number, g: number, b: number): void {
+    const light = this.lights.get(h);
+    if (!light) return;
+    // Lite names the hemispheric light's diffuse `diffuseColor`; the rest use `diffuse`.
+    if (light.lightType === 'hemispheric') light.diffuseColor = [r, g, b];
+    else light.diffuse = [r, g, b];
   }
   updateLightIntensity(h: LightHandle, intensity: number): void {
     const light = this.lights.get(h);
@@ -1895,6 +1955,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
   // scene frame graph; this provisional adapter doesn't stand up that graph, so
   // glow/bloom record their config + whitelist (mirroring the selective-glow
   // semantics: empty whitelist, cleared on disable) without yet compositing.
+  // A handle stands for its whole subtree in that whitelist — a model root
+  // included — the same root-level treatment setModelVisible gives it; the
+  // engines that composite (Babylon/Three) walk the descendants themselves.
   // setMeshEmissiveById / setMeshRenderingOptions act for real on the material /
   // mesh fields Lite does expose.
   setGlowLayer(spec: GlowSpec | null): void {
@@ -2016,6 +2079,30 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Loop / resize / dispose ───
+  // ─── Spatial audio — silent stubs ───
+  // @babylonjs/lite is a WebGPU render preview with no audio subsystem (the
+  // AudioEngineV2 lives in @babylonjs/core, which Lite deliberately does not
+  // pull in). The surface is kept so a scene authored against the full adapter
+  // loads and runs here — silently: initAudio reports "no engine", createSound
+  // still hands back a handle so callers needn't special-case Lite, and the
+  // playback calls accept that handle and do nothing.
+  initAudio(): Promise<boolean> {
+    return Promise.resolve(false);
+  }
+  attachAudioListener(_camera: CameraHandle): void {}
+  createSound(id: string, _spec: SoundSpec): Promise<SoundHandle | null> {
+    const handle = this.makeHandle<SoundHandle>('sound', id);
+    this.sounds.add(handle);
+    return Promise.resolve(handle);
+  }
+  playSound(_handle: SoundHandle): void {}
+  stopSound(_handle: SoundHandle): void {}
+  setSoundVolume(_handle: SoundHandle, _volume: number): void {}
+  attachSoundToMesh(_handle: SoundHandle, _mesh: MeshHandle): void {}
+  disposeSound(handle: SoundHandle): void {
+    this.sounds.delete(handle);
+  }
+
   startLoop(onFrame: (dtSeconds: number) => void): void {
     const engine = this.requireEngine();
     const scene = this.requireScene();
@@ -2090,6 +2177,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.meshes.clear();
     this.meshesByMeshId.clear();
     this.lights.clear();
+    this.sounds.clear();
     this.cameras.clear();
     this.perspectiveCameras.clear();
     this.activePerspective = undefined;
