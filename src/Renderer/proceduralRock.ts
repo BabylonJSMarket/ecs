@@ -24,6 +24,74 @@ export function asteroidStretch(seed: number): [number, number, number] {
 /** Total seconds a transient ripple lives before it's swapped out. */
 export const ASTEROID_RIPPLE_DURATION = 1.2;
 
+/** One sweep answers both questions, so they share a cache. */
+interface RockReach {
+  /** Farthest surface point from centre, as a multiple of nominal radius. */
+  max: number;
+  /** Per-axis half-extents of the surface, as multiples of nominal radius. */
+  extents: readonly [number, number, number];
+}
+const reachCache = new Map<number, RockReach>();
+
+function rockReach(seed: number): RockReach {
+  const hit = reachCache.get(seed);
+  if (hit !== undefined) return hit;
+
+  const shape = asteroidShape(seed);
+  const out: [number, number, number] = [0, 0, 0];
+  let max = 0;
+  let ex = 0, ey = 0, ez = 0;
+  // 64 x 128 over the sphere: dense enough that a finer sweep moves the answer
+  // by well under a percent, cheap enough to run per rock at field build.
+  const RINGS = 64;
+  for (let i = 0; i <= RINGS; i++) {
+    const phi = (i / RINGS) * Math.PI;
+    const sinPhi = Math.sin(phi);
+    const ny = Math.cos(phi);
+    for (let j = 0; j < RINGS * 2; j++) {
+      const theta = (j / (RINGS * 2)) * Math.PI * 2;
+      asteroidSurfacePosition(shape, sinPhi * Math.cos(theta), ny, sinPhi * Math.sin(theta), 1, out);
+      const d = Math.hypot(out[0], out[1], out[2]);
+      if (d > max) max = d;
+      const ax = Math.abs(out[0]), ay = Math.abs(out[1]), az = Math.abs(out[2]);
+      if (ax > ex) ex = ax;
+      if (ay > ey) ey = ay;
+      if (az > ez) ez = az;
+    }
+  }
+  const reach: RockReach = { max, extents: [ex, ey, ez] };
+  reachCache.set(seed, reach);
+  return reach;
+}
+
+/**
+ * How far a seeded rock's surface actually reaches, as a multiple of its nominal
+ * radius.
+ *
+ * A rock is NOT its radius. `asteroidSurfacePosition` displaces the sphere by
+ * lobes, coarse and fine noise, then stretches the result, and the far side of
+ * that lands anywhere from about 1.7x to 3x the radius depending on the seed.
+ * Code that places rocks or bounds them has to ask for the real number: assuming
+ * 1x is what let a "radius 360" boulder render 1,950 units across and swallow a
+ * player its own spawn exclusion had carefully kept 660 units clear.
+ *
+ * Sampled rather than derived because the displacement is a sum of lobes whose
+ * maximum has no closed form; the sweep is deterministic, so the answer is a
+ * property of the seed, not of when you asked.
+ */
+export function asteroidMaxReach(seed: number): number {
+  return rockReach(seed).max;
+}
+
+/**
+ * The same measurement per axis — what a bounding box has to be to actually
+ * contain the rock you can see. `asteroidStretch` alone is not that box: it
+ * scales the sphere but says nothing about the lobes and noise layered on top.
+ */
+export function asteroidReachExtents(seed: number): readonly [number, number, number] {
+  return rockReach(seed).extents;
+}
+
 /**
  * Precomputed coefficients for a seeded asteroid's surface. The mesh builder
  * displaces the icosphere vertices through these; `sampleProceduralSurface`

@@ -54,6 +54,8 @@ export {
   asteroidStretch,
   asteroidShape,
   asteroidSurfacePosition,
+  asteroidMaxReach,
+  asteroidReachExtents,
   ASTEROID_RIPPLE_DURATION,
   type AsteroidShape,
 } from './Renderer/proceduralRock';
