@@ -12,6 +12,8 @@ import {
   asteroidStretch,
   asteroidSurfacePosition,
   ASTEROID_RIPPLE_DURATION,
+  asteroidMaxReach,
+  asteroidReachExtents,
   clamp01,
   hash,
 } from './proceduralRock';
@@ -135,6 +137,74 @@ describe('proceduralRock — seeded surface math', () => {
       asteroidSurfacePosition(withCount0, 0, 0, 1, 100, a);
       asteroidSurfacePosition(noRipples, 0, 0, 1, 100, b);
       expect(a).toEqual(b); // rippleCount 0 → the loop never runs
+    });
+  });
+
+  describe('reach — how far the surface really goes', () => {
+    /** Brute-force the same question the memoised sweep answers. */
+    function sweep(seed: number) {
+      const shape = asteroidShape(seed);
+      const out: [number, number, number] = [0, 0, 0];
+      let max = 0;
+      let ex = 0, ey = 0, ez = 0;
+      const RINGS = 64;
+      for (let i = 0; i <= RINGS; i++) {
+        const phi = (i / RINGS) * Math.PI;
+        const sinPhi = Math.sin(phi);
+        const ny = Math.cos(phi);
+        for (let j = 0; j < RINGS * 2; j++) {
+          const theta = (j / (RINGS * 2)) * Math.PI * 2;
+          asteroidSurfacePosition(shape, sinPhi * Math.cos(theta), ny, sinPhi * Math.sin(theta), 1, out);
+          max = Math.max(max, Math.hypot(out[0], out[1], out[2]));
+          ex = Math.max(ex, Math.abs(out[0]));
+          ey = Math.max(ey, Math.abs(out[1]));
+          ez = Math.max(ez, Math.abs(out[2]));
+        }
+      }
+      return { max, extents: [ex, ey, ez] as [number, number, number] };
+    }
+
+    it('reports the farthest surface point for a seed', () => {
+      for (const seed of [1, 42, 1337]) {
+        expect(asteroidMaxReach(seed)).toBeCloseTo(sweep(seed).max, 10);
+      }
+    });
+
+    it('always reaches well past the nominal radius — a rock is not its sphere', () => {
+      // This is the whole reason the function exists: code that bounds or spaces
+      // rocks by `radius` is out by this factor, and it is never close to 1.
+      for (const seed of [1, 7, 42, 1337, 2027, 9999]) {
+        expect(asteroidMaxReach(seed)).toBeGreaterThan(1.5);
+        expect(asteroidMaxReach(seed)).toBeLessThan(3.5);
+      }
+    });
+
+    it('reports per-axis extents that bound the same surface', () => {
+      for (const seed of [7, 2027]) {
+        const { extents } = sweep(seed);
+        const got = asteroidReachExtents(seed);
+        expect(got[0]).toBeCloseTo(extents[0], 10);
+        expect(got[1]).toBeCloseTo(extents[1], 10);
+        expect(got[2]).toBeCloseTo(extents[2], 10);
+      }
+    });
+
+    it('no axis extent exceeds the scalar reach', () => {
+      for (const seed of [3, 88, 5150]) {
+        const max = asteroidMaxReach(seed);
+        for (const e of asteroidReachExtents(seed)) expect(e).toBeLessThanOrEqual(max + 1e-9);
+      }
+    });
+
+    it('memoises: the second answer is the identical object, not a re-sweep', () => {
+      const first = asteroidReachExtents(4242);
+      expect(asteroidReachExtents(4242)).toBe(first);
+      // The scalar shares that cache entry, so it costs nothing after the first ask.
+      expect(asteroidMaxReach(4242)).toBe(asteroidMaxReach(4242));
+    });
+
+    it('is a property of the seed — different seeds, different rocks', () => {
+      expect(asteroidMaxReach(11)).not.toBeCloseTo(asteroidMaxReach(12), 3);
     });
   });
 });
