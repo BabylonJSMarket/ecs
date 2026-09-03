@@ -3147,16 +3147,24 @@ export class BabylonAdapter implements RendererAdapter {
     this.onFrame = onFrame;
     this.lastTime = performance.now();
     this.engine.runRenderLoop(() => {
-      if (!this.scene?.isReady()) return;
+      if (!this.scene) return;
       const now = performance.now();
       const dt = (now - this.lastTime) / 1000;
       this.lastTime = now;
+      // The simulation ticks unconditionally. It used to be gated on
+      // `scene.isReady()`, which sounds harmless and is not: `isReady()` is
+      // false while ANY mesh's material is still compiling, and a mesh that
+      // never reports ready — a thin-instance field carrying a MultiMaterial
+      // will do it — then freezes the game outright. The twin-stick arena
+      // stopped dead at 4 enemies that way, rendering one static frame
+      // forever. Whether a material has finished compiling is the renderer's
+      // problem; `scene.render()` already skips what isn't ready.
       this.onFrame?.(dt);
       // Babylon's scene.render() throws "No camera defined" when no camera
       // has been registered yet. Headless contract tests and the brief
       // window before a Camera component spawns both hit this — skip the
-      // frame instead of crashing the loop.
-      if (this.scene!.activeCamera) this.scene!.render();
+      // draw instead of crashing the loop.
+      if (this.scene.activeCamera) this.scene.render();
     });
   }
 
