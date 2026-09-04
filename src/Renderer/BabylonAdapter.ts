@@ -175,7 +175,10 @@ export class BabylonAdapter implements RendererAdapter {
    * methods can find the mesh by the same id used at `createMesh(id, ...)`
    * without iterating the handle map.
    */
-  private meshesByMeshId = new Map<string, Mesh>();
+  // TransformNode, not Mesh: a glTF clone's root is a bare TransformNode, and
+  // `getMeshRoot` already advertises `TransformNode | null`. The narrower type
+  // was only ever true for the primitive paths.
+  private meshesByMeshId = new Map<string, TransformNode>();
   /**
    * Animation groups scoped per loaded meshId. Populated by `loadMesh`. The
    * outer Map's key is the string id the caller passed (matches `meshId`
@@ -1219,6 +1222,14 @@ export class BabylonAdapter implements RendererAdapter {
     // (which touch .position/.rotation — present on TransformNode) drive it.
     const handle = this.makeHandle<MeshHandle>('model', id);
     this.meshes.set(handle, root as unknown as Mesh);
+    // Index by meshId as well, exactly as `loadMesh` does. `getMeshRoot(id)` is
+    // the host accessor adapter PLUGINS reach the hull through, and without this
+    // line it answered null for every model instantiated from a template — which
+    // is how every GLB ship in the game is built. The plugins failed silently,
+    // because "no root" is indistinguishable from "nothing to mark": ShipDamageFX
+    // put no craters on any hull, shed no wings, and lit no damaged parts, on
+    // ships whose whole point is taking visible damage.
+    this.meshesByMeshId.set(id, root);
 
     // Register THIS clone's groups under `id` so playAnimation(id, clip) resolves
     // to its own groups and never grabs another enemy's. Stop them at rest.
@@ -2942,9 +2953,18 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
-    const mesh = this.meshesByMeshId.get(meshId);
-    if (!mesh) return;
-    const mat = mesh.material as unknown as {
+    const node = this.meshesByMeshId.get(meshId);
+    if (!node) return;
+    // A glTF clone's root is a bare TransformNode carrying no material of its
+    // own; the geometry hangs beneath it. Fall through to the first child that
+    // actually has one so a loaded model can still be tinted by id.
+    type Materialed = { material?: unknown };
+    const owner: Materialed =
+      (node as Materialed).material !== undefined
+        ? (node as Materialed)
+        : ((node.getChildMeshes?.(false) ?? []).find((c) => c.material) as Materialed | undefined) ??
+          (node as Materialed);
+    const mat = owner.material as unknown as {
       emissiveColor?: Color3;
       unlit?: boolean;
     } | null;

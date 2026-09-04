@@ -253,6 +253,34 @@ describe('BabylonAdapter model import — a glTF is not mirrored', () => {
     expect(minX).toBeCloseTo(0, 4);
     expect(det).toBeGreaterThan(0);
   });
+
+  /**
+   * `getMeshRoot` is the host accessor adapter PLUGINS reach a hull through —
+   * it is how ShipDamageFX finds a ship to put craters on, shed a wing from, or
+   * pulse a damaged part. `loadMesh` indexed its root and `instantiateModel`
+   * did not, so it answered null for every model built from a template, which
+   * is how every GLB ship in the shooter is made. Nothing threw: "no root" is
+   * indistinguishable from "nothing to mark", so the damage effects simply
+   * never happened on the ships built to show damage.
+   */
+  it('instantiateModel indexes the clone root, so getMeshRoot finds it like loadMesh does', async () => {
+    const adapter = headless();
+    const url = cabinetGlbDataUrl();
+    await adapter.loadModelTemplate(url);
+    adapter.instantiateModel('ship-7', url, { position: [0, 0, 0] });
+
+    const root = adapter.getMeshRoot('ship-7');
+    expect(root).not.toBeNull();
+    // And it is the real subtree, not an empty placeholder — a plugin walks
+    // these children looking for the part it was asked to mark.
+    expect(root!.getChildMeshes(false).length).toBeGreaterThan(0);
+  });
+
+  it('loadMesh indexes its root too — the two paths agree', async () => {
+    const adapter = headless();
+    await adapter.loadMesh('ship-8', { url: cabinetGlbDataUrl() });
+    expect(adapter.getMeshRoot('ship-8')).not.toBeNull();
+  });
 });
 
 /**
