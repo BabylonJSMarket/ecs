@@ -1629,6 +1629,25 @@ export function runRendererAdapterContract(
         expect(Number.isFinite(out[0]) && Number.isFinite(out[1]) && Number.isFinite(out[2])).toBe(true);
       });
 
+      it('setSunOccluded is safe before a sun exists, and round-trips after', () => {
+        // Occlusion is answered in the world by whoever knows where the rocks
+        // are, and the answer lands here every frame — including on the frames
+        // before the sun has been built. It must not throw on those.
+        expect(() => adapter.setSunOccluded(true)).not.toThrow();
+        adapter.createPerspectiveCamera('cam', { fov: Math.PI / 3, near: 0.1, far: 200000 });
+        adapter.createSun('sun', sunSpec);
+        expect(() => {
+          adapter.setSunOccluded(true);
+          adapter.setSunOccluded(false);
+        }).not.toThrow();
+        // Hiding the sun must not lose track of WHERE it is — the off-screen sun
+        // indicator keeps pointing at it while it is behind a rock.
+        const out: Vec3 = [0, 0, 0];
+        adapter.setSunOccluded(true);
+        expect(adapter.getSunWorldPosition(out)).toBe(out);
+        expect(out.every((n) => Number.isFinite(n))).toBe(true);
+      });
+
       it('a starburst sun still reports a finite disc position, with or without a glow layer', () => {
         // The star is internal — nothing in the interface hands it back. What
         // this pins is that the optional spec field cannot take an adapter down:

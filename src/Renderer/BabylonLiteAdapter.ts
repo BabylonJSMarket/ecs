@@ -2102,6 +2102,11 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return [0, 0, 0];
   }
 
+  setSunOccluded(occluded: boolean): void {
+    // Only the disc — Lite draws no starburst (see createSun).
+    if (this.sun) this.sun.disc.visible = !occluded;
+  }
+
   getSunWorldPosition(out: Vec3): Vec3 | null {
     if (!this.sun) return null;
     const p = this.sun.disc.position;

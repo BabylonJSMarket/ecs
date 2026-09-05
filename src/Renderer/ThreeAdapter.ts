@@ -3212,6 +3212,12 @@ export class ThreeAdapter implements RendererAdapter {
     this.sun = undefined;
   }
 
+  setSunOccluded(occluded: boolean): void {
+    if (!this.sun) return;
+    this.sun.disc.visible = !occluded;
+    if (this.sun.star) this.sun.star.visible = !occluded;
+  }
+
   getSunWorldPosition(out: Vec3): Vec3 | null {
     if (!this.sun || !this.THREE) return null;
     const v = this.sun.disc.getWorldPosition(this._sunVec ??= new this.THREE.Vector3());

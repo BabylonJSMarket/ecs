@@ -988,6 +988,14 @@ export class MockRendererAdapter implements RendererAdapter {
     this.record('createSun', id, spec);
     return h;
   }
+  /** Whether the sun is currently hidden. Tests read this instead of a mesh. */
+  sunOccluded = false;
+
+  setSunOccluded(occluded: boolean): void {
+    this.sunOccluded = occluded;
+    this.record('setSunOccluded', occluded);
+  }
+
   getSunWorldPosition(out: Vec3): Vec3 | null {
     this.record('getSunWorldPosition');
     if (!this.sunWorldPosition) return null;

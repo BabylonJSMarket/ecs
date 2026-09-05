@@ -3262,6 +3262,14 @@ export class BabylonAdapter implements RendererAdapter {
     return handle;
   }
 
+  setSunOccluded(occluded: boolean): void {
+    // setEnabled, not visibility/alpha: the mesh has to leave the render loop
+    // entirely, or the glow layer keeps drawing it into its own buffer and the
+    // halo goes on bleeding over the rock that is supposedly hiding it.
+    this.sunDisc?.setEnabled(!occluded);
+    this.sunStarburst?.setEnabled(!occluded);
+  }
+
   getSunWorldPosition(out: Vec3): Vec3 | null {
     if (!this.sunDisc) return null;
     const p = this.sunDisc.position;

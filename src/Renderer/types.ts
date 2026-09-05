@@ -1776,6 +1776,25 @@ export interface RendererAdapter {
    * no sun has been created.
    */
   getSunWorldPosition(out: Vec3): Vec3 | null;
+  /**
+   * Hide or show the sun's disc and star — what a caller does when it has
+   * worked out that something is between the camera and the sun.
+   *
+   * Depth alone does not cover this. The disc IS depth-tested and disappears
+   * behind a rock correctly; the GLOW LAYER around it does not, because a glow
+   * pass re-renders its whitelisted meshes into a separate buffer and ADDS the
+   * blurred result over the finished frame. The halo therefore spills across
+   * whatever is in front, and a sun behind an asteroid reads as a sun painted on
+   * top of it. The lens flare has the same problem for the same reason: it
+   * derives from a target containing only the disc, where no occluder exists.
+   *
+   * So occlusion is answered in the WORLD, by whoever knows where the rocks are,
+   * and the answer arrives here. Taking the meshes out of the scene takes them
+   * out of the glow pass and empties the flare's target in one move.
+   *
+   * No-op when there is no sun.
+   */
+  setSunOccluded(occluded: boolean): void;
 
   // ─── Spatial audio ───
   /**
