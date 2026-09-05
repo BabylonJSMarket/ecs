@@ -1077,6 +1077,20 @@ export class BabylonAdapter implements RendererAdapter {
   getMeshRoot(meshId: string): TransformNode | null {
     return this.meshesByMeshId.get(meshId) ?? null;
   }
+  /**
+   * The sun's emissive disc, for a plugin that must render the sun BY ITSELF.
+   *
+   * A screen-space lens flare has to derive its ghosts from the sun alone. Given
+   * the composited scene it cannot: every bright pixel qualifies, so engine
+   * plumes and sunlit rock throw ghosts too, and no brightness threshold
+   * separates them — set it high enough to exclude a lit asteroid and the sun
+   * (clamped to white like everything else) is excluded with it. Handing the
+   * plugin the disc lets it render that one mesh into its own black target and
+   * flare from a picture containing nothing else.
+   */
+  getSunDisc(): Mesh | null {
+    return this.sunDisc;
+  }
   /** Merge animation groups into a mesh's clip registry so `playAnimation(meshId,
    *  clip)` finds them. Used by plugins that produce clips (e.g. retargeting). */
   addAnimationGroups(meshId: string, entries: Iterable<[string, AnimationGroup]>): void {
