@@ -566,3 +566,96 @@ describe('BabylonAdapter sun — one sun, replaced rather than stacked', () => {
     expect(stars(adapter)).toHaveLength(0);
   });
 });
+
+describe('BabylonAdapter rock field — one material, not one per rock', () => {
+  function headless(): BabylonAdapter {
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    adapter.scene.useRightHandedSystem = true;
+    return adapter;
+  }
+  const rockMats = (a: BabylonAdapter) =>
+    a.scene!.materials.filter((m) => m.name.startsWith('rock-shared-'));
+
+  function field(adapter: BabylonAdapter, n: number): MeshHandle[] {
+    const out: MeshHandle[] = [];
+    for (let i = 0; i < n; i++) {
+      out.push(adapter.createProceduralMesh(`rock-${i}`, {
+        shape: 'asteroid', size: [40, 40, 40], seed: i, color: [0.5, 0.45, 0.4],
+        subdivisions: 2,
+      }));
+    }
+    return out;
+  }
+
+  it('a whole field shares ONE material', () => {
+    // Babylon batches by material, so a material per rock is a full state change
+    // and a uniform upload per rock, every frame, on meshes that deliberately
+    // never frustum-cull. That is what a 120-rock field was paying.
+    const adapter = headless();
+    const handles = field(adapter, 40);
+    expect(rockMats(adapter)).toHaveLength(1);
+    const first = adapter.scene!.getMeshByName('rock-0')!.material;
+    for (const name of ['rock-7', 'rock-39']) {
+      expect(adapter.scene!.getMeshByName(name)!.material).toBe(first);
+    }
+    expect(handles).toHaveLength(40);
+  });
+
+  it('each rock still gets its own hue, carried in the vertex colours', () => {
+    // The variation has to survive losing the per-rock material, or the field
+    // turns into forty identical grey balls.
+    const adapter = headless();
+    field(adapter, 4);
+    const tintOf = (name: string) => {
+      const c = adapter.scene!.getMeshByName(name)!.getVerticesData('color')!;
+      return [c[0], c[1], c[2]];
+    };
+    expect(tintOf('rock-0')).not.toEqual(tintOf('rock-1'));
+    // Uniform across one rock's own vertices — it is a tint, not a gradient.
+    const c = adapter.scene!.getMeshByName('rock-2')!.getVerticesData('color')!;
+    expect([c[4], c[5], c[6]]).toEqual([c[0], c[1], c[2]]);
+    // And the albedo is left white so the vertex colour is what shows.
+    const mat = rockMats(adapter)[0] as unknown as { albedoColor: { r: number } };
+    expect(mat.albedoColor.r).toBe(1);
+  });
+
+  it('disposing one rock does not strip the material off the others', () => {
+    // disposeMesh disposes a mesh's material. Sharing one without guarding that
+    // means the first rock destroyed takes the whole field down to Babylon's
+    // default grey — and nothing errors.
+    const adapter = headless();
+    const handles = field(adapter, 5);
+    adapter.disposeMesh(handles[0]);
+    const survivor = adapter.scene!.getMeshByName('rock-3')!.material!;
+    // A disposed material is pulled out of scene.materials — that is the check,
+    // since Babylon materials carry no isDisposed().
+    expect(adapter.scene!.materials).toContain(survivor);
+    expect(rockMats(adapter)).toHaveLength(1);
+  });
+
+  it('still disposes a material that only one mesh wears', () => {
+    // The guard must not leak the ordinary case.
+    const adapter = headless();
+    // A material spec, or the primitive gets no material to dispose.
+    const solo = adapter.createMesh('solo', { kind: 'sphere' }, { diffuse: [1, 0, 0] });
+    const mat = adapter.scene!.getMeshByName('solo_sphere')!.material!;
+    expect(adapter.scene!.materials).toContain(mat);
+    adapter.disposeMesh(solo);
+    expect(adapter.scene!.materials).not.toContain(mat);
+  });
+
+  it('oil blobs and drops get their own shared material, not the asteroid one', () => {
+    const adapter = headless();
+    field(adapter, 3);
+    adapter.createProceduralMesh('blob', {
+      shape: 'oil-blob', size: [50, 50, 50], seed: 1, color: [0.3, 0.28, 0.25],
+    });
+    adapter.createProceduralMesh('drop', {
+      shape: 'asteroid-drop', size: [2, 2, 2], color: [0.4, 0.3, 0.2],
+    });
+    // Three kinds, three materials — for any number of rocks.
+    expect(rockMats(adapter)).toHaveLength(3);
+  });
+});

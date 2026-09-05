@@ -670,7 +670,11 @@ export class BabylonAdapter implements RendererAdapter {
           this.bonesByMeshId.delete(id);
         }
       }
-      mesh.material?.dispose();
+      // A SHARED material outlives the mesh wearing it — see sharedRockMaterial.
+      // Disposing it with the first rock to die would strip the whole field.
+      if (mesh.material && !sharedMaterialRegistry.has(mesh.material)) {
+        mesh.material.dispose();
+      }
       mesh.dispose();
       this.meshes.delete(h);
     }
@@ -3535,6 +3539,73 @@ function wrapAddressMode(wrap?: 'wrap' | 'clamp' | 'mirror'): number {
  * the SAME {@link asteroidSurfacePosition} the sampler uses, so geometry and
  * collision agree. The shared-material / ripple-plugin path is Phase-3b.
  */
+/**
+ * Rock materials are SHARED, one per scene per kind, and the per-rock tint rides
+ * in the mesh's vertex colour buffer instead.
+ *
+ * A material per rock is the reflex and it is what makes the field expensive:
+ * Babylon batches by material, so 120 distinct PBRMaterials are 120 full state
+ * changes and 120 uniform uploads every frame, on meshes that deliberately never
+ * frustum-cull. One material submits the whole field back to back. The reference
+ * renderer worked this way from the start ("we avoid creating N materials and the
+ * GPU can submit asteroids back-to-back without rebinding material state") and the
+ * port lost it.
+ *
+ * Vertex colour is what buys the variation back: PBR multiplies it into
+ * surfaceAlbedo under the VERTEXCOLOR define, so every rock keeps its own hue
+ * with the albedo left white and nothing per-rock on the material at all.
+ */
+const sharedRockMaterials = new WeakMap<Scene, Map<string, PBRMaterial>>();
+
+/**
+ * Materials that outlive any one mesh. `disposeMesh` consults this before
+ * disposing a mesh's material — without it the first rock to die would take the
+ * whole field's material with it, and the rest would silently fall back to
+ * Babylon's default grey.
+ */
+const sharedMaterialRegistry = new WeakSet<object>();
+
+function sharedRockMaterial(scene: Scene, kind: 'asteroid' | 'oil-blob' | 'asteroid-drop'): PBRMaterial {
+  let byKind = sharedRockMaterials.get(scene);
+  if (!byKind) {
+    byKind = new Map();
+    sharedRockMaterials.set(scene, byKind);
+  }
+  const hit = byKind.get(kind);
+  if (hit) return hit;
+
+  const mat = new PBRMaterial(`rock-shared-${kind}-mat`, scene);
+  // White, because the colour comes from the vertex buffer.
+  mat.albedoColor = new Color3(1, 1, 1);
+  mat.metallic = 1.0;
+  mat.roughness = 1.0;
+  if (kind === 'asteroid') {
+    mat.environmentIntensity = 0.6;
+    mat.emissiveColor = new Color3(0.045, 0.04, 0.035);
+  } else if (kind === 'oil-blob') {
+    mat.environmentIntensity = 0.7;
+    mat.emissiveColor = new Color3(0.035, 0.032, 0.028);
+  } else {
+    mat.environmentIntensity = 0.7;
+  }
+  byKind.set(kind, mat);
+  sharedMaterialRegistry.add(mat);
+  return mat;
+}
+
+/** Flood every vertex of `mesh` with one colour — the per-rock tint. */
+function paintVertexTint(mesh: Mesh, r: number, g: number, b: number): void {
+  const count = mesh.getTotalVertices();
+  const colors = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) {
+    colors[i * 4] = r;
+    colors[i * 4 + 1] = g;
+    colors[i * 4 + 2] = b;
+    colors[i * 4 + 3] = 1;
+  }
+  mesh.setVerticesData(VertexBuffer.ColorKind, colors, false);
+}
+
 function buildAsteroid(
   scene: Scene, id: string, radius: number, color: Color3, seed: number,
   cutAxis?: Vec3, cutDepth?: number, subdivisions = 14,
@@ -3552,17 +3623,13 @@ function buildAsteroid(
   // Asteroids are huge (up to ~400u) and few — never cull them; per-pixel GPU
   // clipping is cheaper than risking a half-clipped mountain.
   mesh.alwaysSelectAsActiveMesh = true;
-  const mat = new PBRMaterial(`${id}-mat`, scene);
-  mat.albedoColor = new Color3(
+  paintVertexTint(
+    mesh,
     clamp01(color.r + (rockHash(seed, 6) - 0.5) * 0.08),
     clamp01(color.g + (rockHash(seed, 7) - 0.5) * 0.08),
     clamp01(color.b + (rockHash(seed, 8) - 0.5) * 0.08),
   );
-  mat.metallic = 1.0;
-  mat.roughness = 1.0;
-  mat.environmentIntensity = 0.6;
-  mat.emissiveColor = new Color3(0.045, 0.04, 0.035);
-  mesh.material = mat;
+  mesh.material = sharedRockMaterial(scene, 'asteroid');
   return mesh;
 }
 
@@ -3645,17 +3712,13 @@ function buildOilBlob(scene: Scene, id: string, radius: number, color: Color3, s
   const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions: 12, flat: false }, scene);
   mesh.scaling.set(radius, radius, radius);
   mesh.isPickable = false;
-  const mat = new PBRMaterial(`${id}-mat`, scene);
-  mat.albedoColor = new Color3(
+  paintVertexTint(
+    mesh,
     clamp01(color.r + (rockHash(seed, 6) - 0.5) * 0.08),
     clamp01(color.g + (rockHash(seed, 7) - 0.5) * 0.08),
     clamp01(color.b + (rockHash(seed, 8) - 0.5) * 0.08),
   );
-  mat.metallic = 1.0;
-  mat.roughness = 1.0;
-  mat.environmentIntensity = 0.7;
-  mat.emissiveColor = new Color3(0.035, 0.032, 0.028);
-  mesh.material = mat;
+  mesh.material = sharedRockMaterial(scene, 'oil-blob');
   return mesh;
 }
 
@@ -3664,12 +3727,8 @@ function buildAsteroidDrop(scene: Scene, id: string, size: Vec3, color: Color3):
   const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions: 3, flat: false }, scene);
   mesh.scaling.set(size[0], size[1] || size[0], size[2] || size[0]);
   mesh.alwaysSelectAsActiveMesh = true;
-  const mat = new PBRMaterial(`${id}-mat`, scene);
-  mat.albedoColor = color.clone();
-  mat.metallic = 1.0;
-  mat.roughness = 1.0;
-  mat.environmentIntensity = 0.7;
-  mesh.material = mat;
+  paintVertexTint(mesh, color.r, color.g, color.b);
+  mesh.material = sharedRockMaterial(scene, 'asteroid-drop');
   return mesh;
 }
 
