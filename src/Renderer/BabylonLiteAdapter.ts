@@ -2052,6 +2052,12 @@ export class BabylonLiteAdapter implements RendererAdapter {
       this.shadowGenerators.set(handle, gen);
     }
 
+    // `spec.starburst` is not drawn here. The camera-glare star is a per-mesh
+    // camera-facing quad, and Lite has no per-mesh billboard (see
+    // setMeshBillboardMode) — its billboards are a sprite-atlas system, a
+    // different pipeline than one quad hanging at the sun. The disc renders on
+    // its own; the sun is dimmer than under Babylon/Three, not missing.
+
     // Emissive disc parked OPPOSITE the light direction so it reads as the star.
     const disc = BL.createSphere(engine, { diameter: spec.discDiameter ?? 90, segments: 16 });
     disc.name = `${id}-disc`;

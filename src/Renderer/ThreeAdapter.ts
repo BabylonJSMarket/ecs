@@ -79,6 +79,7 @@ import type {
   SoundHandle,
 } from './types';
 import type { Color } from './types';
+import { rasterizeSunStarburst, SUN_STARBURST_TEXELS } from './sunStarburst';
 
 export interface ThreeAdapterOptions {
   /**
@@ -361,7 +362,7 @@ export class ThreeAdapter implements RendererAdapter {
    * star). Null until `createSun`; `getSunWorldPosition` reads the disc's world
    * position.
    */
-  private sun?: { light: THREE.DirectionalLight; disc: THREE.Mesh; direction: Vec3; distance: number };
+  private sun?: { light: THREE.DirectionalLight; disc: THREE.Mesh; star?: THREE.Sprite; direction: Vec3; distance: number };
   private _sunVec?: THREE.Vector3;
 
   async init(canvas: HTMLCanvasElement, opts: RendererInitOptions = {}): Promise<void> {
@@ -3104,6 +3105,10 @@ export class ThreeAdapter implements RendererAdapter {
   createSun(id: string, spec: SunSpec): LightHandle {
     const T = this.requireThree();
     const scene = this.scene!;
+    // One sun: calling this again REPLACES it rather than adding a second light
+    // and a second disc to the scene. A round reset rebuilds the world in place
+    // and calls straight back in here.
+    this.disposeSun();
     // Directional light whose rays TRAVEL along spec.direction (it sits up-sun).
     const light = new T.DirectionalLight(this.toSRGB(spec.diffuse), spec.intensity);
     light.name = `Sun_${id}`;
@@ -3144,12 +3149,67 @@ export class ThreeAdapter implements RendererAdapter {
     (disc as unknown as { raycast: () => void }).raycast = () => {};
     scene.add(disc);
 
-    this.sun = { light, disc, direction: dir, distance: spec.distance };
+    // The camera-glare star. A Sprite rather than a quad: Three has no
+    // per-object billboard flag, and a Sprite is camera-facing by construction —
+    // which is the whole requirement here.
+    let star: THREE.Sprite | undefined;
+    if (spec.starburst) {
+      const sb = spec.starburst;
+      const texels = sb.texels ?? SUN_STARBURST_TEXELS;
+      const seed = sb.seed ?? 1;
+      const texHandle = this.createDynamicTexture(`sun-starburst-${texels}-${seed}`, {
+        width: texels,
+        height: texels,
+        pixels: rasterizeSunStarburst(texels, seed),
+        srgb: true,
+        hasAlpha: true,
+        wrap: 'clamp',
+      });
+      const starMat = new T.SpriteMaterial({
+        map: this.textures.get(texHandle) as THREE.Texture,
+        // HDR (raw, no sRGB clamp), same as the disc, so it clears the bloom
+        // threshold rather than sitting at white.
+        color: new T.Color(sb.color[0], sb.color[1], sb.color[2]),
+        transparent: true,
+        depthWrite: false,
+        fog: false,
+      });
+      star = new T.Sprite(starMat);
+      star.name = `SunStar_${id}`;
+      star.scale.set(sb.size, sb.size, 1);
+      star.frustumCulled = false;
+      star.renderOrder = 2;
+      scene.add(star);
+    }
+
+    this.sun = { light, disc, star, direction: dir, distance: spec.distance };
     this.positionSunDisc(this.renderCamera());
 
     const handle = this.makeHandle<LightHandle>('sun', id);
     this.lights.set(handle, light);
     return handle;
+  }
+
+  /** Tear down the current sun — light, target, disc and star. Idempotent. */
+  private disposeSun(): void {
+    if (!this.sun || !this.scene) return;
+    const { light, disc, star } = this.sun;
+    this.scene.remove(light);
+    this.scene.remove(light.target);
+    light.dispose();
+    this.scene.remove(disc);
+    disc.geometry.dispose();
+    (disc.material as THREE.Material).dispose();
+    if (star) {
+      this.scene.remove(star);
+      // The star's MAP is the cached dynamic texture, shared with the next sun —
+      // only the material it was mounted in goes.
+      star.material.dispose();
+    }
+    for (const [handle, l] of this.lights) {
+      if (l === light) { this.lights.delete(handle); break; }
+    }
+    this.sun = undefined;
   }
 
   getSunWorldPosition(out: Vec3): Vec3 | null {
@@ -3166,6 +3226,8 @@ export class ThreeAdapter implements RendererAdapter {
     const cx = cam?.position.x ?? 0, cy = cam?.position.y ?? 0, cz = cam?.position.z ?? 0;
     const { direction: d, distance: dist } = this.sun;
     this.sun.disc.position.set(cx - d[0] * dist, cy - d[1] * dist, cz - d[2] * dist);
+    // The star rides the disc exactly; the Sprite handles its own facing.
+    this.sun.star?.position.copy(this.sun.disc.position);
     // Park the directional light up-sun of the camera and aim it at the camera so
     // its ortho shadow frustum tracks the scene around the player.
     this.sun.light.position.set(cx - d[0] * dist * 0.5, cy - d[1] * dist * 0.5, cz - d[2] * dist * 0.5);

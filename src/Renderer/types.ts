@@ -886,6 +886,34 @@ export interface SunSpec {
   discDiameter?: number;
   /** HDR emissive color of the disc (may exceed 1 to clear the bloom threshold). */
   discColor?: Color;
+  /**
+   * Camera-glare star drawn over the disc — the long rays a bright light throws
+   * across a real lens. Omit for the bare disc.
+   *
+   * This is part of the sun rather than something a component builds, for the
+   * same reason the disc is: it has to hang at the sun's distance, face the
+   * camera, and re-seat every frame as the camera moves, and the adapter is
+   * already doing all three. It is NOT part of the lens flare — the flare pass
+   * derives from a 512² picture of the disc and cannot resolve a ray that stays
+   * sharp across the frame, so the rays are geometry and the flare is the
+   * ghosts, halo and streak around them.
+   *
+   * Adapters draw it into the glow layer alongside the disc when one is
+   * enabled, which is where the soft bloom around the star comes from.
+   */
+  starburst?: {
+    /** World-space size of the billboard quad at {@link distance}. */
+    size: number;
+    /**
+     * HDR emissive tint multiplying the rasterised star (may exceed 1). The
+     * texture carries the shape; this carries the brightness.
+     */
+    color: Color;
+    /** Texture resolution in texels. Default 512. */
+    texels?: number;
+    /** Chooses the minor-ray layout. Same seed → identical star. Default 1. */
+    seed?: number;
+  };
   /** Optional shadow-generator tuning. Omit → no shadow pass (cheapest). */
   shadow?: {
     enabled: boolean;

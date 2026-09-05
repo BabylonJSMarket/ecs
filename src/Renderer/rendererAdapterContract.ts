@@ -22,6 +22,7 @@ import type {
   ArcCameraSpec,
   CameraHandle,
   CardMeshSpec,
+  Color,
   DirectionalLightSpec,
   HemisphericLightSpec,
   PointLightSpec,
@@ -1626,6 +1627,24 @@ export function runRendererAdapterContract(
         const returned = adapter.getSunWorldPosition(out);
         expect(returned).toBe(out);
         expect(Number.isFinite(out[0]) && Number.isFinite(out[1]) && Number.isFinite(out[2])).toBe(true);
+      });
+
+      it('a starburst sun still reports a finite disc position, with or without a glow layer', () => {
+        // The star is internal — nothing in the interface hands it back. What
+        // this pins is that the optional spec field cannot take an adapter down:
+        // one that ignores it must behave exactly as it did, and one that draws
+        // it must not disturb the disc readback the off-screen sun indicator
+        // steers by. Both orders, because the glow layer and the sun are
+        // independent calls and either can land first.
+        adapter.createPerspectiveCamera('cam', { fov: Math.PI / 3, near: 0.1, far: 200000 });
+        adapter.setGlowLayer({ intensity: 0.9 });
+        const spec = { ...sunSpec, starburst: { size: 850, color: [3, 2.5, 1.5] as Color, texels: 64, seed: 7 } };
+        expect(() => adapter.createSun('starry-sun', spec)).not.toThrow();
+        const out: Vec3 = [0, 0, 0];
+        expect(adapter.getSunWorldPosition(out)).toBe(out);
+        expect(out.every((n) => Number.isFinite(n))).toBe(true);
+        // Enrolling a sun that already exists is the other order, and idempotent.
+        expect(() => adapter.setGlowLayer({ intensity: 0.5 })).not.toThrow();
       });
     });
 
