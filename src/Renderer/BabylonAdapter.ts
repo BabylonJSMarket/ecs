@@ -2008,7 +2008,31 @@ export class BabylonAdapter implements RendererAdapter {
     // a HUD projecting between frames (or a headless test) would otherwise
     // see a stale frame's matrix.
     view.multiplyToRef(camera.getProjectionMatrix(), this._projViewProj);
-    camera.viewport.toGlobalToRef(engine.getRenderWidth(), engine.getRenderHeight(), this._projViewport);
+    // CSS pixels, NOT backing-store pixels.
+    //
+    // `getRenderWidth()` is the size of the WebGL buffer, which `init` pins to
+    // PHYSICAL pixels (adaptToDeviceRatio + a 1/dpr hardware-scaling level) so
+    // textures and glyphs stay sharp on a retina panel. Projecting into that
+    // rect returns physical pixels — and every consumer of this is positioning
+    // DOM over the canvas in CSS pixels. On a 2× display that is a plain factor
+    // of two about the top-left: the crosshair sits half a screen right and
+    // down of where the guns point, growing with distance from the corner.
+    //
+    // It survived because it is invisible at dpr 1, which is every headless
+    // browser and every test. `pickAtScreenPoint` (Babylon's `scene.pick`) and
+    // ThreeAdapter's own worldToScreen both already work in CSS pixels, so this
+    // was the one API in the family disagreeing with the rest.
+    //
+    // Multiplying the buffer size back up by the hardware-scaling level is
+    // exactly the inverse of what `applyDeviceScaling` divided it by, so this
+    // reads the real CSS box whatever the DPR — including after a window moves
+    // between a retina and a non-retina monitor.
+    const cssScale = engine.getHardwareScalingLevel();
+    camera.viewport.toGlobalToRef(
+      engine.getRenderWidth() * cssScale,
+      engine.getRenderHeight() * cssScale,
+      this._projViewport,
+    );
     Vector3.ProjectToRef(
       this._projWorld,
       this._tfIdentity,

@@ -1304,7 +1304,16 @@ export interface RendererAdapter {
   getCameraPose(h: CameraHandle, outPosition: Vec3, outOrientation: Quaternion): void;
   /**
    * Project a world-space point `(x, y, z)` to screen pixels, writing the result
-   * into `out` (origin top-left, +y down). Returns `false` — and LEAVES `out`
+   * into `out` (origin top-left, +y down).
+   *
+   * Coordinates are **CSS pixels** relative to the canvas's top-left — the space
+   * a DOM overlay positions in, and the same space `pickAtScreenPoint` takes.
+   * NOT backing-store pixels: on a retina display those differ by the device
+   * pixel ratio, so a HUD placed with them lands a whole factor of two away from
+   * the thing it is marking. Adapters that size their projection viewport from
+   * the WebGL buffer must scale back to CSS.
+   *
+   * Returns `false` — and LEAVES `out`
    * UNTOUCHED — when the point is BEHIND the active camera, so HUD callers can
    * branch to an off-screen arrow instead of drawing a bracket at a mirrored
    * phantom position. The inverse of {@link screenToWorldPoint}; it drives the

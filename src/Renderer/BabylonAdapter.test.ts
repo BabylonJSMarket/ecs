@@ -425,3 +425,57 @@ describe('BabylonAdapter mesh bounds — where the art actually is', () => {
     expect(max[0] - min[0]).toBeLessThan(4);
   });
 })
+
+// The bug this guards is invisible at devicePixelRatio 1 — which is every
+// headless browser and every other test in this file — so it has to set the
+// hardware scaling level by hand to reproduce a retina panel.
+describe('BabylonAdapter worldToScreen — CSS pixels, not backing-store pixels', () => {
+  function retina(scaling: number): BabylonAdapter {
+    const adapter = new BabylonAdapter();
+    // NullEngine renders at a fixed 512x256 buffer.
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    adapter.scene.useRightHandedSystem = true;
+    // hardwareScalingLevel = 1/dpr, so 0.5 is a 2x display: the buffer holds
+    // twice as many pixels as the CSS box. NullEngine ignores
+    // setHardwareScalingLevel (it always reports 1) and its buffer size is
+    // fixed, so the accessor is stubbed — which is precisely the input
+    // worldToScreen reads, and the thing under test is that it reads it at all.
+    adapter.engine.getHardwareScalingLevel = () => scaling;
+    return adapter;
+  }
+
+  /** Project a point straight down the camera's nose. */
+  function centre(adapter: BabylonAdapter): { x: number; y: number } {
+    const cam = adapter.createPerspectiveCamera('c', { fov: 1.05, near: 0.1, far: 1000 });
+    adapter.setCameraPose(cam, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+    const out = { x: 0, y: 0 };
+    // Identity orientation looks down +Z (the canonical convention), so a point
+    // on +Z lands in the middle of the frame.
+    expect(adapter.worldToScreen(0, 0, 50, out)).toBe(true);
+    return out;
+  }
+
+  it('puts the centre of the view at the centre of the CSS box on a 2x display', () => {
+    const adapter = retina(0.5);
+    const engine = adapter.engine!;
+    // The CSS box is the buffer scaled back by the hardware-scaling level.
+    const cssW = engine.getRenderWidth() * 0.5;
+    const cssH = engine.getRenderHeight() * 0.5;
+
+    const p = centre(adapter);
+    expect(p.x).toBeCloseTo(cssW / 2, 0);
+    expect(p.y).toBeCloseTo(cssH / 2, 0);
+    // And emphatically NOT the buffer's centre, which is what a HUD used to be
+    // handed: half a screen right and down of the guns.
+    expect(p.x).not.toBeCloseTo(engine.getRenderWidth() / 2, 0);
+  });
+
+  it('agrees with itself at 1x, where the two spaces coincide', () => {
+    const adapter = retina(1);
+    const engine = adapter.engine!;
+    const p = centre(adapter);
+    expect(p.x).toBeCloseTo(engine.getRenderWidth() / 2, 0);
+    expect(p.y).toBeCloseTo(engine.getRenderHeight() / 2, 0);
+  });
+});
