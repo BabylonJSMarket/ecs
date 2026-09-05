@@ -1075,3 +1075,19 @@ describe('MockRendererAdapter', () => {
     });
   });
 });
+
+describe('MockRendererAdapter.getMeshWorldBounds', () => {
+  it('hands back bounds a test seeded, so code that reads real art is exercisable', () => {
+    // A mock holds no geometry, so this map is how a test stands in for a loaded
+    // hull — which is what lets a HUD's "bracket the art, not the transform"
+    // path be tested at all without an engine.
+    const adapter = new MockRendererAdapter();
+    adapter.meshWorldBounds.set('ship', { min: [-1, -2, -3], max: [4, 5, 6] });
+
+    const min: Vec3 = [0, 0, 0];
+    const max: Vec3 = [0, 0, 0];
+    expect(adapter.getMeshWorldBounds('ship', min, max)).toBe(true);
+    expect(min).toEqual([-1, -2, -3]);
+    expect(max).toEqual([4, 5, 6]);
+  });
+});

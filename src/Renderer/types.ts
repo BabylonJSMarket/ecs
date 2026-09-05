@@ -1207,6 +1207,26 @@ export interface RendererAdapter {
    * assertion.
    */
   getCameraUp(h: CameraHandle, out: Vec3): Vec3;
+
+  /**
+   * World-space axis-aligned bounds of everything drawn under `meshId`, written
+   * into `outMin` / `outMax`. Returns false (leaving the outs untouched) when
+   * nothing is loaded under that id.
+   *
+   * Exists because an entity's TRANSFORM is not reliably where its art is. A
+   * glTF's origin sits wherever the artist left it, and a HUD that brackets the
+   * transform is bracketing a point that can be some way off the hull it is
+   * meant to be marking. That error is invisible at range and grows as you close
+   * — it scales with 1/distance — so it shows up exactly in a knife-fight, when
+   * the mark matters most. Asking the renderer where the geometry actually IS
+   * makes a tracking mark track the ship instead of the bookkeeping.
+   *
+   * Generic on purpose: framing a camera on a subject, sizing a marker, deciding
+   * whether something is worth drawing, and fitting a selection box all want the
+   * same answer, so it belongs on the interface rather than in one component's
+   * plugin.
+   */
+  getMeshWorldBounds(meshId: string, outMin: Vec3, outMax: Vec3): boolean;
   nudgeCameraAlpha(h: CameraHandle, delta: number): void;
   /**
    * Add `delta` to the orbit pitch (Babylon ArcRotateCamera.beta, Three

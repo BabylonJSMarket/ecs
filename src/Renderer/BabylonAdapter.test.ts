@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { MeshBuilder, NullEngine, Scene } from '@babylonjs/core';
+import { MeshBuilder, NullEngine, Scene, Vector3 } from '@babylonjs/core';
 import type { AbstractMesh, DeepImmutable, GlowLayer } from '@babylonjs/core';
 import { BabylonAdapter, hardwareScalingLevelForDpr } from './BabylonAdapter';
 import type { CameraHandle, MeshHandle, SoundHandle } from './types';
@@ -339,3 +339,89 @@ function cabinetGlbDataUrl(): string {
   for (const byte of glb) ascii += String.fromCharCode(byte);
   return `data:model/gltf-binary;base64,${btoa(ascii)}`;
 }
+
+// A missile that flies blunt-end-first is not a subtle bug once you see it, but
+// nothing in the suite looked at the shape of a procedural mesh — so a sign
+// error on one rotation shipped, and the nose cone was mounted apex-first into
+// the shaft with its flat disc presented to the direction of travel.
+describe('BabylonAdapter procedural missile — the nose points where it is going', () => {
+  function headless(): BabylonAdapter {
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    adapter.scene.useRightHandedSystem = true;
+    return adapter;
+  }
+
+  /** Every vertex of `mesh`, expressed in its ROOT's local frame. */
+  function verticesInRootSpace(mesh: AbstractMesh): Array<[number, number, number]> {
+    const raw = mesh.getVerticesData('position')!;
+    const out: Array<[number, number, number]> = [];
+    // The child carries the rotation under test, so bake it in: what matters is
+    // where the geometry lands on the missile, not how the child is oriented.
+    mesh.computeWorldMatrix(true);
+    const m = mesh.getWorldMatrix();
+    for (let i = 0; i < raw.length; i += 3) {
+      const p = Vector3.TransformCoordinates(
+        new Vector3(raw[i], raw[i + 1], raw[i + 2]), m,
+      );
+      out.push([p.x, p.y, p.z]);
+    }
+    return out;
+  }
+
+  it('the cone tapers to a POINT at the front and is open where it meets the shaft', () => {
+    const adapter = headless();
+    adapter.createProceduralMesh('msl', { shape: 'missile', size: [1, 1, 10] });
+
+    const nose = adapter.scene!.meshes.find((m) => m.name === 'msl-nose');
+    expect(nose).toBeDefined();
+
+    const verts = verticesInRootSpace(nose!);
+    const zs = verts.map((v) => v[2]);
+    const front = Math.max(...zs);
+    const back = Math.min(...zs);
+
+    // Radius of the cross-section at each end, measured about the missile's axis.
+    const radiusAt = (z: number) => {
+      const ring = verts.filter((v) => Math.abs(v[2] - z) < 1e-3);
+      return Math.max(...ring.map((v) => Math.hypot(v[0], v[1])));
+    };
+
+    // Front = the apex: everything there sits on the axis.
+    expect(radiusAt(front)).toBeLessThan(0.01);
+    // Back = the open base, seated against the shaft, at the body's full radius.
+    expect(radiusAt(back)).toBeGreaterThan(0.4);
+  });
+
+  it('the cone sits ahead of the body, not inside it', () => {
+    const adapter = headless();
+    adapter.createProceduralMesh('msl2', { shape: 'missile', size: [1, 1, 10] });
+    const zOf = (name: string) => {
+      const mesh = adapter.scene!.meshes.find((m) => m.name === name)!;
+      return verticesInRootSpace(mesh).map((v) => v[2]);
+    };
+    expect(Math.max(...zOf('msl2-nose'))).toBeGreaterThan(Math.max(...zOf('msl2-body')));
+  });
+});
+
+describe('BabylonAdapter mesh bounds — where the art actually is', () => {
+  it('reports the world box of a procedural hull, centred on its geometry', () => {
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    adapter.scene.useRightHandedSystem = true;
+    adapter.createProceduralMesh('hull', { shape: 'missile', size: [1, 1, 10] });
+
+    const min: [number, number, number] = [0, 0, 0];
+    const max: [number, number, number] = [0, 0, 0];
+    expect(adapter.getMeshWorldBounds('hull', min, max)).toBe(true);
+
+    // A 10-long missile: the box must span roughly that along Z and be about a
+    // unit across. The point is that it reflects the GEOMETRY under the root —
+    // the root node's own bounds are empty, which is the trap this guards.
+    expect(max[2] - min[2]).toBeGreaterThan(5);
+    expect(max[0] - min[0]).toBeGreaterThan(0.5);
+    expect(max[0] - min[0]).toBeLessThan(4);
+  });
+})

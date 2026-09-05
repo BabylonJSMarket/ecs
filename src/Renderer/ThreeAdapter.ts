@@ -1951,6 +1951,17 @@ export class ThreeAdapter implements RendererAdapter {
     return out;
   }
 
+  getMeshWorldBounds(meshId: string, outMin: Vec3, outMax: Vec3): boolean {
+    const T = this.THREE;
+    const obj = T ? this.meshesByMeshId.get(meshId) : undefined;
+    if (!T || !obj) return false;
+    const box = new T.Box3().setFromObject(obj);
+    if (box.isEmpty()) return false;
+    outMin[0] = box.min.x; outMin[1] = box.min.y; outMin[2] = box.min.z;
+    outMax[0] = box.max.x; outMax[1] = box.max.y; outMax[2] = box.max.z;
+    return true;
+  }
+
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // Three.js is right-handed: right = normalize(forward × up), up = (0,1,0).
     this.getCameraForward(h, out);

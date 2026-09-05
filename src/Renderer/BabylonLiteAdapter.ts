@@ -1053,6 +1053,16 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return out;
   }
 
+  getMeshWorldBounds(meshId: string, outMin: Vec3, outMax: Vec3): boolean {
+    const entry = this.meshesByMeshId?.get(meshId);
+    if (!entry) return false;
+    const b = (entry as { boundMin?: number[]; boundMax?: number[] });
+    if (!b.boundMin || !b.boundMax) return false;
+    outMin[0] = b.boundMin[0]; outMin[1] = b.boundMin[1]; outMin[2] = b.boundMin[2];
+    outMax[0] = b.boundMax[0]; outMax[1] = b.boundMax[1]; outMax[2] = b.boundMax[2];
+    return true;
+  }
+
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // Babylon is left-handed: right = up × forward, with up = (0,1,0).
     this.getCameraForward(h, out);

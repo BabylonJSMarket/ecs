@@ -1810,6 +1810,17 @@ export class BabylonAdapter implements RendererAdapter {
     return out;
   }
 
+  getMeshWorldBounds(meshId: string, outMin: Vec3, outMax: Vec3): boolean {
+    const root = this.meshesByMeshId.get(meshId);
+    if (!root) return false;
+    // Include descendants: a GLB ship is a root TransformNode with the actual
+    // geometry hanging off it, so the root's own bounds are empty.
+    const { min, max } = root.getHierarchyBoundingVectors(true);
+    outMin[0] = min.x; outMin[1] = min.y; outMin[2] = min.z;
+    outMax[0] = max.x; outMax[1] = max.y; outMax[2] = max.z;
+    return true;
+  }
+
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // With scene.useRightHandedSystem = true, Babylon uses the same cross
     // convention as Three: right = forward × up. The cross of two unit
@@ -3904,8 +3915,15 @@ function buildMissile(scene: Scene, id: string, diameter: number, length: number
   body.material = bodyMat;
   body.parent = root;
 
+  // `CreateCylinder` puts the apex (diameterTop 0) at local +Y and the open base
+  // at −Y. Rotating +π/2 about X maps +Y → +Z, so the POINT faces forward and the
+  // base seats flush against the shaft. The sign was negative here, which maps
+  // +Y → −Z: the cone was mounted apex-first into the body with its flat disc
+  // presented to the direction of travel — a missile flying blunt-end first. The
+  // spaceplane's nose a couple of hundred lines up has always used +π/2, which is
+  // what this should have matched.
   const nose = MeshBuilder.CreateCylinder(`${id}-nose`, { diameterTop: 0.0, diameterBottom: diameter, height: length * 0.28, tessellation: 14 }, scene);
-  nose.rotation.x = -Math.PI / 2;
+  nose.rotation.x = Math.PI / 2;
   nose.position.z = length * 0.42;
   nose.material = bodyMat;
   nose.parent = root;

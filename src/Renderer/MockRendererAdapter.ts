@@ -109,6 +109,18 @@ export class MockRendererAdapter implements RendererAdapter {
   /** Per-mesh bounding-box extents stub; populated by `setMeshBoundingBoxExtents`. */
   meshBoundingExtents = new Map<MeshHandle, { min: Vec3; max: Vec3 }>();
 
+  /**
+   * World bounds per mesh ID, for `getMeshWorldBounds`. Keyed by the STRING id
+   * rather than a handle because that is what the getter takes — a HUD asking
+   * "where is this entity's art" has an entity id, not a handle.
+   *
+   * A mock holds no geometry, so nothing populates this on its own; a test
+   * seeds it to exercise code that reads real bounds. Left empty, the getter
+   * reports "nothing loaded", which is the honest answer and the branch callers
+   * must handle anyway.
+   */
+  meshWorldBounds = new Map<string, { min: Vec3; max: Vec3 }>();
+
   /** Per-camera angles / target stub; tests can preload values. */
   cameraAngles = new Map<CameraHandle, { alpha: number; beta: number; radius: number }>();
   cameraTargets = new Map<CameraHandle, Vec3>();
@@ -429,6 +441,14 @@ export class MockRendererAdapter implements RendererAdapter {
     }
     out[0] = 0; out[1] = 1; out[2] = 0;
     return out;
+  }
+
+  getMeshWorldBounds(meshId: string, outMin: Vec3, outMax: Vec3): boolean {
+    const b = this.meshWorldBounds.get(meshId);
+    if (!b) return false;
+    outMin[0] = b.min[0]; outMin[1] = b.min[1]; outMin[2] = b.min[2];
+    outMax[0] = b.max[0]; outMax[1] = b.max[1]; outMax[2] = b.max[2];
+    return true;
   }
 
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {

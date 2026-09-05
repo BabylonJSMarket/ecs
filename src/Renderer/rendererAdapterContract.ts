@@ -867,6 +867,19 @@ export function runRendererAdapterContract(
         expect(fwd[2]).toBeGreaterThan(0.99);
       });
 
+      it('getMeshWorldBounds reports nothing for an id with no art, and says so', () => {
+        // The branch every caller has to handle: an entity whose model has not
+        // loaded yet, or never had one. Returning false rather than a zero box
+        // is what lets a HUD fall back to the transform instead of bracketing
+        // the origin of the world.
+        const outMin: Vec3 = [1, 2, 3];
+        const outMax: Vec3 = [4, 5, 6];
+        expect(adapter.getMeshWorldBounds('nothing-is-loaded-here', outMin, outMax)).toBe(false);
+        // Untouched, so a caller can keep whatever it had.
+        expect(outMin).toEqual([1, 2, 3]);
+        expect(outMax).toEqual([4, 5, 6]);
+      });
+
       // ── Handedness of the picture ─────────────────────────────────────
       // CANONICAL is a RIGHT-handed world (glTF's) seen through a proper,
       // non-mirroring view. With identity orientation the camera looks down
