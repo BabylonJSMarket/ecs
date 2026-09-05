@@ -752,6 +752,23 @@ export function runRendererAdapterContract(
         expect(len).toBeCloseTo(1, 4);
       });
 
+      it('getCameraUp on an orbit camera is unrolled — its right axis stays level', () => {
+        // An ArcRotate/Orbit camera exposes alpha, beta and radius, and nothing
+        // that could bank it. But "no roll" does NOT mean "up is world up": a
+        // camera pitched 30° down has an up tilted 30° with it. The property that
+        // actually says unrolled is that the RIGHT axis stays horizontal — up
+        // leans only in the plane containing world-Y and the view direction.
+        const h = adapter.createArcCamera('main', camSpec);
+        const up: Vec3 = [0, 0, 0];
+        expect(adapter.getCameraUp(h, up)).toBe(up);
+        expect(Math.hypot(up[0], up[1], up[2])).toBeCloseTo(1, 4);
+        expect(up[1]).toBeGreaterThan(0); // never upside down
+
+        const right: Vec3 = [0, 0, 0];
+        adapter.getCameraRight(h, right);
+        expect(Math.abs(right[1])).toBeLessThan(0.02);
+      });
+
       it('screenToWorldPoint writes a finite Vec3 into `out` and returns it', () => {
         const h = adapter.createArcCamera('main', camSpec);
         const out: Vec3 = [0, 0, 0];
@@ -806,6 +823,48 @@ export function runRendererAdapterContract(
         expect(fwd[2]).toBeGreaterThan(0.99); // points +Z
         expect(Math.abs(fwd[0])).toBeLessThan(0.02);
         expect(Math.abs(fwd[1])).toBeLessThan(0.02);
+      });
+
+      it('an identity-orientation perspective camera has up = +Y', () => {
+        const h = adapter.createPerspectiveCamera('up', persp);
+        adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+        const up: Vec3 = [0, 0, 0];
+        adapter.getCameraUp(h, up);
+        expect(up[1]).toBeGreaterThan(0.99);
+        expect(Math.abs(up[0])).toBeLessThan(0.02);
+        expect(Math.abs(up[2])).toBeLessThan(0.02);
+      });
+
+      it('a ROLLED perspective camera reports a rolled up vector', () => {
+        // The one an adapter can fail while every other camera test passes.
+        //
+        // Roll is the only component of an orientation a forward vector cannot
+        // express: roll about the view axis leaves forward untouched. So an
+        // adapter that derives its view from forward alone — which is what
+        // Babylon's TargetCamera does by default, taking forward from the
+        // quaternion and up from a separate world-locked field — drops roll
+        // completely and still satisfies every forward/right assertion above.
+        //
+        // In a space sim that is not cosmetic. A chase camera puts its offset in
+        // the ship's local frame, so a roll swings the camera around the ship; if
+        // the camera does not roll with it, the ship holds still in the world
+        // while its image sweeps a circle across the screen, and it reads as the
+        // ship pivoting about a point out in space instead of about itself.
+        //
+        // Roll π/2 about +Z (the view axis at identity): up must swing from +Y
+        // toward −X, and forward must NOT move.
+        const h = adapter.createPerspectiveCamera('rolled', persp);
+        const s = Math.SQRT1_2;
+        adapter.setCameraPose(h, [0, 0, 0], { x: 0, y: 0, z: s, w: s });
+
+        const up: Vec3 = [0, 0, 0];
+        adapter.getCameraUp(h, up);
+        expect(up[0]).toBeCloseTo(-1, 1);
+        expect(Math.abs(up[1])).toBeLessThan(0.02);
+
+        const fwd: Vec3 = [0, 0, 0];
+        adapter.getCameraForward(h, fwd);
+        expect(fwd[2]).toBeGreaterThan(0.99);
       });
 
       // ── Handedness of the picture ─────────────────────────────────────

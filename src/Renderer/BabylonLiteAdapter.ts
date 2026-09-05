@@ -1036,6 +1036,23 @@ export class BabylonLiteAdapter implements RendererAdapter {
     out[2] = dz / len;
     return out;
   }
+  getCameraUp(h: CameraHandle, out: Vec3): Vec3 {
+    const persp = this.perspectiveCameras.get(h);
+    if (persp) {
+      // Derived from the stored orientation, because this backend's free camera
+      // is position+target with NO up vector at all (`@babylonjs/lite`'s
+      // FreeCamera exposes neither `upVector` nor a rotation quaternion). So the
+      // lite renderer genuinely cannot draw a rolled camera; the orientation we
+      // were handed is the only truth available, and this reports it. Anything
+      // that needs a rolling chase camera on screen wants the full BabylonAdapter.
+      const u = this.rotateVecByQuat(persp.orientation, 0, 1, 0);
+      out[0] = u[0]; out[1] = u[1]; out[2] = u[2];
+      return out;
+    }
+    out[0] = 0; out[1] = 1; out[2] = 0;
+    return out;
+  }
+
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // Babylon is left-handed: right = up × forward, with up = (0,1,0).
     this.getCameraForward(h, out);

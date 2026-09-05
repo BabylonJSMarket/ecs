@@ -1939,6 +1939,18 @@ export class ThreeAdapter implements RendererAdapter {
     out[0] = dx / len; out[1] = dy / len; out[2] = dz / len;
     return out;
   }
+  getCameraUp(h: CameraHandle, out: Vec3): Vec3 {
+    const entry = this.cameras.get(h);
+    if (!entry || !this.THREE) { out[0] = 0; out[1] = 1; out[2] = 0; return out; }
+    // The up the camera RENDERS with: column 1 of its world matrix, which is
+    // where its quaternion actually lands — not a restatement of the input.
+    entry.camera.updateMatrixWorld(true);
+    const e = entry.camera.matrixWorld.elements;
+    const len = Math.hypot(e[4], e[5], e[6]) || 1;
+    out[0] = e[4] / len; out[1] = e[5] / len; out[2] = e[6] / len;
+    return out;
+  }
+
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // Three.js is right-handed: right = normalize(forward × up), up = (0,1,0).
     this.getCameraForward(h, out);

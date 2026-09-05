@@ -1794,6 +1794,22 @@ export class BabylonAdapter implements RendererAdapter {
     out[0] = dx / len; out[1] = dy / len; out[2] = dz / len;
     return out;
   }
+  getCameraUp(h: CameraHandle, out: Vec3): Vec3 {
+    const cam = this.perspectiveCameras.get(h) ?? this.cameras.get(h);
+    if (!cam) { out[0] = 0; out[1] = 1; out[2] = 0; return out; }
+    // Read the up the camera RENDERS with, not the up its orientation implies.
+    // Babylon only refreshes `upVector` from the quaternion inside its view-matrix
+    // build (and only when `updateUpVectorFromRotation` is on), so asking for the
+    // view matrix first is what makes this an honest observation of the render
+    // rather than a restatement of the input — which is the whole point: the bug
+    // this method exists to catch was an adapter whose intended up and rendered
+    // up disagreed, with nothing able to tell.
+    cam.getViewMatrix();
+    const u = cam.upVector;
+    out[0] = u.x; out[1] = u.y; out[2] = u.z;
+    return out;
+  }
+
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // With scene.useRightHandedSystem = true, Babylon uses the same cross
     // convention as Three: right = forward × up. The cross of two unit
@@ -1884,6 +1900,27 @@ export class BabylonAdapter implements RendererAdapter {
     // The chase camera is posed directly every frame via setCameraPose; kill the
     // built-in inertial smoothing so the pose isn't lagged/lerped behind input.
     camera.inertia = 0;
+    // ROLL. Without this the camera has no roll at all, and the failure is not
+    // subtle once you know to look for it.
+    //
+    // Babylon's TargetCamera builds its view with
+    // `LookAt(position, position + q·(+Z), this.upVector)` — it takes the
+    // FORWARD from the quaternion but the UP from a separate `upVector` field,
+    // which defaults to world up and stays there. Roll is the one component of
+    // an orientation that a forward vector cannot express, so baking a perfect
+    // quaternion and leaving this flag alone silently discards exactly that
+    // component and nothing else. `updateUpVectorFromRotation` is Babylon's own
+    // switch for deriving up from the quaternion instead.
+    //
+    // In a space sim it is the whole camera. A chase camera puts its offset in
+    // the ship's LOCAL frame, so a roll swings the camera around the ship —
+    // correct, and harmless only if the camera rolls with it. With world-locked
+    // up it does not, so the ship stays nailed to one world point while its
+    // IMAGE sweeps a circle across the screen (measured: 208px by 386px on a
+    // half-roll). From the pilot's seat that reads as the ship pivoting around
+    // some point off in space instead of around itself — which is how it was
+    // reported, and why it looked like a bad model origin rather than a camera.
+    camera.updateUpVectorFromRotation = true;
     // Orientation lives on the quaternion — never Euler — so loops and rolls
     // reach the renderer without a gimbal-flipping quat→Euler round-trip. The
     // canonical orientation `q` is post-flipped 180° about +Y so the camera

@@ -1190,6 +1190,23 @@ export interface RendererAdapter {
   getCameraForward(h: CameraHandle, out: Vec3): Vec3;
   /** Unit right vector of the camera in world space. Handedness-aware. */
   getCameraRight(h: CameraHandle, out: Vec3): Vec3;
+  /**
+   * Unit UP vector of the camera in world space — canonically `q · (+Y)` for a
+   * free 6-DOF camera posed by {@link setCameraPose}.
+   *
+   * This exists because roll is the one part of an orientation a forward vector
+   * cannot express, so an adapter that reports only forward can silently drop it
+   * and still look correct to every test. Babylon does exactly that by default:
+   * its TargetCamera takes forward from the quaternion but up from a separate
+   * world-locked field, so a perfectly-posed chase camera renders with no roll
+   * at all — and in a space sim, with no horizon to anchor to, that reads as the
+   * ship pivoting around a point out in space rather than around itself.
+   *
+   * Adapters must report the up their camera actually RENDERS with, not the up
+   * implied by the orientation they were handed. The two agreeing is the whole
+   * assertion.
+   */
+  getCameraUp(h: CameraHandle, out: Vec3): Vec3;
   nudgeCameraAlpha(h: CameraHandle, delta: number): void;
   /**
    * Add `delta` to the orbit pitch (Babylon ArcRotateCamera.beta, Three

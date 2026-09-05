@@ -418,6 +418,19 @@ export class MockRendererAdapter implements RendererAdapter {
     out[2] = -Math.sin(alpha);
     return out;
   }
+  getCameraUp(h: CameraHandle, out: Vec3): Vec3 {
+    // Canonical: a free 6-DOF camera's up is `q · (+Y)`, the reference the engine
+    // adapters are held to. An orbit camera has no roll, so world up is honest.
+    const persp = this.perspectiveCameras.get(h);
+    if (persp) {
+      const u = rotateByQuat([0, 1, 0], persp.orientation);
+      out[0] = u[0]; out[1] = u[1]; out[2] = u[2];
+      return out;
+    }
+    out[0] = 0; out[1] = 1; out[2] = 0;
+    return out;
+  }
+
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // Right-handed convention (matches ThreeAdapter / BabylonAdapter, whose
     // scene is right-handed): right = forward × up. For a free perspective
