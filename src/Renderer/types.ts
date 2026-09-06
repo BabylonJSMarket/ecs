@@ -876,7 +876,14 @@ export interface RenderStats {
   meshes: number;
   /** Meshes that survived culling and were submitted this frame. */
   activeMeshes: number;
-  /** Draw calls last frame. The number a material-per-object bug moves. */
+  /**
+   * Draw calls PER FRAME, averaged since the last time stats were read.
+   *
+   * Babylon's own counter accumulates from page load and is only reset while a
+   * scene instrumentation is attached, which it is not by default — read raw it
+   * reports hundreds of thousands and means nothing. The adapter deltas it
+   * against {@link frames} instead.
+   */
   drawCalls: number;
   /** Triangles submitted last frame. */
   faces: number;
@@ -888,6 +895,16 @@ export interface RenderStats {
   particleSystems: number;
   /** Render targets drawn every frame BEFORE the main pass — each is a full scene. */
   renderTargets: number;
+  /**
+   * Frames this engine has rendered, ever.
+   *
+   * The row that says whether any of the others mean anything. A scene that is
+   * built but not being drawn — a leaked one from a hot reload, a second engine,
+   * a torn-down game still holding its meshes — reports plausible mesh and
+   * material counts and a frame count that never moves. Without this the panel
+   * can describe a corpse in complete detail and look authoritative doing it.
+   */
+  frames: number;
 }
 
 export interface SunSpec {

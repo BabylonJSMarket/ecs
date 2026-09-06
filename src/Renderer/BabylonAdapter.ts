@@ -3266,24 +3266,45 @@ export class BabylonAdapter implements RendererAdapter {
     return handle;
   }
 
+  /** Rolling state for the per-frame draw-call delta. */
+  private lastDrawCallTotal = 0;
+  private lastStatsFrame = -1;
+  private drawCallsPerFrame = 0;
+
   getRenderStats(): RenderStats {
     const scene = this.scene;
     if (!scene) {
-      return { meshes: 0, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0 };
+      return {
+        meshes: 0, activeMeshes: 0, drawCalls: 0, faces: 0,
+        materials: 0, textures: 0, particleSystems: 0, renderTargets: 0, frames: 0,
+      };
     }
-    // drawCalls comes off the engine's own perf counter, which Babylon only
-    // maintains while a scene instrumentation is attached — absent that it reads
-    // 0, which is honest rather than wrong.
-    const counter = (scene.getEngine() as unknown as { _drawCalls?: { current: number } })._drawCalls;
+    const engine = scene.getEngine();
+    const frames = engine.frameId;
+    // Babylon's _drawCalls counter is only reset per frame while a scene
+    // instrumentation is attached. Without one it accumulates from page load, so
+    // read raw it reports six figures and means nothing. Delta it against the
+    // frame counter and it means draw calls per frame, which is the number worth
+    // looking at.
+    const total = (engine as unknown as { _drawCalls?: { current: number } })._drawCalls?.current ?? 0;
+    const elapsed = frames - this.lastStatsFrame;
+    if (this.lastStatsFrame >= 0 && elapsed > 0) {
+      this.drawCallsPerFrame = (total - this.lastDrawCallTotal) / elapsed;
+    }
+    if (elapsed > 0) {
+      this.lastStatsFrame = frames;
+      this.lastDrawCallTotal = total;
+    }
     return {
       meshes: scene.meshes.length,
       activeMeshes: scene.getActiveMeshes().length,
-      drawCalls: counter?.current ?? 0,
+      drawCalls: this.drawCallsPerFrame,
       faces: scene.getActiveIndices() / 3,
       materials: scene.materials.length,
       textures: scene.textures.length,
       particleSystems: scene.particleSystems.length,
       renderTargets: scene.customRenderTargets.length,
+      frames,
     };
   }
 

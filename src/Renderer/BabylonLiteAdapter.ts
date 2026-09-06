@@ -2106,7 +2106,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
   getRenderStats(): RenderStats {
     // Lite's scene graph is opaque from here — it exposes no counters, so this
     // reports the one number it can stand behind rather than inventing the rest.
-    return { ...{ meshes: 0, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0 }, meshes: this.meshes.size };
+    return { ...{ meshes: 0, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0, frames: 0 }, meshes: this.meshes.size };
   }
 
   setSunOccluded(occluded: boolean): void {

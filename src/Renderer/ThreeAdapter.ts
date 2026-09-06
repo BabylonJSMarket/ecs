@@ -3227,6 +3227,7 @@ export class ThreeAdapter implements RendererAdapter {
       textures: info?.memory.textures ?? 0,
       particleSystems: 0,
       renderTargets: 0,
+      frames: (this.renderer as unknown as { info?: { render: { frame: number } } } | undefined)?.info?.render.frame ?? 0,
     };
   }
 
