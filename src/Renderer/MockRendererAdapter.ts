@@ -62,6 +62,7 @@ import type {
   SoundHandle,
   RenderStats,
   FrameTimings,
+  RenderPassInfo,
 } from './types';
 import type { Color } from './types';
 
@@ -1033,6 +1034,20 @@ export class MockRendererAdapter implements RendererAdapter {
 
   /** Frame timings a test can drive, like {@link renderStats}. */
   frameTimings: Partial<FrameTimings> = {};
+
+  /** Render passes a test can drive. Empty by default — the mock draws nothing. */
+  renderPasses: RenderPassInfo[] = [];
+
+  listRenderPasses(): RenderPassInfo[] {
+    this.record('listRenderPasses');
+    return this.renderPasses.map((p) => ({ ...p }));
+  }
+
+  setRenderPassEnabled(id: string, enabled: boolean): void {
+    this.record('setRenderPassEnabled', id, enabled);
+    const pass = this.renderPasses.find((p) => p.id === id);
+    if (pass) pass.enabled = enabled;
+  }
 
   profileFrame(on: boolean): void {
     this.record('profileFrame', on);

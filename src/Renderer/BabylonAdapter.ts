@@ -56,7 +56,7 @@ import {
   SceneInstrumentation,
   EngineInstrumentation,
 } from '@babylonjs/core';
-import type { AssetContainer, AudioEngineV2, Bone, InstancedMesh, InstantiatedEntries, Node, StaticSound, TransformNode } from '@babylonjs/core';
+import type { AssetContainer, AudioEngineV2, Bone, Camera as BabylonCamera, InstancedMesh, InstantiatedEntries, Node, PostProcess, RenderTargetTexture, StaticSound, TransformNode } from '@babylonjs/core';
 import type { Observer, PhysicsBody } from '@babylonjs/core';
 import '@babylonjs/loaders';
 // GPU particle backends — registered as side effects so GPUParticleSystem can
@@ -121,7 +121,7 @@ import type {
   SoundHandle,
   Vec3,
 } from './types';
-import type { Color, FrameTimings, RenderStats } from './types';
+import type { Color, FrameTimings, RenderPassInfo, RenderStats } from './types';
 import { Matrix, Ray, Viewport, CreateAudioEngineAsync, CreateSoundAsync, SoundState } from '@babylonjs/core';
 import {
   asteroidShape,
@@ -355,6 +355,9 @@ export class BabylonAdapter implements RendererAdapter {
    * mesh parented under one AFTER the call joins too; see ensureGlowNewMeshWatch.
    */
   private glowRoots = new Set<Node>();
+  /** What the live glow layer was BUILT with, so a changed value can rebuild it. */
+  private glowBuiltRatio = 0;
+  private glowBuiltSamples = 0;
   /** The new-mesh listener; registered only while some root is enrolled. */
   private glowNewMeshObserver: Observer<AbstractMesh> | null = null;
   /** The HDR bloom pipeline, created lazily on the first setBloom call. */
@@ -3099,13 +3102,38 @@ export class BabylonAdapter implements RendererAdapter {
       this.stopGlowNewMeshWatch();
       return;
     }
+    const ratio = spec.textureRatio ?? 0.5;
+    const samples = spec.samples ?? 1;
+    // Babylon fixes both of these when the layer is constructed — there is no
+    // setter, and assigning the private size does not resize the buffers. So a
+    // caller that lowered textureRatio to buy back fill rate got no rebuild, no
+    // error and no change, which reads as "that knob does nothing" rather than
+    // "that knob is build-time". Rebuild instead; the enrolment is restored
+    // below, and this only fires when a value actually moved.
+    if (this.glowLayer && (this.glowBuiltRatio !== ratio || this.glowBuiltSamples !== samples)) {
+      this.glowLayer.dispose();
+      this.glowLayer = null;
+    }
     if (!this.glowLayer) {
       this.glowLayer = new GlowLayer('glow', this.scene, {
-        mainTextureSamples: spec.samples ?? 1,
-        mainTextureRatio: spec.textureRatio ?? 0.5,
+        mainTextureSamples: samples,
+        mainTextureRatio: ratio,
       });
+      this.glowBuiltRatio = ratio;
+      this.glowBuiltSamples = samples;
+      // A rebuild drops the whitelist with the old layer. Anything the game
+      // opted in stays opted in — through the same subtree walk addGlowMesh
+      // uses, since a root is usually a geometry-less glTF node whose CHILDREN
+      // are what bloom.
+      for (const root of this.glowRoots) {
+        if (root.isDisposed()) continue;
+        for (const mesh of this.glowMeshesUnder(root)) this.glowLayer.addIncludedOnlyMesh(mesh as Mesh);
+      }
     }
     this.glowLayer.intensity = spec.intensity;
+    // Live-settable, unlike the two above: Babylon rebuilds the blur
+    // post-processes on assignment.
+    if (spec.blurKernelSize !== undefined) this.glowLayer.blurKernelSize = spec.blurKernelSize;
     // A sun created BEFORE the layer existed would otherwise never glow. Callers
     // set the layer up first today, but the two are independent calls and the
     // failure is silent, so re-enrol rather than depend on the order.
@@ -3518,6 +3546,113 @@ export class BabylonAdapter implements RendererAdapter {
     }
   }
 
+  /**
+   * Stages switched off through {@link setRenderPassEnabled}, with what is
+   * needed to put them back exactly where they were.
+   *
+   * Post-processes and custom render targets are disabled by REMOVING them from
+   * the lists the engine walks — there is no enabled flag on either — so the
+   * adapter is the only thing still holding them. Losing this map leaks the
+   * pass and the pixels it owned. The index is kept because order is not
+   * cosmetic: post-processes feed each other, and a flare re-attached before
+   * tone mapping is a different picture.
+   */
+  private disabledPasses = new Map<
+    string,
+    | { kind: 'post-process'; label: string; pass: PostProcess; camera: BabylonCamera; index: number }
+    | { kind: 'render-target'; label: string; target: RenderTargetTexture; index: number }
+  >();
+
+  /** The post-processes attached to the active camera, in engine order. */
+  private cameraPasses(): PostProcess[] {
+    const camera = this.scene?.activeCamera as
+      | (BabylonCamera & { _postProcesses?: (PostProcess | null)[] })
+      | null
+      | undefined;
+    return (camera?._postProcesses ?? []).filter((p): p is PostProcess => !!p);
+  }
+
+  listRenderPasses(): RenderPassInfo[] {
+    const scene = this.scene;
+    if (!scene) return [];
+    const out: RenderPassInfo[] = [];
+    for (const pass of this.cameraPasses()) {
+      out.push({ id: `pp:${pass.name}`, label: pass.name, kind: 'post-process', enabled: true });
+    }
+    // Effect layers keep their place in the scene when switched off, so they
+    // report their own flag rather than going through the disabled map.
+    for (const layer of scene.effectLayers) {
+      out.push({ id: `layer:${layer.name}`, label: layer.name, kind: 'effect-layer', enabled: layer.isEnabled });
+    }
+    for (const target of scene.customRenderTargets) {
+      out.push({ id: `rt:${target.name}`, label: target.name, kind: 'render-target', enabled: true });
+    }
+    // The ones taken out of those lists still belong in the table — a row that
+    // disappeared the moment you used it would be unusable as a toggle.
+    //
+    // Unless the game put one back. A pass is not only ours to move: the lens
+    // flare rebuilds itself when its camera or its sun is replaced, which a
+    // round reset does, and the rebuilt pass carries the same name. Reporting
+    // both the live one and our stale record gave the id twice — a panel keys
+    // its rows by id, so one row showed the pass on and the row under it showed
+    // the same pass off. The live pipeline wins; our record was of an object
+    // the engine has already thrown away.
+    const live = new Set(out.map((p) => p.id));
+    for (const [id, off] of [...this.disabledPasses]) {
+      if (live.has(id)) {
+        this.disabledPasses.delete(id);
+        continue;
+      }
+      out.push({ id, label: off.label, kind: off.kind, enabled: false });
+    }
+    return out;
+  }
+
+  setRenderPassEnabled(id: string, enabled: boolean): void {
+    const scene = this.scene;
+    if (!scene) return;
+
+    if (id.startsWith('layer:')) {
+      const layer = scene.effectLayers.find((l) => l.name === id.slice(6));
+      if (layer) layer.isEnabled = enabled;
+      return;
+    }
+
+    if (enabled) {
+      const off = this.disabledPasses.get(id);
+      if (!off) return;
+      this.disabledPasses.delete(id);
+      if (off.kind === 'post-process') {
+        // Only if the camera is still the live one. A round reset builds a new
+        // camera, and re-attaching to the old one would silently do nothing
+        // while the row claimed the pass was back.
+        if (!off.camera.isDisposed()) off.camera.attachPostProcess(off.pass, off.index);
+      } else {
+        scene.customRenderTargets.splice(Math.min(off.index, scene.customRenderTargets.length), 0, off.target);
+      }
+      return;
+    }
+
+    if (this.disabledPasses.has(id)) return;
+    if (id.startsWith('pp:')) {
+      const name = id.slice(3);
+      const camera = scene.activeCamera;
+      const passes = this.cameraPasses();
+      const index = passes.findIndex((p) => p.name === name);
+      if (!camera || index < 0) return;
+      const pass = passes[index];
+      camera.detachPostProcess(pass);
+      this.disabledPasses.set(id, { kind: 'post-process', label: name, pass, camera, index });
+    } else if (id.startsWith('rt:')) {
+      const name = id.slice(3);
+      const index = scene.customRenderTargets.findIndex((t) => t.name === name);
+      if (index < 0) return;
+      const target = scene.customRenderTargets[index];
+      scene.customRenderTargets.splice(index, 1);
+      this.disabledPasses.set(id, { kind: 'render-target', label: name, target, index });
+    }
+  }
+
   getFrameTimings(): FrameTimings {
     const si = this.sceneInstrumentation;
     const gpuCounter = this.engineInstrumentation?.gpuFrameTimeCounter;
@@ -3779,6 +3914,8 @@ export class BabylonAdapter implements RendererAdapter {
     // engine and re-enter it on dispose, and the GPU timer's observers live on
     // the engine rather than on the instrumentation object.
     this.profileFrame(false);
+    // The scene owns these; the map only held them out of its lists.
+    this.disabledPasses.clear();
     // Audio first: sounds/listener reference scene nodes that are about to go.
     for (const entry of this.sounds.values()) entry.sound.dispose();
     this.sounds.clear();

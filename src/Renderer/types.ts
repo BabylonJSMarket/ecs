@@ -813,10 +813,27 @@ export interface ParticleEmitterSpec {
 export interface GlowSpec {
   /** Glow strength. Typically ~0.9. */
   intensity: number;
-  /** Glow RTT downsample ratio (cheaper/blurrier as it drops). Default 0.5. */
+  /**
+   * Glow RTT downsample ratio (cheaper/blurrier as it drops). Default 0.5.
+   *
+   * Fixed when the layer is built, in every engine that has one — so changing
+   * it means REBUILDING the layer, which the adapter does for you. Setting it
+   * and seeing nothing happen was the old behaviour and it looked exactly like
+   * a knob that did not matter.
+   */
   textureRatio?: number;
-  /** MSAA samples on the glow RTT. Default 1. */
+  /** MSAA samples on the glow RTT. Default 1. Also fixed at build time. */
   samples?: number;
+  /**
+   * Blur width in pixels across the glow's downsampled buffer. Default 32.
+   *
+   * The other half of what a glow costs, and the half that changes the LOOK
+   * rather than the resolution: a wide kernel is a soft distant halo, a narrow
+   * one is a tight rim. Cheaper as it drops, but measure before assuming it is
+   * the expensive part — on a scene whose glow buffer is already a quarter of
+   * the screen, it need not be.
+   */
+  blurKernelSize?: number;
 }
 
 /**
@@ -915,6 +932,30 @@ export interface RenderStats {
    * can describe a corpse in complete detail and look authoritative doing it.
    */
   frames: number;
+}
+
+/**
+ * One switchable stage of the frame — {@link RendererAdapter.listRenderPasses}.
+ *
+ * The companion to {@link FrameTimings}: the split says a frame costs 17ms and
+ * that most of it is the GPU, and this says WHICH stage, by letting you take
+ * one out and look. Pricing a pass by reading code is guesswork, and pricing it
+ * by disabling things from a console needs the engine in reach — which a
+ * component may not have. So the adapter enumerates its own stages.
+ *
+ * Kinds fail differently, which is why the row says which it is. A
+ * post-process is a full-screen fragment shader and costs pixels; an effect
+ * layer costs a buffer plus its blurs; a render target is another draw pass
+ * with its own culling. A frame that is fill-rate bound is almost always the
+ * first kind.
+ */
+export interface RenderPassInfo {
+  /** Stable id to hand back to {@link RendererAdapter.setRenderPassEnabled}. */
+  id: string;
+  /** Short human label for a panel row. */
+  label: string;
+  kind: 'post-process' | 'effect-layer' | 'render-target';
+  enabled: boolean;
 }
 
 /**
@@ -1960,6 +2001,27 @@ export interface RendererAdapter {
    * believing a zero.
    */
   getFrameTimings(): FrameTimings;
+  /**
+   * The frame's switchable stages, in the order the engine runs them.
+   *
+   * Diagnostic, not a rendering feature: it exists so a panel can price each
+   * stage by taking it out, without importing an engine. Adapters that cannot
+   * enumerate their pipeline return an empty array — which reads correctly as
+   * "nothing to switch here", not as "this frame has no passes".
+   */
+  listRenderPasses(): RenderPassInfo[];
+  /**
+   * Switch one stage from {@link listRenderPasses} on or off.
+   *
+   * A disabled stage keeps its place in the list, reported as `enabled: false`,
+   * so a panel row does not vanish the moment it is used. Unknown ids are
+   * ignored rather than thrown: the list is rebuilt as the scene changes, and a
+   * panel holding a stale id must not be able to take the game down.
+   *
+   * Not persistent and not a quality setting. A scene reload rebuilds the
+   * pipeline and everything comes back on.
+   */
+  setRenderPassEnabled(id: string, enabled: boolean): void;
   /**
    * Attach or detach the expensive half of {@link getFrameTimings}: the engine
    * sub-pass breakdown and the GPU timer query.

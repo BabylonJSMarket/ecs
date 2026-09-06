@@ -86,6 +86,7 @@ import type {
   SoundHandle,
   RenderStats,
   FrameTimings,
+  RenderPassInfo,
 } from './types';
 
 /** Babylon Lite mesh-like node (Mesh extends SceneNode; both carry transforms). */
@@ -2155,6 +2156,14 @@ export class BabylonLiteAdapter implements RendererAdapter {
   profileFrame(_on: boolean): void {
     // @babylonjs/lite exposes no instrumentation classes — nothing to attach.
   }
+
+  listRenderPasses(): RenderPassInfo[] {
+    // Lite runs its own frame graph and exposes no pass list to reach into.
+    // Empty reads correctly as "nothing switchable here".
+    return [];
+  }
+
+  setRenderPassEnabled(_id: string, _enabled: boolean): void {}
 
   getFrameTimings(): FrameTimings {
     return {

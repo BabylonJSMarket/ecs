@@ -79,7 +79,7 @@ import type {
   SoundSpec,
   SoundHandle,
 } from './types';
-import type { Color, FrameTimings, RenderStats } from './types';
+import type { Color, FrameTimings, RenderPassInfo, RenderStats } from './types';
 import { rasterizeSunStarburst, SUN_STARBURST_TEXELS } from './sunStarburst';
 
 export interface ThreeAdapterOptions {
@@ -3255,6 +3255,28 @@ export class ThreeAdapter implements RendererAdapter {
     // is nothing to attach. The wall-clock split below is measured regardless;
     // breakdownMeasured/gpuMeasured stay false rather than reporting zeros that
     // would read as "these passes are free".
+  }
+
+  listRenderPasses(): RenderPassInfo[] {
+    // Three's post chain is the composer's pass list, and every pass carries a
+    // real `enabled` flag — so unlike Babylon nothing has to be removed and put
+    // back. With no composer there is no chain: the adapter draws straight to
+    // the canvas and there is nothing to switch.
+    const composer = this.composer as unknown as { passes?: { enabled: boolean; constructor: { name: string } }[] } | undefined;
+    return (composer?.passes ?? []).map((pass, i) => ({
+      id: `pp:${i}:${pass.constructor.name}`,
+      label: pass.constructor.name,
+      kind: 'post-process' as const,
+      enabled: pass.enabled,
+    }));
+  }
+
+  setRenderPassEnabled(id: string, enabled: boolean): void {
+    const composer = this.composer as unknown as { passes?: { enabled: boolean; constructor: { name: string } }[] } | undefined;
+    const passes = composer?.passes ?? [];
+    const index = Number(id.split(':')[1]);
+    const pass = passes[index];
+    if (pass) pass.enabled = enabled;
   }
 
   getFrameTimings(): FrameTimings {

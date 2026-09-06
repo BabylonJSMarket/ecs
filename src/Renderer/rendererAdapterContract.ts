@@ -1711,6 +1711,45 @@ export function runRendererAdapterContract(
         expect(t.gpuMeasured).toBe(false);
       });
 
+      it('listRenderPasses is well-formed, and a pass survives being switched off and back on', () => {
+        // The list is what a panel renders as rows, so its SHAPE is the
+        // contract — an adapter with no switchable pipeline answers with an
+        // empty array, which reads as "nothing to switch", not as an error.
+        const before = adapter.listRenderPasses();
+        expect(Array.isArray(before)).toBe(true);
+        for (const pass of before) {
+          expect(typeof pass.id).toBe('string');
+          expect(pass.id.length).toBeGreaterThan(0);
+          expect(typeof pass.label).toBe('string');
+          expect(['post-process', 'effect-layer', 'render-target']).toContain(pass.kind);
+          expect(typeof pass.enabled).toBe('boolean');
+        }
+        // Ids must be unique or a panel cannot key its rows, and toggling one
+        // row would move another.
+        expect(new Set(before.map((p) => p.id)).size).toBe(before.length);
+
+        // A switched-off pass KEEPS its row, reported as off. A row that
+        // vanished the moment you used it would be unusable as a toggle — and
+        // there would be nothing left to click to bring the pass back.
+        const target = before[0];
+        if (target) {
+          adapter.setRenderPassEnabled(target.id, false);
+          const off = adapter.listRenderPasses().find((p) => p.id === target.id);
+          expect(off, 'the row survives being switched off').toBeTruthy();
+          expect(off?.enabled).toBe(false);
+          adapter.setRenderPassEnabled(target.id, true);
+          expect(adapter.listRenderPasses().find((p) => p.id === target.id)?.enabled).toBe(true);
+        }
+
+        // A panel holds ids across scene reloads that rebuild the pipeline, so
+        // a stale one must be inert rather than fatal.
+        expect(() => {
+          adapter.setRenderPassEnabled('pp:nothing-by-this-name', false);
+          adapter.setRenderPassEnabled('layer:nothing-by-this-name', true);
+          adapter.setRenderPassEnabled('', false);
+        }).not.toThrow();
+      });
+
       it('profileFrame is idempotent and survives being switched on with no scene, then off', () => {
         // Whoever opens the readout turns this on and turns it off on the way
         // out, and a scene reload can do both in either order — including on an
@@ -1725,6 +1764,32 @@ export function runRendererAdapterContract(
         const t = adapter.getFrameTimings();
         expect(t.breakdownMeasured).toBe(false);
         expect(Number.isFinite(t.frame)).toBe(true);
+      });
+
+      it('a changed glow textureRatio rebuilds the layer and keeps the whitelist', () => {
+        // The ratio is fixed when the layer is built in every engine that has
+        // one, so "set it again with a smaller number" has to mean REBUILD or
+        // it silently means nothing — a knob you turn to buy back fill rate,
+        // that reports no error and changes no pixels, is worse than no knob.
+        // What must survive the rebuild is the enrolment: a whitelist dropped
+        // with the old layer would leave a Babylon glow layer with an EMPTY
+        // include list, which means "everything glows" — the opposite of what
+        // the game asked for, arrived at by tuning performance.
+        const lamp = adapter.createMesh('glow-lamp', { kind: 'sphere' });
+        adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.5 });
+        adapter.addGlowMesh(lamp);
+        expect(() => adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.25 })).not.toThrow();
+        if (options.glowEnrolled) {
+          const r = options.glowEnrolled(adapter, 'glow-lamp', lamp);
+          expect(r.total).toBeGreaterThan(0);
+          expect(r.enrolled).toBe(r.total);
+        }
+        // Idempotent at the same ratio, and the blur width is live-settable.
+        expect(() => {
+          adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.25 });
+          adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.25, blurKernelSize: 8 });
+          adapter.setGlowLayer(null);
+        }).not.toThrow();
       });
 
       it('setSunOccluded is safe before a sun exists, and round-trips after', () => {
