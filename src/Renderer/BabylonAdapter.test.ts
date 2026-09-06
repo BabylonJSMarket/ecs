@@ -8,6 +8,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { MeshBuilder, NullEngine, Scene, Vector3 } from '@babylonjs/core';
+import { GPUParticleSystem } from '@babylonjs/core';
+import type { ParticleSystem } from '@babylonjs/core';
 import type { AbstractMesh, DeepImmutable, GlowLayer } from '@babylonjs/core';
 import { BabylonAdapter, hardwareScalingLevelForDpr } from './BabylonAdapter';
 import type { CameraHandle, MeshHandle, SoundHandle } from './types';
@@ -657,5 +659,53 @@ describe('BabylonAdapter rock field — one material, not one per rock', () => {
     });
     // Three kinds, three materials — for any number of rocks.
     expect(rockMats(adapter)).toHaveLength(3);
+  });
+});
+
+/**
+ * A burst must be the CPU particle system, whatever the engine can do. Babylon's
+ * GPU system reads `disposeOnStop` and never acts on it — its `stop()` flips a
+ * bool — so routing bursts through it leaked one stopped-but-live system per hit
+ * spark, muzzle flash and explosion, each still paying an update pass and a
+ * draw every frame. The cabinet's frame rate slid from the 30s into the teens
+ * over a minute of dogfighting while every mesh count sat still.
+ *
+ * The end-to-end lifecycle (emit → stop → last particle dies → gone from
+ * `scene.particleSystems`) is the CPU class's own behaviour and was verified in
+ * a live browser; NullEngine never readies a particle effect, so the frame loop
+ * cannot be driven here. What CAN be pinned is the choice: with GPU support
+ * forced on, the burst is still a `ParticleSystem` wired to dispose itself.
+ */
+describe('BabylonAdapter particle bursts use the CPU system that disposes itself', () => {
+  it('builds a ParticleSystem with disposeOnStop even when GPU particles are supported', () => {
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    const scene = adapter.scene;
+    const dot = adapter.createDynamicTexture('burst-dot', {
+      width: 2, height: 2, pixels: new Uint8Array(16).fill(255),
+    });
+
+    // The GPU path is what the old code took on every real browser.
+    const supported = Object.getOwnPropertyDescriptor(GPUParticleSystem, 'IsSupported')!;
+    Object.defineProperty(GPUParticleSystem, 'IsSupported', { configurable: true, get: () => true });
+    try {
+      adapter.createParticleBurst({
+        position: [0, 0, 0], texture: dot, count: 8, emitRadius: 0.5,
+        minSize: 0.1, maxSize: 0.2, minLifeTime: 0.005, maxLifeTime: 0.01,
+        minEmitPower: 1, maxEmitPower: 2,
+        color1: [1, 1, 1, 1], color2: [1, 1, 1, 1], colorDead: [0, 0, 0, 0],
+        blend: 'add', gravity: [0, 0, 0], duration: 0.01,
+      });
+    } finally {
+      Object.defineProperty(GPUParticleSystem, 'IsSupported', supported);
+    }
+
+    expect(scene.particleSystems).toHaveLength(1);
+    const burst = scene.particleSystems[0] as ParticleSystem;
+    expect(burst.getClassName()).toBe('ParticleSystem');
+    expect(burst.disposeOnStop).toBe(true);
+    expect(burst.manualEmitCount).toBe(8);
+    expect(burst.targetStopDuration).toBe(0.01);
   });
 });

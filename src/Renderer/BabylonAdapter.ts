@@ -2827,9 +2827,20 @@ export class BabylonAdapter implements RendererAdapter {
     const scene = this.scene;
     const name = `burst-${this.particleCounter++}`;
     const capacity = Math.max(1, spec.count);
-    const system: ParticleSystem | GPUParticleSystem = GPUParticleSystem.IsSupported
-      ? new GPUParticleSystem(name, { capacity }, scene)
-      : new ParticleSystem(name, capacity, scene);
+    // A burst is a CPU ParticleSystem, never the GPU one, and the reason is
+    // how it ends rather than how it starts. `disposeOnStop` is honoured only
+    // by the CPU system: once the manual emit is spent it stops itself, and
+    // when the last particle dies it hands itself to the scene for disposal.
+    // The GPU system carries the flag for cloning and does nothing with it —
+    // its `stop()` flips a bool — so every hit spark, muzzle flash and
+    // explosion used to leave a stopped-but-live system in `scene.particleSystems`
+    // running a transform-feedback update and a draw every frame, forever. A
+    // minute of dogfighting leaked hundreds; the frame rate slid from the 30s
+    // into the teens while every mesh count on the perf panel sat still,
+    // because none of them counts particle systems. The continuous emitters
+    // (`createParticleEmitter`) still go to the GPU: they live as long as their
+    // owner and are disposed explicitly.
+    const system = new ParticleSystem(name, capacity, scene);
     const tex = this.textures.get(spec.texture);
     if (tex) system.particleTexture = tex;
     system.emitter = new Vector3(spec.position[0], spec.position[1], spec.position[2]);
