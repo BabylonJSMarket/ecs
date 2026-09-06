@@ -3665,11 +3665,28 @@ function paintVertexTint(mesh: Mesh, r: number, g: number, b: number): void {
   mesh.setVerticesData(VertexBuffer.ColorKind, colors, false);
 }
 
+/**
+ * Icosphere subdivisions for a rock of `radius` when the spec names none.
+ *
+ * This was a flat 14 — 3,920 triangles for every rock, the 40-unit pebble and
+ * the 150-unit mountain alike — and with the whole belt exempt from culling
+ * that was 430k triangles a frame before a single ship was drawn. The noise
+ * field has nothing finer than its 6.4-radian term, which a subdivision-5
+ * icosphere already resolves; past that, extra triangles only round off the
+ * silhouette, and a silhouette's facets show in proportion to how much screen
+ * the rock covers. So the count follows the radius: 5 for the small rocks that
+ * make up most of a field (500 triangles), up to 12 for the giants (2,880).
+ */
+function asteroidSubdivisionsFor(radius: number): number {
+  return Math.min(12, Math.max(5, Math.round(radius / 12)));
+}
+
 function buildAsteroid(
   scene: Scene, id: string, radius: number, color: Color3, seed: number,
-  cutAxis?: Vec3, cutDepth?: number, subdivisions = 14,
+  cutAxis?: Vec3, cutDepth?: number, subdivisions?: number,
 ): Mesh {
-  const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions, flat: false }, scene);
+  const subs = subdivisions ?? asteroidSubdivisionsFor(radius);
+  const mesh = MeshBuilder.CreateIcoSphere(id, { radius: 1, subdivisions: subs, flat: false }, scene);
   const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
   if (positions) {
     const shape = asteroidShape(seed, cutAxis, cutDepth);
@@ -3679,9 +3696,11 @@ function buildAsteroid(
     applyAsteroidDisplacement(mesh, positions, directions, shape, radius);
     mesh.refreshBoundingInfo();
   }
-  // Asteroids are huge (up to ~400u) and few — never cull them; per-pixel GPU
-  // clipping is cheaper than risking a half-clipped mountain.
-  mesh.alwaysSelectAsActiveMesh = true;
+  // Frustum-culled like any other mesh. The bounding info was refreshed after
+  // the displacement, so Babylon tests the rock's real box, and culling is per
+  // mesh — a rock straddling the frustum edge is still drawn whole. This used
+  // to set `alwaysSelectAsActiveMesh` out of fear of a half-clipped mountain,
+  // which drew every rock in the belt every frame, the ones behind you included.
   paintVertexTint(
     mesh,
     clamp01(color.r + (rockHash(seed, 6) - 0.5) * 0.08),
