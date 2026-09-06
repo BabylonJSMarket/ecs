@@ -763,3 +763,149 @@ describe('BabylonAdapter particle bursts', () => {
     expect(scene.particleSystems[0].manualEmitCount).toBe(2048);
   });
 });
+
+/**
+ * The frame-time split — the readout that turns "we're at 32fps and it's
+ * CPU-bound" into a number with a name on it.
+ *
+ * Driven by a scripted clock rather than a real loop. A wall-clock test of a
+ * timing feature measures the machine it runs on: it passes on an idle laptop,
+ * fails in CI under load, and teaches you nothing either way. Feeding
+ * `performance.now` a fixed sequence pins what is actually being claimed —
+ * that the milliseconds land in the right bucket and that the buckets add up.
+ */
+describe('BabylonAdapter frame timings', () => {
+  /**
+   * Drive N loop iterations with a fixed cost per phase.
+   *
+   * The loop body is captured off `runRenderLoop` rather than let run: calling
+   * it by hand is what makes the clock scriptable. No camera is registered, so
+   * `scene.render()` is skipped and Babylon never reads the clock behind us.
+   */
+  function runFrames(opts: { frames: number; tickMs: number; renderMs: number; gapMs: number }) {
+    const adapter = new BabylonAdapter();
+    const engine = new NullEngine();
+    const scene = new Scene(engine);
+    (adapter as unknown as { engine: NullEngine }).engine = engine;
+    (adapter as unknown as { scene: Scene }).scene = scene;
+    // The adapter skips the draw when no camera is registered, so the split
+    // needs one — but a real render would read the clock behind us and spend
+    // an unknown amount of it. A stub camera plus a stub render buys both: the
+    // branch is taken, and the draw costs exactly what the script says.
+    scene.activeCamera = {} as unknown as Scene['activeCamera'];
+
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    vi.spyOn(scene, 'render').mockImplementation(() => {
+      clock += opts.renderMs;
+    });
+
+    let body: (() => void) | undefined;
+    vi.spyOn(engine, 'runRenderLoop').mockImplementation((fn) => {
+      body = fn as () => void;
+    });
+
+    const dts: number[] = [];
+    adapter.startLoop((dt) => {
+      dts.push(dt);
+      clock += opts.tickMs;
+    });
+
+    for (let i = 0; i < opts.frames; i++) {
+      // Everything between the end of one loop body and the start of the next:
+      // vsync wait, compositing, the browser's own work.
+      clock += opts.gapMs;
+      body!();
+    }
+
+    const timings = adapter.getFrameTimings();
+    now.mockRestore();
+    vi.restoreAllMocks();
+    return { timings, dts, adapter, engine };
+  }
+
+  it('splits one frame into tick, render and the gap between loop bodies', () => {
+    // 2ms of simulation, 3ms of draw submission, 15ms of nothing — a frame that
+    // is mostly waiting, which is the shape a vsync-capped or GPU-bound game
+    // makes and the shape that gets misdiagnosed as "the renderer is slow".
+    const { timings } = runFrames({ frames: 200, tickMs: 2, renderMs: 3, gapMs: 15 });
+    expect(timings.tick).toBeCloseTo(2, 3);
+    expect(timings.render).toBeCloseTo(3, 3);
+    expect(timings.frame).toBeCloseTo(20, 3);
+    // The whole point of the row: 15ms nobody in the loop spent.
+    expect(timings.outside).toBeCloseTo(15, 3);
+  });
+
+  it('discards the first interval, which measures scene construction and not a frame', () => {
+    // startLoop stamps the clock, and the first callback lands however long
+    // later the browser felt like — after asset upload, shader compilation, a
+    // scene build. Fed into a smoothed average that one sample reads as a
+    // half-second frame for the next several seconds, so the panel's first
+    // impression would be a lie every time.
+    const adapter = new BabylonAdapter();
+    const engine = new NullEngine();
+    (adapter as unknown as { engine: NullEngine }).engine = engine;
+    (adapter as unknown as { scene: Scene }).scene = new Scene(engine);
+
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    let body: (() => void) | undefined;
+    vi.spyOn(engine, 'runRenderLoop').mockImplementation((fn) => { body = fn as () => void; });
+
+    adapter.startLoop(() => {});
+    clock += 4000; // four seconds of loading before the first frame
+    body!();
+    expect(adapter.getFrameTimings().frame).toBe(0);
+
+    clock += 20;
+    body!();
+    // Only the honest 20ms interval reaches the average.
+    expect(adapter.getFrameTimings().frame).toBeCloseTo(2, 6);
+    vi.restoreAllMocks();
+  });
+
+  it('hands the same interval to the simulation as seconds of dt', () => {
+    const { dts } = runFrames({ frames: 3, tickMs: 2, renderMs: 3, gapMs: 15 });
+    // frame 1 is the startLoop→first-body gap; 2 and 3 are steady state.
+    expect(dts[1]).toBeCloseTo(0.02, 6);
+    expect(dts[2]).toBeCloseTo(0.02, 6);
+  });
+
+  it('reports zeros and no false confidence before the loop has run', () => {
+    const adapter = new BabylonAdapter();
+    const t = adapter.getFrameTimings();
+    expect(t.frame).toBe(0);
+    expect(t.outside).toBe(0);
+    // renderMeasured is a statement about the ADAPTER, not about this frame:
+    // this one owns its draw call whether or not it has made one yet.
+    expect(t.renderMeasured).toBe(true);
+    expect(t.gpuMeasured).toBe(false);
+    expect(t.breakdownMeasured).toBe(false);
+  });
+
+  it('attaches and fully releases the engine instrumentation', () => {
+    const adapter = new BabylonAdapter();
+    const engine = new NullEngine();
+    (adapter as unknown as { engine: NullEngine }).engine = engine;
+    (adapter as unknown as { scene: Scene }).scene = new Scene(engine);
+
+    expect(adapter.getFrameTimings().breakdownMeasured).toBe(false);
+    adapter.profileFrame(true);
+    adapter.profileFrame(true); // idempotent — no second instrumentation
+    expect(adapter.getFrameTimings().breakdownMeasured).toBe(true);
+    // NullEngine has no timer-query extension, so the GPU counter never
+    // receives a sample. The flag says so instead of the row reading 0.00ms.
+    expect(adapter.getFrameTimings().gpuMeasured).toBe(false);
+
+    adapter.profileFrame(false);
+    expect(adapter.getFrameTimings().breakdownMeasured).toBe(false);
+    // The trap this pins: the GPU timer's two observers live on the ENGINE,
+    // registered by captureGPUFrameTime, and EngineInstrumentation.dispose()
+    // does not remove them. Dispose without clearing the flag first and the
+    // engine keeps starting a timer query every frame for the rest of the
+    // session with nothing alive to read it.
+    expect((engine as unknown as { _captureGPUFrameTime?: boolean })._captureGPUFrameTime).toBe(false);
+    expect(engine.onBeginFrameObservable.hasObservers()).toBe(false);
+    expect(engine.onEndFrameObservable.hasObservers()).toBe(false);
+  });
+});

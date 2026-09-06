@@ -61,6 +61,7 @@ import type {
   SoundSpec,
   SoundHandle,
   RenderStats,
+  FrameTimings,
 } from './types';
 import type { Color } from './types';
 
@@ -1028,6 +1029,23 @@ export class MockRendererAdapter implements RendererAdapter {
 
   getRenderScale(): number {
     return this.renderScale;
+  }
+
+  /** Frame timings a test can drive, like {@link renderStats}. */
+  frameTimings: Partial<FrameTimings> = {};
+
+  profileFrame(on: boolean): void {
+    this.record('profileFrame', on);
+  }
+
+  getFrameTimings(): FrameTimings {
+    this.record('getFrameTimings');
+    return {
+      frame: 0, tick: 0, render: 0, outside: 0, gpu: 0,
+      activeMeshEval: 0, renderTargets: 0, particles: 0,
+      renderMeasured: false, gpuMeasured: false, breakdownMeasured: false,
+      ...this.frameTimings,
+    };
   }
 
   getRenderStats(): RenderStats {

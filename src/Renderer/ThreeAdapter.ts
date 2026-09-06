@@ -79,7 +79,7 @@ import type {
   SoundSpec,
   SoundHandle,
 } from './types';
-import type { Color, RenderStats } from './types';
+import type { Color, FrameTimings, RenderStats } from './types';
 import { rasterizeSunStarburst, SUN_STARBURST_TEXELS } from './sunStarburst';
 
 export interface ThreeAdapterOptions {
@@ -3243,6 +3243,36 @@ export class ThreeAdapter implements RendererAdapter {
     return this.renderScale;
   }
 
+  /** Rolling frame-time split in ms — same exponential average as the Babylon adapter. */
+  private frameMs = 0;
+  private tickMs = 0;
+  private renderMs = 0;
+  /** First interval discarded: it spans scene construction, not a frame. */
+  private timedFrames = 0;
+
+  profileFrame(_on: boolean): void {
+    // Three exposes no per-pass timers and no GPU timer-query wrapper, so there
+    // is nothing to attach. The wall-clock split below is measured regardless;
+    // breakdownMeasured/gpuMeasured stay false rather than reporting zeros that
+    // would read as "these passes are free".
+  }
+
+  getFrameTimings(): FrameTimings {
+    return {
+      frame: this.frameMs,
+      tick: this.tickMs,
+      render: this.renderMs,
+      outside: Math.max(0, this.frameMs - this.tickMs - this.renderMs),
+      gpu: 0,
+      activeMeshEval: 0,
+      renderTargets: 0,
+      particles: 0,
+      renderMeasured: true,
+      gpuMeasured: false,
+      breakdownMeasured: false,
+    };
+  }
+
   getRenderStats(): RenderStats {
     const info = (this.renderer as unknown as { info?: { render: { calls: number; triangles: number }; memory: { geometries: number; textures: number } } } | undefined)?.info;
     let meshes = 0;
@@ -3397,8 +3427,11 @@ export class ThreeAdapter implements RendererAdapter {
 
     const tick = () => {
       const now = performance.now();
-      const dt = Math.min(0.1, (now - this.lastTime) / 1000);
+      const interval = now - this.lastTime;
+      const dt = Math.min(0.1, interval / 1000);
       this.lastTime = now;
+      if (this.timedFrames > 0) this.frameMs = this.frameMs * 0.9 + interval * 0.1;
+      this.timedFrames++;
       // Keep the drawing buffer + camera aspect synced to the canvas each frame
       // (Babylon's engine does this automatically; Three needs it explicit).
       const c = this.canvas;
@@ -3407,7 +3440,13 @@ export class ThreeAdapter implements RendererAdapter {
         this._lastCanvasH = c.clientHeight;
         if (c.clientWidth > 0 && c.clientHeight > 0) this.resize();
       }
+      // Stamped here rather than reusing `now`: the canvas-size check above is
+      // this adapter's own work, and charging a resize to the simulation would
+      // put a spike in the one row that names a system.
+      const tickStart = performance.now();
       this.onFrame?.(dt);
+      const afterTick = performance.now();
+      this.tickMs = this.tickMs * 0.9 + (afterTick - tickStart) * 0.1;
       // Advance any registered animation mixers so playing clips actually
       // move. Mixers are lazily created the first time a mesh's clip is
       // played; primitive meshes have none.
@@ -3426,6 +3465,10 @@ export class ThreeAdapter implements RendererAdapter {
         if (this.composer) this.composer.render();
         else this.renderer!.render(this.scene!, camera);
       }
+      // Mixers, billboards, particles and the draw together: everything after
+      // the ECS tick is this adapter's own per-frame work, and splitting it
+      // finer would just be a second systems table.
+      this.renderMs = this.renderMs * 0.9 + (performance.now() - afterTick) * 0.1;
       this.rafId = requestAnimationFrame(tick);
     };
     this.rafId = requestAnimationFrame(tick);

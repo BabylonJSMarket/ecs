@@ -85,6 +85,7 @@ import type {
   SoundSpec,
   SoundHandle,
   RenderStats,
+  FrameTimings,
 } from './types';
 
 /** Babylon Lite mesh-like node (Mesh extends SceneNode; both carry transforms). */
@@ -2140,6 +2141,37 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return this.renderScale;
   }
 
+  /**
+   * Rolling frame-time split in ms. Lite drives its own loop through
+   * `startEngine`, so this adapter sees the ECS callback and the interval
+   * between callbacks — but never the draw. `render` is therefore not measured
+   * and Lite's own submission cost lands in `outside` along with everything
+   * else; `renderMeasured: false` is what says so.
+   */
+  private frameMs = 0;
+  private tickMs = 0;
+  private timedFrames = 0;
+
+  profileFrame(_on: boolean): void {
+    // @babylonjs/lite exposes no instrumentation classes — nothing to attach.
+  }
+
+  getFrameTimings(): FrameTimings {
+    return {
+      frame: this.frameMs,
+      tick: this.tickMs,
+      render: 0,
+      outside: Math.max(0, this.frameMs - this.tickMs),
+      gpu: 0,
+      activeMeshEval: 0,
+      renderTargets: 0,
+      particles: 0,
+      renderMeasured: false,
+      gpuMeasured: false,
+      breakdownMeasured: false,
+    };
+  }
+
   getRenderStats(): RenderStats {
     // Lite's scene graph is opaque from here — it exposes no counters, so this
     // reports the one number it can stand behind rather than inventing the rest.
@@ -2203,9 +2235,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
       let last = performance.now();
       BL.onBeforeRender(scene, () => {
         const now = performance.now();
-        const dt = Math.min(0.1, (now - last) / 1000);
+        const interval = now - last;
+        const dt = Math.min(0.1, interval / 1000);
         last = now;
+        if (this.timedFrames > 0) this.frameMs = this.frameMs * 0.9 + interval * 0.1;
+        this.timedFrames++;
         this.onFrame?.(dt);
+        this.tickMs = this.tickMs * 0.9 + (performance.now() - now) * 0.1;
       });
     }
 

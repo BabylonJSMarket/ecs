@@ -907,6 +907,64 @@ export interface RenderStats {
   frames: number;
 }
 
+/**
+ * Where one frame's milliseconds went — {@link RendererAdapter.getFrameTimings}.
+ *
+ * A frame rate is a single number and a budget is a division problem, so "we
+ * are at 32fps" and "we are CPU-bound" are both still guesses until the 31ms
+ * is split up. There are only four places it can go, and they are answered
+ * differently:
+ *
+ *   tick     — the simulation callback. The World's own per-system profiler
+ *              breaks this down further; if tick is small, no amount of
+ *              switching systems off will move the frame rate.
+ *   render   — the engine's draw SUBMISSION on the CPU: culling, uniform
+ *              uploads, state changes, one draw call per batch. Big here means
+ *              too many distinct things to draw, not too many pixels.
+ *   outside  — everything between the end of one loop body and the start of the
+ *              next. The subtle one, and the reason this interface exists.
+ *   gpu      — how long the card took, measured on the card.
+ *
+ * The trap `outside` exists to catch: `render` returns as soon as the commands
+ * are QUEUED, not when the picture is drawn. When the GPU is the bottleneck the
+ * driver blocks on the next frame's buffer swap instead, which lands in
+ * `outside` — so a GPU-bound frame can show a cheap tick, a cheap render, and
+ * 20ms of apparent idle. Read together with `gpu`, that pattern is diagnostic;
+ * read from `render` alone it looks like the renderer is free and the problem
+ * is somewhere unfindable. `outside` is also where vsync waiting lands, which
+ * is the innocent version of the same shape: a frame that genuinely finishes
+ * early sits there on purpose.
+ *
+ * Every duration is an exponential average over recent frames, in milliseconds
+ * — steady enough to read while frame times jitter. The `*Measured` flags
+ * exist because 0ms and "this adapter cannot see it" are the same number and
+ * mean opposite things.
+ */
+export interface FrameTimings {
+  /** Wall clock between the starts of consecutive loop iterations. `1000/frame` is the real frame rate. */
+  frame: number;
+  /** Time inside the simulation callback — one `World.update`. */
+  tick: number;
+  /** Time inside the engine's draw submission. 0 and meaningless when {@link renderMeasured} is false. */
+  render: number;
+  /** `frame − tick − render`: vsync wait, GPU back-pressure, compositing, other rAF work. */
+  outside: number;
+  /** GPU time for the frame, measured on the GPU. 0 when {@link gpuMeasured} is false. */
+  gpu: number;
+  /** Visibility/culling pass, part of `render`. 0 when {@link breakdownMeasured} is false. */
+  activeMeshEval: number;
+  /** Render-target passes drawn before the main pass, part of `render`. 0 when {@link breakdownMeasured} is false. */
+  renderTargets: number;
+  /** Particle update + draw, part of `render`. 0 when {@link breakdownMeasured} is false. */
+  particles: number;
+  /** Whether this adapter owns the draw call and can time it. False on adapters whose engine runs its own loop. */
+  renderMeasured: boolean;
+  /** Whether `gpu` is a reading. False until {@link RendererAdapter.profileFrame} is on AND the device supports timer queries. */
+  gpuMeasured: boolean;
+  /** Whether the three engine sub-timings are readings. False until {@link RendererAdapter.profileFrame} is on. */
+  breakdownMeasured: boolean;
+}
+
 export interface SunSpec {
   /**
    * Unit world-space direction the light TRAVELS (rays go this way). The disc
@@ -1872,6 +1930,42 @@ export interface RendererAdapter {
    * here is load-bearing for rendering, so a partial answer beats an absent one.
    */
   getRenderStats(): RenderStats;
+  /**
+   * How this frame's milliseconds were spent — simulation, draw submission,
+   * GPU, and the gap between them.
+   *
+   * {@link getRenderStats} counts what the renderer is CARRYING; this measures
+   * what it COST. They fail differently: a scene can hold ten thousand meshes
+   * and hit its frame budget comfortably, and a scene holding two hundred can
+   * miss it badly. Counting alone cannot tell you which one you have, so a
+   * frame-rate ceiling gets attributed by elimination and guesswork — the
+   * expensive kind, where systems get switched off one at a time and the
+   * numbers move for reasons nobody can name.
+   *
+   * The wall-clock split (frame / tick / render / outside) costs a handful of
+   * clock reads per frame and is always live. The engine breakdown and the GPU
+   * reading are not: they need instrumentation attached, and timer queries
+   * perturb the very thing being measured, so they stay dark until
+   * {@link profileFrame} switches them on. Read the `*Measured` flags before
+   * believing a zero.
+   */
+  getFrameTimings(): FrameTimings;
+  /**
+   * Attach or detach the expensive half of {@link getFrameTimings}: the engine
+   * sub-pass breakdown and the GPU timer query.
+   *
+   * Opt-in on purpose, and not only for the cost. A GPU timer query makes the
+   * driver answer a question it would otherwise not be asked, and the act of
+   * asking can add a synchronisation point that was not in the frame before —
+   * which is a fine trade while you are reading the number and a bad one to
+   * leave switched on in a shipped game. Whoever opens the readout turns it on
+   * and turns it off again on the way out.
+   *
+   * Idempotent, and safe before init and after dispose. Adapters whose engine
+   * exposes no such counters implement it as a no-op and report
+   * `breakdownMeasured: false` rather than pretending.
+   */
+  profileFrame(on: boolean): void;
   /**
    * Fraction of native resolution to render at, 0.25–1. 1 is native.
    *

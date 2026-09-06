@@ -53,6 +53,8 @@ import {
   GPUParticleSystem,
   GlowLayer,
   DefaultRenderingPipeline,
+  SceneInstrumentation,
+  EngineInstrumentation,
 } from '@babylonjs/core';
 import type { AssetContainer, AudioEngineV2, Bone, InstancedMesh, InstantiatedEntries, Node, StaticSound, TransformNode } from '@babylonjs/core';
 import type { Observer, PhysicsBody } from '@babylonjs/core';
@@ -119,7 +121,7 @@ import type {
   SoundHandle,
   Vec3,
 } from './types';
-import type { Color, RenderStats } from './types';
+import type { Color, FrameTimings, RenderStats } from './types';
 import { Matrix, Ray, Viewport, CreateAudioEngineAsync, CreateSoundAsync, SoundState } from '@babylonjs/core';
 import {
   asteroidShape,
@@ -3459,6 +3461,88 @@ export class BabylonAdapter implements RendererAdapter {
   private lastStatsFrame = -1;
   private drawCallsPerFrame = 0;
 
+  /**
+   * Rolling frame-time split, in ms. Exponential average, same 0.9/0.1 shape as
+   * the World's per-system profiler so the two readouts move at one pace.
+   */
+  private frameMs = 0;
+  private tickMs = 0;
+  private renderMs = 0;
+  /**
+   * Frames fed to the average. The FIRST interval is thrown away: it measures
+   * the gap between startLoop and the first requestAnimationFrame, which spans
+   * scene construction and asset upload and is not a frame anyone rendered.
+   * Seeded into a smoothed average it reads as a 500ms frame for several
+   * seconds and makes the panel's first impression a lie.
+   */
+  private timedFrames = 0;
+  private sceneInstrumentation?: SceneInstrumentation;
+  private engineInstrumentation?: EngineInstrumentation;
+
+  profileFrame(on: boolean): void {
+    if (!on) {
+      this.sceneInstrumentation?.dispose();
+      this.sceneInstrumentation = undefined;
+      if (this.engineInstrumentation) {
+        // Order matters and the class does not enforce it: the GPU timer's two
+        // observers are registered on the ENGINE by captureGPUFrameTime, and
+        // EngineInstrumentation.dispose() only removes its own shader-compile
+        // observers. Dispose first and the engine keeps starting a timer query
+        // every frame forever, with nothing left alive to read it.
+        this.engineInstrumentation.captureGPUFrameTime = false;
+        this.engineInstrumentation.dispose();
+        this.engineInstrumentation = undefined;
+      }
+      return;
+    }
+    if (!this.scene || !this.engine) return;
+    if (!this.sceneInstrumentation) {
+      const si = new SceneInstrumentation(this.scene);
+      // Only the three that answer "which part of the draw", not the whole
+      // suite: each capture wraps a scene observable, and the ones left off
+      // (frame, render, inter-frame, camera) duplicate what the loop already
+      // times for free.
+      si.captureActiveMeshesEvaluationTime = true;
+      si.captureRenderTargetsRenderTime = true;
+      si.captureParticlesRenderTime = true;
+      this.sceneInstrumentation = si;
+    }
+    if (!this.engineInstrumentation) {
+      const ei = new EngineInstrumentation(this.engine);
+      // A no-op without EXT_disjoint_timer_query_webgl2, which plenty of
+      // browsers withhold as a fingerprinting surface. Nothing throws; the
+      // counter simply never receives a sample, which is what gpuMeasured
+      // reports.
+      ei.captureGPUFrameTime = true;
+      this.engineInstrumentation = ei;
+    }
+  }
+
+  getFrameTimings(): FrameTimings {
+    const si = this.sceneInstrumentation;
+    const gpuCounter = this.engineInstrumentation?.gpuFrameTimeCounter;
+    // Babylon's GPU counter is in NANOSECONDS — it holds the raw GL timer-query
+    // result. Read as ms it reports tens of millions and looks like a hang.
+    const gpuMeasured = !!gpuCounter && gpuCounter.count > 0;
+    return {
+      frame: this.frameMs,
+      tick: this.tickMs,
+      render: this.renderMs,
+      // Clamped rather than allowed negative: the three are averaged
+      // independently over the same frames, so rounding can put their sum a
+      // hair above the interval. A -0.02ms "outside" is noise wearing a
+      // meaningful sign.
+      outside: Math.max(0, this.frameMs - this.tickMs - this.renderMs),
+      gpu: gpuMeasured ? gpuCounter.lastSecAverage / 1e6 : 0,
+      activeMeshEval: si?.activeMeshesEvaluationTimeCounter.lastSecAverage ?? 0,
+      renderTargets: si?.renderTargetsRenderTimeCounter.lastSecAverage ?? 0,
+      particles: si?.particlesRenderTimeCounter.lastSecAverage ?? 0,
+      renderMeasured: true,
+      gpuMeasured,
+      breakdownMeasured: !!si,
+    };
+  }
+
   getRenderStats(): RenderStats {
     const scene = this.scene;
     if (!scene) {
@@ -3615,8 +3699,18 @@ export class BabylonAdapter implements RendererAdapter {
     this.engine.runRenderLoop(() => {
       if (!this.scene) return;
       const now = performance.now();
-      const dt = (now - this.lastTime) / 1000;
+      const interval = now - this.lastTime;
+      const dt = interval / 1000;
       this.lastTime = now;
+      // Three clock reads a frame, unconditionally. The per-system profiler
+      // makes itself opt-in because it pays two reads PER SYSTEM and that adds
+      // up; three per frame does not, and a readout that only begins telling
+      // the truth once you ask for it is one whose first second you cannot
+      // trust — which is the second you are looking at when something is wrong.
+      if (this.timedFrames > 0) {
+        this.frameMs = this.frameMs * 0.9 + interval * 0.1;
+      }
+      this.timedFrames++;
       // The simulation ticks unconditionally. It used to be gated on
       // `scene.isReady()`, which sounds harmless and is not: `isReady()` is
       // false while ANY mesh's material is still compiling, and a mesh that
@@ -3626,11 +3720,17 @@ export class BabylonAdapter implements RendererAdapter {
       // forever. Whether a material has finished compiling is the renderer's
       // problem; `scene.render()` already skips what isn't ready.
       this.onFrame?.(dt);
+      const afterTick = performance.now();
+      this.tickMs = this.tickMs * 0.9 + (afterTick - now) * 0.1;
       // Babylon's scene.render() throws "No camera defined" when no camera
       // has been registered yet. Headless contract tests and the brief
       // window before a Camera component spawns both hit this — skip the
       // draw instead of crashing the loop.
       if (this.scene.activeCamera) this.scene.render();
+      // Submission only. This returns once the commands are QUEUED, so a frame
+      // the GPU cannot keep up with does not show up here — it shows up as the
+      // driver blocking on the next buffer swap, which lands in `outside`.
+      this.renderMs = this.renderMs * 0.9 + (performance.now() - afterTick) * 0.1;
     });
   }
 
@@ -3667,6 +3767,10 @@ export class BabylonAdapter implements RendererAdapter {
 
   dispose(): void {
     this.stopLoop();
+    // Detach instrumentation before the engine goes: both classes hold the
+    // engine and re-enter it on dispose, and the GPU timer's observers live on
+    // the engine rather than on the instrumentation object.
+    this.profileFrame(false);
     // Audio first: sounds/listener reference scene nodes that are about to go.
     for (const entry of this.sounds.values()) entry.sound.dispose();
     this.sounds.clear();

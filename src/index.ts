@@ -26,6 +26,7 @@ export type {
   LabelSpec,
   RendererInitOptions,
   RendererAdapter,
+  FrameTimings,
   EnvironmentTextureOpts,
   MeshGeometry,
   BillboardMode,

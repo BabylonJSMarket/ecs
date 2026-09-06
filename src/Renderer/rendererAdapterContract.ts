@@ -1689,6 +1689,44 @@ export function runRendererAdapterContract(
         }
       });
 
+      it('getFrameTimings answers with finite non-negative durations and honest flags', () => {
+        // Same frame-zero rule as getRenderStats: the readout asks every frame,
+        // including before the loop has ever run. What is pinned here is that a
+        // duration is never NaN and never negative — `outside` is a subtraction,
+        // and an adapter that lets it go negative hands the panel a number that
+        // reads as meaningful and is rounding noise.
+        const t = adapter.getFrameTimings();
+        for (const key of ['frame', 'tick', 'render', 'outside', 'gpu', 'activeMeshEval', 'renderTargets', 'particles'] as const) {
+          expect(Number.isFinite(t[key]), `${key} finite`).toBe(true);
+          expect(t[key], `${key} non-negative`).toBeGreaterThanOrEqual(0);
+        }
+        // The flags are the whole point of the interface: 0ms and "this engine
+        // cannot see it" are the same number and mean opposite things, so a
+        // zero is only readable next to a boolean saying which one it is.
+        for (const key of ['renderMeasured', 'gpuMeasured', 'breakdownMeasured'] as const) {
+          expect(typeof t[key], `${key} is a boolean`).toBe('boolean');
+        }
+        // Nothing has been switched on yet, so nothing may claim to be measured.
+        expect(t.breakdownMeasured).toBe(false);
+        expect(t.gpuMeasured).toBe(false);
+      });
+
+      it('profileFrame is idempotent and survives being switched on with no scene, then off', () => {
+        // Whoever opens the readout turns this on and turns it off on the way
+        // out, and a scene reload can do both in either order — including on an
+        // adapter that has not been through init. Double-on and double-off are
+        // the two that historically leak observers.
+        expect(() => {
+          adapter.profileFrame(true);
+          adapter.profileFrame(true);
+          adapter.profileFrame(false);
+          adapter.profileFrame(false);
+        }).not.toThrow();
+        const t = adapter.getFrameTimings();
+        expect(t.breakdownMeasured).toBe(false);
+        expect(Number.isFinite(t.frame)).toBe(true);
+      });
+
       it('setSunOccluded is safe before a sun exists, and round-trips after', () => {
         // Occlusion is answered in the world by whoever knows where the rocks
         // are, and the answer lands here every frame — including on the frames
