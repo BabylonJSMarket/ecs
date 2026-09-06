@@ -121,7 +121,22 @@ export class RaceDetector {
     const entityId = (data as { entityId?: unknown } | null | undefined)?.entityId;
     if (entityId === undefined || entityId === null) return;
 
-    const key = `${type}:${String(entityId)}`;
+    // Scoped by the COMPONENT when the payload names one, because the
+    // lifecycle events do and an entity is far too coarse a key for them.
+    // Assembling an entity from several systems is the normal shape here: the
+    // pool re-applies a blueprint's components on acquire and ShipLoadout then
+    // resolves a hitbox table into Parts and Health on the same entity in the
+    // same frame. Keyed by entity alone that reads as a race between them, when
+    // they never touch the same component. Keyed by component it stays silent —
+    // and still fires for two systems adding the SAME component, which is the
+    // conflict actually worth reporting.
+    const named = (data as { component?: unknown } | null | undefined)?.component;
+    const scope =
+      named && typeof named === 'object' ? (named as object).constructor?.name : undefined;
+    const key = scope
+      ? `${type}:${String(entityId)}:${scope}`
+      : `${type}:${String(entityId)}`;
+    const subject = scope ? `"${type}" (${scope})` : `"${type}"`;
     const src = this.currentSystem ?? EXTERNAL_SOURCE;
     const set = this.eventSources.get(key) ?? new Set<string>();
 
@@ -132,7 +147,7 @@ export class RaceDetector {
         key,
         sources,
         message:
-          `[ArcadeECS race] Event race in frame: "${type}" for entity "${String(entityId)}" ` +
+          `[ArcadeECS race] Event race in frame: ${subject} for entity "${String(entityId)}" ` +
           `was emitted by multiple systems [${sources.join(', ')}]. ` +
           `Two systems writing the same data last-wins non-deterministically. ` +
           `Restructure so only one system owns this event.`,

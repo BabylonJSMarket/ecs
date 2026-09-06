@@ -254,3 +254,64 @@ describe('RaceDetector', () => {
     });
   });
 });
+
+describe('component lifecycle events are keyed by component, not just entity', () => {
+  class Alpha { }
+  class Beta { }
+
+  const makeDetector = () => {
+    const onWarn = vi.fn();
+    return { detector: new RaceDetector({ onWarn }), onWarn };
+  };
+  const added = (component: object) => ({ entityId: 'enemy-31', component });
+
+  it('two systems adding DIFFERENT components to one entity is not a race', () => {
+    // The false positive this fixes:
+    //   "entity.component.added for entity enemy-31 was emitted by multiple
+    //    systems [PoolSystem, ShipLoadoutSystem]"
+    // Assembling an entity from several systems is the normal shape: the pool
+    // re-applies a blueprint's components on acquire and ShipLoadout resolves a
+    // hitbox table into Parts and Health on the same entity in the same frame.
+    // They never touch the same component.
+    const { detector, onWarn } = makeDetector();
+    detector.beginFrame();
+
+    detector.setCurrentSystem('PoolSystem');
+    detector.recordEvent('entity.component.added', added(new Alpha()));
+    detector.setCurrentSystem('ShipLoadoutSystem');
+    detector.recordEvent('entity.component.added', added(new Beta()));
+
+    expect(onWarn).not.toHaveBeenCalled();
+  });
+
+  it('two systems adding the SAME component to one entity still warns', () => {
+    // The conflict actually worth reporting — narrowing the key must not make
+    // the detector blind to it.
+    const { detector, onWarn } = makeDetector();
+    detector.beginFrame();
+
+    detector.setCurrentSystem('PoolSystem');
+    detector.recordEvent('entity.component.added', added(new Alpha()));
+    detector.setCurrentSystem('ShipLoadoutSystem');
+    detector.recordEvent('entity.component.added', added(new Alpha()));
+
+    expect(onWarn).toHaveBeenCalledTimes(1);
+    const message = onWarn.mock.calls[0][0] as string;
+    expect(message).toContain('PoolSystem');
+    expect(message).toContain('ShipLoadoutSystem');
+    // The message names the component, so the report says what to go and look at.
+    expect(message).toContain('Alpha');
+  });
+
+  it('an event with no component in its payload is still keyed by entity alone', () => {
+    const { detector, onWarn } = makeDetector();
+    detector.beginFrame();
+
+    detector.setCurrentSystem('SysA');
+    detector.recordEvent('health.changed', { entityId: 'hero', value: 50 });
+    detector.setCurrentSystem('SysB');
+    detector.recordEvent('health.changed', { entityId: 'hero', value: 30 });
+
+    expect(onWarn).toHaveBeenCalledTimes(1);
+  });
+});
