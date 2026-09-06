@@ -995,6 +995,17 @@ export class MockRendererAdapter implements RendererAdapter {
   /** Stats a test can drive. Meshes defaults to what the mock actually holds. */
   renderStats: Partial<RenderStats> = {};
 
+  private renderScale = 1;
+
+  setRenderScale(scale: number): void {
+    this.renderScale = Math.min(1, Math.max(0.25, scale));
+    this.record('setRenderScale', this.renderScale);
+  }
+
+  getRenderScale(): number {
+    return this.renderScale;
+  }
+
   getRenderStats(): RenderStats {
     this.record('getRenderStats');
     const created = this.calls.filter((c) => c.method === 'createMesh').length;

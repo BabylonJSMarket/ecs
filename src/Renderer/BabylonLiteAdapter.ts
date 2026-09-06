@@ -2103,6 +2103,19 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return [0, 0, 0];
   }
 
+  // Lite owns its own swap-chain sizing and exposes no scaling hook, so this is
+  // recorded and reported rather than applied — a caller reading it back gets
+  // the truth instead of a number that did nothing.
+  private renderScale = 1;
+
+  setRenderScale(scale: number): void {
+    this.renderScale = Math.min(1, Math.max(0.25, scale));
+  }
+
+  getRenderScale(): number {
+    return this.renderScale;
+  }
+
   getRenderStats(): RenderStats {
     // Lite's scene graph is opaque from here — it exposes no counters, so this
     // reports the one number it can stand behind rather than inventing the rest.

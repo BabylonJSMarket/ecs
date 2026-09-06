@@ -3212,6 +3212,18 @@ export class ThreeAdapter implements RendererAdapter {
     this.sun = undefined;
   }
 
+  private renderScale = 1;
+
+  setRenderScale(scale: number): void {
+    const clamped = Math.min(1, Math.max(0.25, scale));
+    this.renderScale = clamped;
+    this.renderer?.setPixelRatio((globalThis.devicePixelRatio ?? 1) * clamped);
+  }
+
+  getRenderScale(): number {
+    return this.renderScale;
+  }
+
   getRenderStats(): RenderStats {
     const info = (this.renderer as unknown as { info?: { render: { calls: number; triangles: number }; memory: { geometries: number; textures: number } } } | undefined)?.info;
     let meshes = 0;

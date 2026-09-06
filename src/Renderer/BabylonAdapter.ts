@@ -3266,6 +3266,23 @@ export class BabylonAdapter implements RendererAdapter {
     return handle;
   }
 
+  /** Render scale as a fraction of native, for getRenderScale. */
+  private renderScale = 1;
+
+  setRenderScale(scale: number): void {
+    if (!this.engine) return;
+    const clamped = Math.min(1, Math.max(0.25, scale));
+    this.renderScale = clamped;
+    // Babylon's level is the INVERSE of resolution: 1 is one backing pixel per
+    // CSS pixel, 0.5 is two (retina). So native for this display is the DPR
+    // level, and the scale divides into it.
+    this.engine.setHardwareScalingLevel(hardwareScalingLevelForDpr(currentDevicePixelRatio()) / clamped);
+  }
+
+  getRenderScale(): number {
+    return this.renderScale;
+  }
+
   /** Rolling state for the per-frame draw-call delta. */
   private lastDrawCallTotal = 0;
   private lastStatsFrame = -1;

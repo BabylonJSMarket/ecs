@@ -1629,6 +1629,22 @@ export function runRendererAdapterContract(
         expect(Number.isFinite(out[0]) && Number.isFinite(out[1]) && Number.isFinite(out[2])).toBe(true);
       });
 
+      it('setRenderScale clamps into 0.25..1 and reads back', () => {
+        // The knob that separates a fill-rate problem from everything else, so
+        // it has to mean the same thing on every adapter — including the ones
+        // that can only record it. Out-of-range values clamp rather than throw:
+        // a slider is what drives this, and a scale of 0 is a canvas of no
+        // pixels rather than an error anyone would enjoy debugging.
+        expect(adapter.getRenderScale()).toBe(1);
+        adapter.setRenderScale(0.5);
+        expect(adapter.getRenderScale()).toBe(0.5);
+        adapter.setRenderScale(4);
+        expect(adapter.getRenderScale()).toBe(1);
+        adapter.setRenderScale(0);
+        expect(adapter.getRenderScale()).toBe(0.25);
+        adapter.setRenderScale(1);
+      });
+
       it('getRenderStats answers with finite non-negative numbers, before and after a scene exists', () => {
         // The readout has to be safe on frame zero — a panel asks every frame,
         // including the ones before anything has been created. Adapters fill in

@@ -1846,6 +1846,22 @@ export interface RendererAdapter {
    * here is load-bearing for rendering, so a partial answer beats an absent one.
    */
   getRenderStats(): RenderStats;
+  /**
+   * Fraction of native resolution to render at, 0.25–1. 1 is native.
+   *
+   * The one knob that separates a fill-rate problem from everything else. A
+   * retina display renders four times the pixels of a 1x one, and every
+   * full-screen pass — tone mapping, FXAA, glow, lens flare — pays for all of
+   * them; a scene can be trivial in geometry and still miss frame after frame
+   * purely on pixels. Halving this quarters the fragment work while changing
+   * nothing about the scene, so if the frame rate moves, the cost was pixels
+   * and no amount of mesh or draw-call work will help.
+   *
+   * It is also an ordinary quality setting once the answer is known.
+   */
+  setRenderScale(scale: number): void;
+  /** The current render scale. 1 when the adapter does not implement scaling. */
+  getRenderScale(): number;
 
   // ─── Spatial audio ───
   /**
