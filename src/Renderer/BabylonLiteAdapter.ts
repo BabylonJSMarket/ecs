@@ -83,6 +83,7 @@ import type {
   FogSpec,
   SoundSpec,
   SoundHandle,
+  RenderStats,
 } from './types';
 
 /** Babylon Lite mesh-like node (Mesh extends SceneNode; both carry transforms). */
@@ -2100,6 +2101,12 @@ export class BabylonLiteAdapter implements RendererAdapter {
       return [p.x, p.y, p.z];
     }
     return [0, 0, 0];
+  }
+
+  getRenderStats(): RenderStats {
+    // Lite's scene graph is opaque from here — it exposes no counters, so this
+    // reports the one number it can stand behind rather than inventing the rest.
+    return { ...{ meshes: 0, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0 }, meshes: this.meshes.size };
   }
 
   setSunOccluded(occluded: boolean): void {

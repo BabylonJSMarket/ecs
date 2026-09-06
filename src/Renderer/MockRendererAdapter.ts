@@ -59,6 +59,7 @@ import type {
   FogSpec,
   SoundSpec,
   SoundHandle,
+  RenderStats,
 } from './types';
 import type { Color } from './types';
 
@@ -990,6 +991,15 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   /** Whether the sun is currently hidden. Tests read this instead of a mesh. */
   sunOccluded = false;
+
+  /** Stats a test can drive. Meshes defaults to what the mock actually holds. */
+  renderStats: Partial<RenderStats> = {};
+
+  getRenderStats(): RenderStats {
+    this.record('getRenderStats');
+    const created = this.calls.filter((c) => c.method === 'createMesh').length;
+    return { meshes: created, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0, ...this.renderStats };
+  }
 
   setSunOccluded(occluded: boolean): void {
     this.sunOccluded = occluded;

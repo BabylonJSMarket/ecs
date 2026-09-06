@@ -870,6 +870,26 @@ export interface MeshRenderOptions {
  * its world position is read back via {@link RendererAdapter.getSunWorldPosition}
  * (for the off-screen sun indicator).
  */
+/** What {@link RendererAdapter.getRenderStats} reports. Zero = not tracked. */
+export interface RenderStats {
+  /** Every mesh the engine holds, drawn or not. Climbs on a mesh leak. */
+  meshes: number;
+  /** Meshes that survived culling and were submitted this frame. */
+  activeMeshes: number;
+  /** Draw calls last frame. The number a material-per-object bug moves. */
+  drawCalls: number;
+  /** Triangles submitted last frame. */
+  faces: number;
+  /** Distinct materials. One per object is the classic batching killer. */
+  materials: number;
+  /** Textures resident. Climbs when something re-uploads instead of caching. */
+  textures: number;
+  /** Live particle systems. */
+  particleSystems: number;
+  /** Render targets drawn every frame BEFORE the main pass — each is a full scene. */
+  renderTargets: number;
+}
+
 export interface SunSpec {
   /**
    * Unit world-space direction the light TRAVELS (rays go this way). The disc
@@ -1795,6 +1815,20 @@ export interface RendererAdapter {
    * No-op when there is no sun.
    */
   setSunOccluded(occluded: boolean): void;
+  /**
+   * A snapshot of what the renderer is actually carrying this frame, for a
+   * performance readout.
+   *
+   * The point is telling a LEAK from a LOAD, which is the one question a frame
+   * rate cannot answer on its own. A scene that is simply expensive shows big
+   * flat numbers; a scene leaking pooled entities, decals or split hull pieces
+   * shows numbers that climb while you play, and it looks identical from inside
+   * the game until you watch the count.
+   *
+   * Adapters fill in what their engine tracks and leave the rest at 0 — nothing
+   * here is load-bearing for rendering, so a partial answer beats an absent one.
+   */
+  getRenderStats(): RenderStats;
 
   // ─── Spatial audio ───
   /**

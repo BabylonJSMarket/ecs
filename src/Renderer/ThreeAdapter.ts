@@ -78,7 +78,7 @@ import type {
   SoundSpec,
   SoundHandle,
 } from './types';
-import type { Color } from './types';
+import type { Color, RenderStats } from './types';
 import { rasterizeSunStarburst, SUN_STARBURST_TEXELS } from './sunStarburst';
 
 export interface ThreeAdapterOptions {
@@ -3210,6 +3210,24 @@ export class ThreeAdapter implements RendererAdapter {
       if (l === light) { this.lights.delete(handle); break; }
     }
     this.sun = undefined;
+  }
+
+  getRenderStats(): RenderStats {
+    const info = (this.renderer as unknown as { info?: { render: { calls: number; triangles: number }; memory: { geometries: number; textures: number } } } | undefined)?.info;
+    let meshes = 0;
+    this.scene?.traverse((o) => { if ((o as { isMesh?: boolean }).isMesh) meshes++; });
+    return {
+      meshes,
+      // Three does not expose a post-cull count separately from the draw calls
+      // it made, so they are the same number here.
+      activeMeshes: info?.render.calls ?? 0,
+      drawCalls: info?.render.calls ?? 0,
+      faces: info?.render.triangles ?? 0,
+      materials: 0,
+      textures: info?.memory.textures ?? 0,
+      particleSystems: 0,
+      renderTargets: 0,
+    };
   }
 
   setSunOccluded(occluded: boolean): void {

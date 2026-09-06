@@ -115,7 +115,7 @@ import type {
   SoundHandle,
   Vec3,
 } from './types';
-import type { Color } from './types';
+import type { Color, RenderStats } from './types';
 import { Matrix, Ray, Viewport, CreateAudioEngineAsync, CreateSoundAsync, SoundState } from '@babylonjs/core';
 import {
   asteroidShape,
@@ -3264,6 +3264,27 @@ export class BabylonAdapter implements RendererAdapter {
       this.shadowGenerators.set(handle, sg);
     }
     return handle;
+  }
+
+  getRenderStats(): RenderStats {
+    const scene = this.scene;
+    if (!scene) {
+      return { meshes: 0, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0 };
+    }
+    // drawCalls comes off the engine's own perf counter, which Babylon only
+    // maintains while a scene instrumentation is attached — absent that it reads
+    // 0, which is honest rather than wrong.
+    const counter = (scene.getEngine() as unknown as { _drawCalls?: { current: number } })._drawCalls;
+    return {
+      meshes: scene.meshes.length,
+      activeMeshes: scene.getActiveMeshes().length,
+      drawCalls: counter?.current ?? 0,
+      faces: scene.getActiveIndices() / 3,
+      materials: scene.materials.length,
+      textures: scene.textures.length,
+      particleSystems: scene.particleSystems.length,
+      renderTargets: scene.customRenderTargets.length,
+    };
   }
 
   setSunOccluded(occluded: boolean): void {

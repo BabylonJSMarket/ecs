@@ -1629,6 +1629,23 @@ export function runRendererAdapterContract(
         expect(Number.isFinite(out[0]) && Number.isFinite(out[1]) && Number.isFinite(out[2])).toBe(true);
       });
 
+      it('getRenderStats answers with finite non-negative numbers, before and after a scene exists', () => {
+        // The readout has to be safe on frame zero — a panel asks every frame,
+        // including the ones before anything has been created. Adapters fill in
+        // what their engine tracks and leave the rest at 0, so the contract is
+        // shape and sanity rather than particular values.
+        for (const phase of ['empty', 'populated'] as const) {
+          if (phase === 'populated') {
+            adapter.createMesh('stat-box', { kind: 'box' }, { diffuse: [1, 1, 1] });
+          }
+          const stats = adapter.getRenderStats();
+          for (const [key, value] of Object.entries(stats)) {
+            expect(Number.isFinite(value), `${key} finite (${phase})`).toBe(true);
+            expect(value, `${key} non-negative (${phase})`).toBeGreaterThanOrEqual(0);
+          }
+        }
+      });
+
       it('setSunOccluded is safe before a sun exists, and round-trips after', () => {
         // Occlusion is answered in the world by whoever knows where the rocks
         // are, and the answer lands here every frame — including on the frames
