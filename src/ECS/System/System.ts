@@ -317,7 +317,7 @@ export abstract class System {
     if (this.matchesQuery(entity)) {
       if (!this.entities.has(entity)) {
         this.entities.add(entity);
-        this.onEntityAdded(entity);
+        this.underRaceAttribution(() => this.onEntityAdded(entity));
       }
     }
   }
@@ -330,7 +330,45 @@ export abstract class System {
    */
   removeEntity(entity: Entity): void {
     if (this.entities.delete(entity)) {
-      this.onEntityRemoved(entity);
+      this.underRaceAttribution(() => this.onEntityRemoved(entity));
+    }
+  }
+
+  /**
+   * Run a lifecycle hook credited to THIS system, not to whoever is on the stack.
+   *
+   * `update()` brackets `onUpdate`, but the hooks are re-entrant: acquiring a
+   * pooled entity inside one system's update fires every other system's
+   * `onEntityAdded` synchronously, still inside that first system's bracket. So
+   * a mesh write from RenderSync's own onEntityAdded was credited to whatever
+   * spawned the entity — MachineGun for a bullet — and the detector then saw two
+   * different systems writing one handle in a frame and reported a race that
+   * does not exist. It is the same owner both times.
+   *
+   * That matters beyond noise: a race warning nobody can act on is one people
+   * learn to scroll past, which is how the real ones get missed.
+   *
+   * Restores the previous name rather than clearing it, because the hook returns
+   * into the middle of the spawning system's update and that system's remaining
+   * writes still belong to it.
+   */
+  private underRaceAttribution(run: () => void): void {
+    const detector = (this.world as unknown as {
+      raceDetector?: {
+        setCurrentSystem(name: string | null): void;
+        getCurrentSystem(): string | null;
+      };
+    })?.raceDetector;
+    if (!detector) {
+      run();
+      return;
+    }
+    const previous = detector.getCurrentSystem();
+    detector.setCurrentSystem(this.constructor.name);
+    try {
+      run();
+    } finally {
+      detector.setCurrentSystem(previous);
     }
   }
 

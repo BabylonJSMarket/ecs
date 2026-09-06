@@ -182,3 +182,56 @@ describe('RaceDetector integration', () => {
     expect(world.renderer).toBe(renderer);
   });
 });
+
+describe('lifecycle hooks are credited to their own system', () => {
+  it('runs onEntityAdded/onEntityRemoved under the hook owner, not whoever is on the stack', () => {
+    // The false positive this fixes, exactly as it appeared in the console:
+    //   "setMeshPosition on mesh:bullet-179 was called by multiple systems
+    //    [MachineGunSystem, RenderSyncSystem]"
+    //
+    // Acquiring a pooled bullet inside MachineGun's update fires RenderSync's
+    // onEntityAdded synchronously, still inside MachineGun's attribution
+    // bracket. So RenderSync's own mesh write was credited to MachineGun, and
+    // the detector then saw two systems writing one handle in a frame and
+    // reported a race between them. Both writes are RenderSync's. A warning
+    // nobody can act on is one people learn to scroll past, which is how the
+    // real ones get missed.
+    const bus = new EventBus();
+    const renderer = new MockRendererAdapter();
+    const world = new World({ eventBus: bus, renderer, detectRaces: true });
+
+    let creditedOnAdd: string | null = 'never ran';
+    let creditedOnRemove: string | null = 'never ran';
+    class RenderSyncSystem extends System {
+      protected query = { required: [MarkerComponent] };
+      protected onEntityAdded(): void {
+        creditedOnAdd = this.world!.raceDetector!.getCurrentSystem();
+      }
+      protected onEntityRemoved(): void {
+        creditedOnRemove = this.world!.raceDetector!.getCurrentSystem();
+      }
+    }
+    const sync = new RenderSyncSystem(bus);
+    world.addSystem(sync);
+    world.initialize();
+
+    const detector = world.raceDetector!;
+    const entity = world.createEntity();
+
+    // Adding the component is what matches the entity into the system, and it
+    // fires the hook SYNCHRONOUSLY — which is the whole mechanism: a pooled
+    // acquire inside MachineGun's update lands RenderSync's hook inside
+    // MachineGun's bracket.
+    detector.setCurrentSystem('MachineGunSystem');
+    entity.add(new MarkerComponent());
+    expect(creditedOnAdd).toBe('RenderSyncSystem');
+    // The spawner's own remaining writes still belong to it: the hook returns
+    // into the middle of its update, so the bracket restores rather than clears.
+    expect(detector.getCurrentSystem()).toBe('MachineGunSystem');
+
+    world.removeEntity(entity.id);
+    expect(creditedOnRemove).toBe('RenderSyncSystem');
+    expect(detector.getCurrentSystem()).toBe('MachineGunSystem');
+    detector.setCurrentSystem(null);
+  });
+});
