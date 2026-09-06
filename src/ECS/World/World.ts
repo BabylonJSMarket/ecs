@@ -801,7 +801,15 @@ export class World {
         if (this._paused && system.pauseable) {
           return;
         }
-        if (this.systemTimings) {
+        // Captured BEFORE the update, and read from the local afterwards. A
+        // system's update runs arbitrary code, and that code can switch
+        // profiling off mid-loop — a scene reload tears down the panel that
+        // asked for it, whose shutdown nulls the map. TypeScript does not
+        // invalidate narrowing on `this.systemTimings` across the call, so the
+        // obvious version compiles clean and throws "Cannot read properties of
+        // null" inside the render loop.
+        const timings = this.systemTimings;
+        if (timings) {
           // Two clock reads per system per frame, and only while something is
           // asking. A frame that misses its budget on the CPU cannot be
           // diagnosed by disabling systems one at a time and guessing from feel
@@ -809,10 +817,12 @@ export class World {
           const started = performance.now();
           system.update(deltaTime);
           const name = system.constructor.name;
-          const previous = this.systemTimings.get(name) ?? 0;
+          const previous = timings.get(name) ?? 0;
           // Exponential average: steady enough to read while frame times jitter,
-          // quick enough to answer within a second of a system being switched off.
-          this.systemTimings.set(name, previous * 0.9 + (performance.now() - started) * 0.1);
+          // quick enough to answer within a second of a system being switched
+          // off. Writing into the captured map is harmless if profiling stopped
+          // during the update — it is the map nobody is reading any more.
+          timings.set(name, previous * 0.9 + (performance.now() - started) * 0.1);
         } else {
           system.update(deltaTime);
         }

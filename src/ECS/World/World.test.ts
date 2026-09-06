@@ -890,3 +890,39 @@ describe('per-system profiling', () => {
     expect(world.systemTimings).toBeNull();
   });
 });
+
+describe('profiling survives being switched off mid-frame', () => {
+  it('a system that stops profiling during its own update does not crash the loop', () => {
+    // The crash this fixes, thrown from inside the render loop:
+    //   "Cannot read properties of null (reading 'get')"
+    // A system's update runs arbitrary code, and that code can null the timing
+    // map — a scene reload tears down the panel that asked for profiling, whose
+    // shutdown switches it off. TypeScript does not invalidate narrowing on
+    // `this.systemTimings` across the call, so the obvious version compiles
+    // clean and throws only at runtime.
+    const eventBus = new EventBus();
+    const world = new World({ eventBus });
+
+    class StopsProfiling extends System {
+      protected query = {};
+      protected onUpdate(): void {
+        this.world!.profileSystems(false);
+      }
+    }
+    class After extends System {
+      protected query = {};
+      protected onUpdate(): void {}
+    }
+    const stopper = new StopsProfiling(eventBus);
+    stopper.priority = 10;
+    const after = new After(eventBus);
+    after.priority = 0;
+    world.addSystem(stopper);
+    world.addSystem(after);
+    world.initialize();
+    world.profileSystems(true);
+
+    expect(() => world.update(1 / 60)).not.toThrow();
+    expect(world.systemTimings).toBeNull();
+  });
+});
