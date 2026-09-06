@@ -50,6 +50,7 @@ import type {
   PointLightSpec,
   MeshSkinSpec,
   PhysicsBodyOpts,
+  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PickOptions,
   PickResult,
@@ -1609,16 +1610,25 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return this.havokInitPromise;
   }
 
-  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void {
+  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): boolean {
     const mesh = this.meshesByMeshId.get(meshId);
-    if (!mesh) return;
+    if (!mesh) return false;
     if (!this.havokReady || !this.havokWorld) {
-      this.pendingPhysicsCreates.push({ meshId, opts });
+      if (!this.pendingPhysicsCreates.some((p) => p.meshId === meshId)) {
+        this.pendingPhysicsCreates.push({ meshId, opts });
+      }
       void this.ensureHavok();
-      return;
+      return true;
     }
-    if (this.aggregates.has(meshId)) return;
-    const shapeType = (opts.shapeType === 'sphere' ? 0 : opts.shapeType === 'capsule' ? 1 : 3) as unknown as BLNS.PhysicsShapeType;
+    if (this.aggregates.has(meshId)) return true;
+    // PhysicsShapeType: SPHERE 0, CAPSULE 1, BOX 3, MESH 6. A mesh collider is
+    // static/animated only, so a dynamic body asking for one gets the box.
+    const shapeType = (
+      opts.shapeType === 'sphere' ? 0
+        : opts.shapeType === 'capsule' ? 1
+          : opts.shapeType === 'mesh' && opts.motionType !== 'dynamic' ? 6
+            : 3
+    ) as unknown as BLNS.PhysicsShapeType;
     // Shape geometry is auto-sized from the mesh bounding box. mass 0 → static.
     const agg = BL.createPhysicsAggregate(this.havokWorld, mesh, shapeType, {
       mass: opts.motionType === 'static' ? 0 : opts.mass,
@@ -1633,6 +1643,20 @@ export class BabylonLiteAdapter implements RendererAdapter {
       BL.setPhysicsBodyPreStep(agg.body, false);
     }
     this.aggregates.set(meshId, agg);
+    return true;
+  }
+
+  /** The lite build carries no scene queries; callers keep their own geometry test. */
+  physicsCanQuery(): boolean {
+    return false;
+  }
+
+  physicsRaycast(_from: Vec3, _to: Vec3): PhysicsQueryHit | null {
+    return null;
+  }
+
+  physicsSphereCast(_from: Vec3, _to: Vec3, _radius: number): PhysicsQueryHit | null {
+    return null;
   }
 
   physicsDestroyBody(meshId: string): void {

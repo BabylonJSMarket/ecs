@@ -1395,6 +1395,33 @@ export function runRendererAdapterContract(
         it('physicsStep is safe to call with no bodies registered', () => {
           expect(() => adapter.physicsStep(1 / 60)).not.toThrow();
         });
+
+        it('physicsCreateBody reports whether the mesh exists — true once it has been created', () => {
+          adapter.createMesh('bodied', { kind: 'sphere', diameter: 1 });
+          expect(adapter.physicsCreateBody('bodied', {
+            shapeType: 'sphere', motionType: 'static', mass: 0, friction: 0.5, restitution: 0, lockRotation: false,
+          })).toBe(true);
+          adapter.physicsDestroyBody('bodied');
+        });
+
+        it('a mesh-shaped kinematic body is accepted like any other', () => {
+          adapter.createMesh('rock', { kind: 'sphere', diameter: 4 });
+          expect(() => {
+            adapter.physicsCreateBody('rock', {
+              shapeType: 'mesh', motionType: 'kinematic', mass: 0, friction: 0.5, restitution: 0, lockRotation: false,
+            });
+            adapter.physicsDestroyBody('rock');
+          }).not.toThrow();
+        });
+
+        it('scene queries: physicsCanQuery is a boolean, and without it the casts answer null instead of throwing', () => {
+          const can = adapter.physicsCanQuery();
+          expect(typeof can).toBe('boolean');
+          if (!can) {
+            expect(adapter.physicsRaycast([0, 0, 0], [0, 0, 10])).toBeNull();
+            expect(adapter.physicsSphereCast([0, 0, 0], [0, 0, 10], 1)).toBeNull();
+          }
+        });
       });
     }
 

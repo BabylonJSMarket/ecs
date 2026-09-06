@@ -1623,7 +1623,13 @@ export interface RendererAdapter {
    * advances during `scene.render`); it's required for the pure-core adapter
    * so tests and Three.js demos stay deterministic.
    */
-  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void;
+  /**
+   * Returns whether the mesh exists yet — true means the body was created or
+   * queued behind the engine's own initialisation; false means there is no
+   * mesh under that id (a GLB still loading, a Renderable not yet minted) and
+   * the caller should ask again next frame.
+   */
+  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): boolean;
   physicsDestroyBody(meshId: string): void;
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void;
   /**
@@ -1693,6 +1699,26 @@ export interface RendererAdapter {
    * control may no-op. Keyed by the same id passed to `physicsCreateBody`.
    */
   physicsSetRestitution(meshId: string, restitution: number): void;
+  /**
+   * Whether {@link physicsRaycast} / {@link physicsSphereCast} can answer.
+   * False until the physics engine is up, and always false for adapters whose
+   * physics layer has no scene queries — a caller keeps its own geometry test
+   * for that case rather than reading a null as "nothing there".
+   */
+  physicsCanQuery(): boolean;
+  /**
+   * Nearest body along the segment `from → to`, or null for no hit (or no
+   * query support — check {@link physicsCanQuery}). Only bodies created through
+   * {@link physicsCreateBody} are candidates; the hit names the mesh id the
+   * body was created for.
+   */
+  physicsRaycast(from: Vec3, to: Vec3): PhysicsQueryHit | null;
+  /**
+   * A sphere of `radius` swept along `from → to`: the nearest body it touches,
+   * or null. The moving-hull test — a ship is a sphere, a rock is a mesh, and
+   * the sweep catches a contact that happened between two frames.
+   */
+  physicsSphereCast(from: Vec3, to: Vec3, radius: number): PhysicsQueryHit | null;
   /**
    * Toggle wireframe outlines of every physics collider in the scene. Babylon
    * drives this with its built-in `PhysicsViewer` over all aggregates; other
@@ -1931,7 +1957,13 @@ export interface PhysicsBodySnapshot {
  * rather than Physics.core.ts so adapters don't have to import a Component.
  */
 export interface PhysicsBodyOpts {
-  shapeType: 'sphere' | 'box' | 'capsule';
+  /**
+   * `'mesh'` collides with the mesh's own triangles — for a static or kinematic
+   * body only. No engine simulates a dynamic triangle soup; a dynamic body
+   * asking for it gets its bounding box and a warning. Adapters without a mesh
+   * collider (the pure-JS integrator) use the box for every motion type.
+   */
+  shapeType: 'sphere' | 'box' | 'capsule' | 'mesh';
   motionType: 'dynamic' | 'static' | 'kinematic';
   mass: number;
   friction: number;
@@ -1946,6 +1978,16 @@ export interface PhysicsBodyOpts {
  * receives a factory via its constructor so the package itself never imports
  * any physics implementation.
  */
+/** What a physics query hit. */
+export interface PhysicsQueryHit {
+  /** The mesh id the hit body was created for — usually the entity id. */
+  meshId: string;
+  point: Vec3;
+  normal: Vec3;
+  /** From the cast's start to the hit, world units. */
+  distance: number;
+}
+
 export interface IPhysicsInstance {
   createBody(meshId: string, opts: PhysicsBodyOpts & { posX?: number; posY?: number; posZ?: number }): unknown;
   destroyBody(meshId: string): void;

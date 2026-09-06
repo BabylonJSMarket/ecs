@@ -23,6 +23,7 @@ import type {
   LoadModelTemplateOptions,
   ModelInstantiateSpec,
   PhysicsBodyOpts,
+  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PickOptions,
   PickResult,
@@ -779,7 +780,29 @@ export class MockRendererAdapter implements RendererAdapter {
   physicsBodies = new Map<string, PhysicsBodySnapshot>();
   physicsPaused = false;
 
-  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void {
+  /**
+   * Scripted scene queries. Null (the default) reports no query support, the
+   * way an adapter without a physics engine does; a test that wants a hit sets
+   * the functions it needs and `physicsCanQuery` turns true.
+   */
+  physicsQueries: {
+    raycast?: (from: Vec3, to: Vec3) => PhysicsQueryHit | null;
+    sphereCast?: (from: Vec3, to: Vec3, radius: number) => PhysicsQueryHit | null;
+  } | null = null;
+
+  physicsCanQuery(): boolean {
+    return this.physicsQueries !== null;
+  }
+  physicsRaycast(from: Vec3, to: Vec3): PhysicsQueryHit | null {
+    this.record('physicsRaycast', from, to);
+    return this.physicsQueries?.raycast?.(from, to) ?? null;
+  }
+  physicsSphereCast(from: Vec3, to: Vec3, radius: number): PhysicsQueryHit | null {
+    this.record('physicsSphereCast', from, to, radius);
+    return this.physicsQueries?.sphereCast?.(from, to, radius) ?? null;
+  }
+
+  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): boolean {
     this.record('physicsCreateBody', meshId, opts);
     if (!this.physicsBodies.has(meshId)) {
       this.physicsBodies.set(meshId, {
@@ -789,6 +812,7 @@ export class MockRendererAdapter implements RendererAdapter {
         angularVelocity: [0, 0, 0],
       });
     }
+    return true;
   }
   physicsSetPaused(paused: boolean): void {
     this.record('physicsSetPaused', paused);

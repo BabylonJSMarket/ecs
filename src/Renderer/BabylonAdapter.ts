@@ -38,6 +38,9 @@ import {
   RawTexture,
   AnimationGroup,
   PhysicsAggregate,
+  PhysicsRaycastResult,
+  ShapeCastResult,
+  PhysicsShapeSphere,
   PhysicsShapeType,
   PhysicsShapeBox,
   PhysicsMotionType,
@@ -52,7 +55,7 @@ import {
   DefaultRenderingPipeline,
 } from '@babylonjs/core';
 import type { AssetContainer, AudioEngineV2, Bone, InstancedMesh, InstantiatedEntries, Node, StaticSound, TransformNode } from '@babylonjs/core';
-import type { Observer } from '@babylonjs/core';
+import type { Observer, PhysicsBody } from '@babylonjs/core';
 import '@babylonjs/loaders';
 // GPU particle backends — registered as side effects so GPUParticleSystem can
 // auto-select on a WebGL2/WebGPU device. Inert (and unused) under NullEngine,
@@ -82,6 +85,7 @@ import type {
   LoadModelTemplateOptions,
   ModelInstantiateSpec,
   PhysicsBodyOpts,
+  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PickOptions,
   PickResult,
@@ -216,6 +220,17 @@ export class BabylonAdapter implements RendererAdapter {
   private havokInitPromise: Promise<void> | null = null;
   /** Pending create requests queued while Havok is still initializing. */
   private pendingPhysicsCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
+  /** Body → the mesh id it was created for, so a query hit can name an entity. */
+  private bodyMeshIds = new Map<PhysicsBody, string>();
+  /** Sphere-cast shapes by radius; a shape is a Havok allocation, so reused. */
+  private sphereCastShapes = new Map<number, PhysicsShapeSphere>();
+  private raycastResult = new PhysicsRaycastResult();
+  private shapeCastInput = new ShapeCastResult();
+  private shapeCastHit = new ShapeCastResult();
+  private _qFrom = new Vector3();
+  private _qTo = new Vector3();
+  private _qRot = Quaternion.Identity();
+  private meshShapeWarned = false;
   private lights = new Map<LightHandle, BabylonHemisphericLight | BabylonDirectionalLight | PointLight | SpotLight>();
   // ─── Spatial audio (Babylon AudioEngineV2, brought up lazily by initAudio) ───
   private audioEngine: AudioEngineV2 | null = null;
@@ -2491,16 +2506,20 @@ export class BabylonAdapter implements RendererAdapter {
     return this.havokInitPromise;
   }
 
-  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void {
-    if (!this.scene) return;
+  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): boolean {
+    if (!this.scene) return false;
     const mesh = this.meshesByMeshId.get(meshId);
-    if (!mesh) return;
-    if (this.physicsAggregates.has(meshId)) return;
+    if (!mesh) return false;
+    if (this.physicsAggregates.has(meshId)) return true;
 
     if (!this.havokReady) {
-      this.pendingPhysicsCreates.push({ meshId, opts });
+      // A caller that retries every frame until the body confirms would queue
+      // the same request hundreds of times before the WASM lands.
+      if (!this.pendingPhysicsCreates.some((p) => p.meshId === meshId)) {
+        this.pendingPhysicsCreates.push({ meshId, opts });
+      }
       void this.ensureHavok();
-      return;
+      return true;
     }
 
     let shape: PhysicsShapeType;
@@ -2510,6 +2529,21 @@ export class BabylonAdapter implements RendererAdapter {
         break;
       case 'capsule':
         shape = PhysicsShapeType.CAPSULE;
+        break;
+      case 'mesh':
+        // The mesh's own triangles. Havok builds the collider from the vertex
+        // buffer as it stands, so a procedural rock displaced before this call
+        // collides with exactly what it draws. Static and animated bodies only:
+        // a dynamic triangle soup is not a thing any engine simulates.
+        if (opts.motionType === 'dynamic') {
+          if (!this.meshShapeWarned) {
+            this.meshShapeWarned = true;
+            console.warn(`BabylonAdapter.physicsCreateBody: "${meshId}" asked for a mesh shape on a dynamic body; using its bounding box.`);
+          }
+          shape = PhysicsShapeType.BOX;
+        } else {
+          shape = PhysicsShapeType.MESH;
+        }
         break;
       case 'box':
       default:
@@ -2545,13 +2579,64 @@ export class BabylonAdapter implements RendererAdapter {
 
     aggregate.body.setCollisionCallbackEnabled(true);
     this.physicsAggregates.set(meshId, aggregate);
+    this.bodyMeshIds.set(aggregate.body, meshId);
+    return true;
   }
 
   physicsDestroyBody(meshId: string): void {
     const aggregate = this.physicsAggregates.get(meshId);
     if (!aggregate) return;
+    this.bodyMeshIds.delete(aggregate.body);
     aggregate.dispose();
     this.physicsAggregates.delete(meshId);
+  }
+
+  physicsCanQuery(): boolean {
+    return this.havokReady && this.havokPlugin !== null;
+  }
+
+  physicsRaycast(from: Vec3, to: Vec3): PhysicsQueryHit | null {
+    const plugin = this.havokPlugin;
+    if (!plugin || !this.havokReady) return null;
+    this._qFrom.set(from[0], from[1], from[2]);
+    this._qTo.set(to[0], to[1], to[2]);
+    plugin.raycast(this._qFrom, this._qTo, this.raycastResult, { shouldHitTriggers: false });
+    return this.queryHit(this.raycastResult, this.raycastResult.hitDistance);
+  }
+
+  physicsSphereCast(from: Vec3, to: Vec3, radius: number): PhysicsQueryHit | null {
+    const plugin = this.havokPlugin;
+    if (!plugin || !this.havokReady || !this.scene) return null;
+    this._qFrom.set(from[0], from[1], from[2]);
+    this._qTo.set(to[0], to[1], to[2]);
+    const key = Math.round(radius * 100) / 100;
+    let shape = this.sphereCastShapes.get(key);
+    if (!shape) {
+      shape = new PhysicsShapeSphere(Vector3.Zero(), key, this.scene);
+      this.sphereCastShapes.set(key, shape);
+    }
+    plugin.shapeCast(
+      { shape, rotation: this._qRot, startPosition: this._qFrom, endPosition: this._qTo, shouldHitTriggers: false },
+      this.shapeCastInput,
+      this.shapeCastHit,
+    );
+    return this.queryHit(
+      this.shapeCastHit,
+      this.shapeCastHit.hitFraction * Vector3.Distance(this._qFrom, this._qTo),
+    );
+  }
+
+  /** A Babylon cast result as the adapter's hit, or null when it hit nothing of ours. */
+  private queryHit(
+    res: PhysicsRaycastResult | ShapeCastResult,
+    distance: number,
+  ): PhysicsQueryHit | null {
+    if (!res.hasHit || !res.body) return null;
+    const meshId = this.bodyMeshIds.get(res.body);
+    if (meshId === undefined) return null;
+    const p = res.hitPoint;
+    const n = res.hitNormal;
+    return { meshId, point: [p.x, p.y, p.z], normal: [n.x, n.y, n.z], distance };
   }
 
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void {
@@ -3591,6 +3676,9 @@ export class BabylonAdapter implements RendererAdapter {
     this.pendingListenerCamera = null;
     for (const aggregate of this.physicsAggregates.values()) aggregate.dispose();
     this.physicsAggregates.clear();
+    this.bodyMeshIds.clear();
+    for (const shape of this.sphereCastShapes.values()) shape.dispose();
+    this.sphereCastShapes.clear();
     this.pendingPhysicsCreates = [];
     this.havokPlugin = null;
     this.havokReady = false;

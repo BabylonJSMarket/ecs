@@ -193,6 +193,8 @@ export class World {
 
   /** Reverse lookup: entity id -> pool name (for release-on-removeEntity). */
   private entityPoolName: Map<EntityId, string> = new Map();
+  /** Entities inside destroyEntity's teardown — see onComponentChanged. */
+  private destroying = new Set<EntityId>();
 
   /**
    * Active renderer adapter. Systems read this to create meshes, lights, and
@@ -340,6 +342,12 @@ export class World {
    * Refreshes all systems to check if the entity still matches their queries.
    */
   private onComponentChanged(entity: Entity): void {
+    // Mid-destroy, `removeAll()` strips components one at a time, and an entity
+    // that still matches a query after the first removal would be handed BACK
+    // to that system here — onEntityAdded on a corpse, a body or a mesh minted
+    // for it, and then torn down again a component later. The systems already
+    // let go of it in destroyEntity; nothing gets it back.
+    if (this.destroying.has(entity.id)) return;
     this.systems.forEach(system => {
       system.refreshEntity(entity);
     });
@@ -565,7 +573,12 @@ export class World {
     });
 
     // Destroy the entity (cleans up components)
-    entityToRemove.destroy();
+    this.destroying.add(entityToRemove.id);
+    try {
+      entityToRemove.destroy();
+    } finally {
+      this.destroying.delete(entityToRemove.id);
+    }
     this.entities.delete(entityToRemove.id);
 
     this.eventBus.emit(WorldEvents.ENTITY_REMOVED, {

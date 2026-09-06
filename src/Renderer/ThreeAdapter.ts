@@ -37,6 +37,7 @@ import type {
   LoadModelTemplateOptions,
   ModelInstantiateSpec,
   PhysicsBodyOpts,
+  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PhysicsFactory,
   PickOptions,
@@ -1120,9 +1121,9 @@ export class ThreeAdapter implements RendererAdapter {
     return undefined;
   }
 
-  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): void {
+  physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): boolean {
     const mesh = this.meshesByMeshId.get(meshId);
-    if (!mesh) return;
+    if (!mesh) return false;
 
     if (!this.usesRapier) {
       // Injected pure-JS integrator path (back-compat).
@@ -1138,14 +1139,14 @@ export class ThreeAdapter implements RendererAdapter {
         posY: mesh.position.y,
         posZ: mesh.position.z,
       });
-      return;
+      return true;
     }
 
     // Rapier path (default). Queue until the WASM world is live.
     if (!this.rapierReady || !this.rapier) {
       this.pendingRapierCreates.push({ meshId, opts });
       void this.ensureRapier();
-      return;
+      return true;
     }
     const h = this.handleForMeshId(meshId);
     const half = h ? this.meshHalfExtents(h, mesh) : { x: 0.5, y: 0.5, z: 0.5 };
@@ -1157,6 +1158,24 @@ export class ThreeAdapter implements RendererAdapter {
       { x: q.x, y: q.y, z: q.z, w: q.w },
       half,
     );
+    return true;
+  }
+
+  /**
+   * Neither the injected integrator nor the Rapier path exposes scene queries
+   * here; callers keep their own geometry test. A `'mesh'` shape lands as the
+   * body's bounding box on the integrator path.
+   */
+  physicsCanQuery(): boolean {
+    return false;
+  }
+
+  physicsRaycast(_from: Vec3, _to: Vec3): PhysicsQueryHit | null {
+    return null;
+  }
+
+  physicsSphereCast(_from: Vec3, _to: Vec3, _radius: number): PhysicsQueryHit | null {
+    return null;
   }
 
   physicsDestroyBody(meshId: string): void {
