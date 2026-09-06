@@ -827,3 +827,66 @@ describe('World — system order respects a priority set during initialize', () 
     expect(ran).toEqual(['late', 'eager']);
   });
 });
+
+describe('per-system profiling', () => {
+  class Slow extends System {
+    protected query = {};
+    protected onUpdate(): void {
+      // Busy-wait so the measurement is not at the mercy of clock resolution.
+      const until = performance.now() + 2;
+      while (performance.now() < until) { /* spin */ }
+    }
+  }
+  class Quick extends System {
+    protected query = {};
+    protected onUpdate(): void {}
+  }
+
+  function profiledWorld() {
+    const eventBus = new EventBus();
+    const world = new World({ eventBus });
+    world.addSystem(new Slow(eventBus));
+    world.addSystem(new Quick(eventBus));
+    world.initialize();
+    return world;
+  }
+
+  it('is off by default, so the hot path pays one null check', () => {
+    const world = profiledWorld();
+    world.update(1 / 60);
+    expect(world.systemTimings).toBeNull();
+  });
+
+  it('names the expensive system once switched on', () => {
+    // The whole point: a frame that misses its budget on the CPU cannot be
+    // diagnosed by disabling systems one at a time and guessing from feel.
+    const world = profiledWorld();
+    world.profileSystems(true);
+    for (let i = 0; i < 20; i++) world.update(1 / 60);
+
+    const timings = world.systemTimings!;
+    expect(timings.get('Slow')).toBeGreaterThan(timings.get('Quick')!);
+    expect(timings.get('Slow')).toBeGreaterThan(0.5);
+  });
+
+  it('a disabled system stops being measured, which is how you confirm a suspect', () => {
+    const world = profiledWorld();
+    world.profileSystems(true);
+    for (let i = 0; i < 20; i++) world.update(1 / 60);
+    const before = world.systemTimings!.get('Slow')!;
+
+    world.getSystems().find((s) => s.constructor.name === 'Slow')!.enabled = false;
+    for (let i = 0; i < 20; i++) world.update(1 / 60);
+    // The reading stops moving rather than being cleared — the last measurement
+    // is what you want on screen while comparing it against the new frame rate.
+    expect(world.systemTimings!.get('Slow')).toBe(before);
+  });
+
+  it('switching profiling off drops the measurements', () => {
+    const world = profiledWorld();
+    world.profileSystems(true);
+    world.update(1 / 60);
+    world.profileSystems(false);
+    expect(world.systemTimings).toBeNull();
+  });
+});

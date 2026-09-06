@@ -210,6 +210,7 @@ describe('lifecycle hooks are credited to their own system', () => {
       protected onEntityRemoved(): void {
         creditedOnRemove = this.world!.raceDetector!.getCurrentSystem();
       }
+      protected onUpdate(): void {}
     }
     const sync = new RenderSyncSystem(bus);
     world.addSystem(sync);

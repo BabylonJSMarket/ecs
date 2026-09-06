@@ -767,6 +767,20 @@ export class World {
    *
    * @param deltaTime - Time since last frame in seconds
    */
+  /**
+   * Rolling per-system update cost in ms, or null when profiling is off.
+   *
+   * Off by default and switched on by whoever asks (the perf panel). The map is
+   * the flag: allocating it turns the timing on, and dropping it turns it off,
+   * so the hot path costs one null check when nobody is looking.
+   */
+  systemTimings: Map<string, number> | null = null;
+
+  /** Start or stop per-system timing. Starting clears whatever was measured. */
+  profileSystems(on: boolean): void {
+    this.systemTimings = on ? new Map() : null;
+  }
+
   update(deltaTime: number): void {
     // Auto-initialize on first update
     if (!this._initialized) {
@@ -787,7 +801,21 @@ export class World {
         if (this._paused && system.pauseable) {
           return;
         }
-        system.update(deltaTime);
+        if (this.systemTimings) {
+          // Two clock reads per system per frame, and only while something is
+          // asking. A frame that misses its budget on the CPU cannot be
+          // diagnosed by disabling systems one at a time and guessing from feel
+          // — the cost is usually one system and it is rarely the suspected one.
+          const started = performance.now();
+          system.update(deltaTime);
+          const name = system.constructor.name;
+          const previous = this.systemTimings.get(name) ?? 0;
+          // Exponential average: steady enough to read while frame times jitter,
+          // quick enough to answer within a second of a system being switched off.
+          this.systemTimings.set(name, previous * 0.9 + (performance.now() - started) * 0.1);
+        } else {
+          system.update(deltaTime);
+        }
       }
     });
 
