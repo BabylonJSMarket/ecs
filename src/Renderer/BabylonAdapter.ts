@@ -3575,7 +3575,15 @@ export class BabylonAdapter implements RendererAdapter {
       materials: scene.materials.length,
       textures: scene.textures.length,
       particleSystems: scene.particleSystems.length,
-      renderTargets: scene.customRenderTargets.length,
+      // Every render-target texture, not just scene.customRenderTargets.
+      //
+      // The custom list holds only the ones the GAME added, and it hid the
+      // expensive one: an effect layer keeps its targets to itself, and a
+      // GlowLayer's main target has a NULL renderList — meaning it re-renders
+      // the WHOLE scene into its own buffer every frame, then blurs it twice.
+      // Counting two while five are drawn made the row read as "cheap, and
+      // accounted for" when the unaccounted three were the cost.
+      renderTargets: scene.textures.reduce((n, t) => n + (t.isRenderTarget ? 1 : 0), 0),
       frames,
     };
   }

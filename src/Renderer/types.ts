@@ -893,7 +893,17 @@ export interface RenderStats {
   textures: number;
   /** Live particle systems. */
   particleSystems: number;
-  /** Render targets drawn every frame BEFORE the main pass — each is a full scene. */
+  /**
+   * Render-target textures the engine holds, all of which are drawn BEFORE the
+   * main pass.
+   *
+   * NOT all equal, and the cheap ones are the ones a game knows about. A target
+   * with an explicit render list draws only those meshes and is usually tiny; a
+   * target with no render list draws the ENTIRE scene a second time. Effect
+   * layers are the second kind and do not appear in a scene's own custom-target
+   * list, so counting only what the game added reports the small ones and hides
+   * the expensive one.
+   */
   renderTargets: number;
   /**
    * Frames this engine has rendered, ever.
