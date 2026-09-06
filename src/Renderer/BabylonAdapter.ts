@@ -314,6 +314,21 @@ export class BabylonAdapter implements RendererAdapter {
   }>();
   /** Monotonic suffix so each fire-and-forget burst / emitter gets a unique name. */
   private particleCounter = 0;
+
+  // ── Pooled GPU bursts ──────────────────────────────────────────────────────
+  /**
+   * Particles one pooled burst system can hold. A burst asking for more is
+   * clamped: GPU buffers are sized once per system, so this is the ceiling for
+   * a single explosion, not a per-frame budget.
+   */
+  private static readonly BURST_CAPACITY = 2048;
+  /** Bursts in flight at once before the oldest is recycled, as any pool does. */
+  private static readonly BURST_POOL_MAX = 24;
+  /** Systems between bursts — stopped, reset, and OUT of `scene.particleSystems`. */
+  private burstIdle: GPUParticleSystem[] = [];
+  /** Systems mid-burst, oldest first, each with the wall-clock time it is spent. */
+  private burstLive: { system: GPUParticleSystem; endsAt: number }[] = [];
+  private burstSweep: Observer<Scene> | null = null;
   /** The selective glow post-pass (empty whitelist until addGlowMesh). */
   private glowLayer: GlowLayer | null = null;
   /**
@@ -2818,29 +2833,47 @@ export class BabylonAdapter implements RendererAdapter {
 
   // ─── Phase-3: particle systems ───
   /**
-   * Fire a one-shot burst (explosion / muzzle flash) that auto-disposes. GPU
-   * particles are auto-selected when `GPUParticleSystem.IsSupported`; otherwise
-   * the CPU `ParticleSystem` (the NullEngine path) carries it.
+   * Fire a one-shot burst (explosion / muzzle flash / hit spark).
+   *
+   * On the GPU the burst is a POOLED system, because a GPU particle system never
+   * disposes itself. `disposeOnStop` is honoured only by the CPU system;
+   * `GPUParticleSystem` carries the flag for cloning and its `stop()` flips a
+   * bool. Creating one per burst, as this used to, left every hit spark and
+   * explosion in `scene.particleSystems` as a stopped-but-live system still
+   * running a transform-feedback update and a draw each frame, forever — a
+   * minute of dogfighting leaked hundreds and the frame rate slid from the 30s
+   * into the teens while every mesh count sat still. Falling back to CPU bursts
+   * fixed the slide and lost the look, so: a bounded set of GPU systems, each
+   * configured per burst, started, and — once its particles have had time to
+   * die — stopped, reset, and taken OUT of the scene, where it costs nothing
+   * until the next burst reuses it. `scene.particleSystems.length` now reads
+   * the dust plus the bursts actually in flight.
+   *
+   * Without WebGL2 (the NullEngine path) the CPU system carries it and really
+   * does dispose itself: manual emit spent → stop → last particle dies → gone.
    */
   createParticleBurst(spec: ParticleBurstSpec): void {
     if (!this.scene) return;
     const scene = this.scene;
-    const name = `burst-${this.particleCounter++}`;
-    const capacity = Math.max(1, spec.count);
-    // A burst is a CPU ParticleSystem, never the GPU one, and the reason is
-    // how it ends rather than how it starts. `disposeOnStop` is honoured only
-    // by the CPU system: once the manual emit is spent it stops itself, and
-    // when the last particle dies it hands itself to the scene for disposal.
-    // The GPU system carries the flag for cloning and does nothing with it —
-    // its `stop()` flips a bool — so every hit spark, muzzle flash and
-    // explosion used to leave a stopped-but-live system in `scene.particleSystems`
-    // running a transform-feedback update and a draw every frame, forever. A
-    // minute of dogfighting leaked hundreds; the frame rate slid from the 30s
-    // into the teens while every mesh count on the perf panel sat still,
-    // because none of them counts particle systems. The continuous emitters
-    // (`createParticleEmitter`) still go to the GPU: they live as long as their
-    // owner and are disposed explicitly.
-    const system = new ParticleSystem(name, capacity, scene);
+    if (!GPUParticleSystem.IsSupported) {
+      const system = new ParticleSystem(`burst-${this.particleCounter++}`, Math.max(1, spec.count), scene);
+      this.configureBurst(system, spec, spec.count);
+      system.disposeOnStop = true;
+      system.start();
+      return;
+    }
+    const system = this.acquireBurst(scene);
+    this.configureBurst(system, spec, Math.min(spec.count, BabylonAdapter.BURST_CAPACITY));
+    system.start();
+    // Spent once the emit window and the longest-lived particle are both over.
+    // Particle age advances by updateSpeed × Babylon's animation ratio, which
+    // is wall-clock seconds at any frame rate, so a clock is the right measure.
+    const duration = spec.duration ?? 0.06;
+    this.burstLive.push({ system, endsAt: performance.now() + (duration + spec.maxLifeTime) * 1000 + 250 });
+  }
+
+  /** Everything about a burst that is the burst's, not the system's. */
+  private configureBurst(system: ParticleSystem | GPUParticleSystem, spec: ParticleBurstSpec, count: number): void {
     const tex = this.textures.get(spec.texture);
     if (tex) system.particleTexture = tex;
     system.emitter = new Vector3(spec.position[0], spec.position[1], spec.position[2]);
@@ -2850,7 +2883,7 @@ export class BabylonAdapter implements RendererAdapter {
     system.minLifeTime = spec.minLifeTime;
     system.maxLifeTime = spec.maxLifeTime;
     system.emitRate = 0;
-    system.manualEmitCount = spec.count;
+    system.manualEmitCount = count;
     system.minEmitPower = spec.minEmitPower;
     system.maxEmitPower = spec.maxEmitPower;
     system.updateSpeed = 0.016;
@@ -2860,8 +2893,50 @@ export class BabylonAdapter implements RendererAdapter {
     system.colorDead = toColor4(spec.colorDead);
     system.blendMode = particleBlendMode(spec.blend);
     system.targetStopDuration = spec.duration ?? 0.06;
-    system.disposeOnStop = true;
-    system.start();
+  }
+
+  /**
+   * A GPU system ready to be configured: an idle one put back into the scene,
+   * a new one while the pool is still filling, or — with every slot mid-flight
+   * — the oldest live burst cut short and reused.
+   */
+  private acquireBurst(scene: Scene): GPUParticleSystem {
+    let system = this.burstIdle.pop();
+    if (system) {
+      scene.addParticleSystem(system);
+    } else if (this.burstLive.length < BabylonAdapter.BURST_POOL_MAX) {
+      system = new GPUParticleSystem(
+        `burst-${this.particleCounter++}`,
+        { capacity: BabylonAdapter.BURST_CAPACITY },
+        scene,
+      );
+    } else {
+      const oldest = this.burstLive.shift()!;
+      system = oldest.system;
+      system.stop();
+      system.reset();
+    }
+    if (!this.burstSweep) {
+      this.burstSweep = scene.onAfterRenderObservable.add(() => this.sweepBursts(scene));
+    }
+    return system;
+  }
+
+  /**
+   * Retire every burst whose clock has run out: stop, reset (drops the GPU
+   * buffers; they come back on the next render after reuse), and leave the
+   * scene, so an idle system is neither updated nor drawn. Oldest first — the
+   * scan stops at the first burst still in flight.
+   */
+  private sweepBursts(scene: Scene): void {
+    const now = performance.now();
+    while (this.burstLive.length > 0 && this.burstLive[0].endsAt <= now) {
+      const { system } = this.burstLive.shift()!;
+      system.stop();
+      system.reset();
+      scene.removeParticleSystem(system);
+      this.burstIdle.push(system);
+    }
   }
 
   /**
@@ -3520,6 +3595,12 @@ export class BabylonAdapter implements RendererAdapter {
     this.havokPlugin = null;
     this.havokReady = false;
     this.havokInitPromise = null;
+    // Idle burst systems sit outside the scene, so scene.dispose() cannot reach
+    // them; the live ones are still in it and go with it.
+    for (const system of this.burstIdle) system.dispose();
+    this.burstIdle = [];
+    this.burstLive = [];
+    this.burstSweep = null;
     this.scene?.dispose();
     this.engine?.dispose();
     this.scene = undefined;
