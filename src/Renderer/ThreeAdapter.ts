@@ -63,7 +63,6 @@ import type {
   ParticleEmitterSpec,
   ParticleEmitterHandle,
   GlowSpec,
-  BloomSpec,
   SunSpec,
   Color4,
   ModelFitSpec,
@@ -73,7 +72,6 @@ import type {
   SoundHandle,
 } from './types';
 import type { Color, FrameTimings, RenderPassInfo, RenderStats } from './types';
-import { rasterizeSunStarburst, SUN_STARBURST_TEXELS } from './sunStarburst';
 
 export interface ThreeAdapterOptions {
   /**
@@ -321,7 +319,6 @@ export class ThreeAdapter implements RendererAdapter {
   private particleEmitters = new Map<ParticleEmitterHandle, ParticleRuntime>();
   /** Selective-glow config + whitelist, and HDR bloom config (approximated by a shared bloom pass). */
   private glowSpec: GlowSpec | null = null;
-  private bloomSpec: BloomSpec | null = null;
   private glowMeshes = new Set<MeshHandle>();
   /**
    * A mesh parented under an enrolled root AFTER addGlowMesh (a debug box, a
@@ -348,7 +345,6 @@ export class ThreeAdapter implements RendererAdapter {
    * star). Null until `createSun`; `getSunWorldPosition` reads the disc's world
    * position.
    */
-  private sun?: { light: THREE.DirectionalLight; disc: THREE.Mesh; star?: THREE.Sprite; direction: Vec3; distance: number };
   private _sunVec?: THREE.Vector3;
 
   async init(canvas: HTMLCanvasElement, opts: RendererInitOptions = {}): Promise<void> {
@@ -2754,28 +2750,21 @@ export class ThreeAdapter implements RendererAdapter {
     });
   }
 
-  setBloom(spec: BloomSpec | null): void {
-    this.bloomSpec = spec;
-    this.refreshComposer();
-  }
-
   /**
    * Reconcile the post-process composer with the current glow/bloom config.
    * Selective glow is APPROXIMATED by the same UnrealBloom pass (the whitelist is
    * tracked via {@link BLOOM_LAYER} for a future selective-bloom mask); both
-   * `glowSpec` and `bloomSpec` drive one bloom pass. Building the composer is
+   * `glowSpec` drives the one bloom pass. Building the composer is
    * lazy + capability-guarded, so headless callers (the contract) just bookkeep.
    */
   private refreshComposer(): void {
-    if (this.bloomSpec || this.glowSpec) {
+    if (this.glowSpec) {
       void this.ensureComposer();
     } else {
       this.disposeComposer();
     }
     if (this.bloomPass) {
-      this.bloomPass.strength = this.bloomSpec?.weight ?? this.glowSpec?.intensity ?? 0.8;
-      if (this.bloomSpec?.threshold !== undefined) this.bloomPass.threshold = this.bloomSpec.threshold;
-      if (this.bloomSpec?.scale !== undefined) this.bloomPass.radius = this.bloomSpec.scale;
+      this.bloomPass.strength = this.glowSpec?.intensity ?? 0.8;
     }
   }
 
@@ -2803,12 +2792,12 @@ export class ThreeAdapter implements RendererAdapter {
       const size = (this.renderer as unknown as { getSize(v: THREE.Vector2): THREE.Vector2 }).getSize(new T.Vector2());
       const composer = new ec.EffectComposer(this.renderer);
       composer.addPass(new rp.RenderPass(this.scene, this.renderCamera()));
-      const strength = this.bloomSpec?.weight ?? this.glowSpec?.intensity ?? 0.8;
+      const strength = this.glowSpec?.intensity ?? 0.8;
       const bloom = new ub.UnrealBloomPass(
         new T.Vector2(size.x || 1, size.y || 1),
         strength,
-        this.bloomSpec?.scale ?? 0.4,
-        this.bloomSpec?.threshold ?? 0.85,
+        0.4,
+        0.85,
       );
       composer.addPass(bloom);
       composer.addPass(new op.OutputPass());
@@ -2856,116 +2845,6 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
 
-  // ─── Camera-following sun + directional-light query ───
-  createSun(id: string, spec: SunSpec): LightHandle {
-    const T = this.requireThree();
-    const scene = this.scene!;
-    // One sun: calling this again REPLACES it rather than adding a second light
-    // and a second disc to the scene. A round reset rebuilds the world in place
-    // and calls straight back in here.
-    this.disposeSun();
-    // Directional light whose rays TRAVEL along spec.direction (it sits up-sun).
-    const light = new T.DirectionalLight(this.toSRGB(spec.diffuse), spec.intensity);
-    light.name = `Sun_${id}`;
-    const dl = Math.hypot(spec.direction[0], spec.direction[1], spec.direction[2]) || 1;
-    const dir: Vec3 = [spec.direction[0] / dl, spec.direction[1] / dl, spec.direction[2] / dl];
-    scene.add(light);
-    scene.add(light.target);
-
-    if (spec.shadow?.enabled) {
-      this.enableShadowMap();
-      light.castShadow = true;
-      light.shadow.mapSize.set(spec.shadow.mapSize, spec.shadow.mapSize);
-      if (spec.shadow.bias !== undefined) light.shadow.bias = spec.shadow.bias;
-      if (spec.shadow.normalBias !== undefined) light.shadow.normalBias = spec.shadow.normalBias;
-      // Wide orthographic frustum so big rocks cast across the field.
-      const cam = light.shadow.camera;
-      const ext = Math.max(50, spec.distance / 20);
-      cam.left = -ext; cam.right = ext; cam.top = ext; cam.bottom = -ext;
-      cam.near = 0.5; cam.far = spec.distance * 2;
-      cam.updateProjectionMatrix();
-      // Three has no shadow `darkness`/`forceBackFacesOnly`; closest analogues:
-      if (spec.shadow.forceBackFacesOnly) light.shadow.bias = light.shadow.bias || -0.0008;
-    }
-
-    // Emissive disc parked at `camera − direction*distance` so it reads as an
-    // infinitely-distant star (unlit, never fogged, drawn after geometry).
-    const discDiameter = spec.discDiameter ?? 90;
-    const dc = spec.discColor ?? [10, 9, 7];
-    const discMat = new T.MeshBasicMaterial({
-      color: new T.Color(dc[0], dc[1], dc[2]), // HDR (raw, no sRGB clamp) to clear bloom
-      depthWrite: false,
-      fog: false,
-    });
-    const disc = new T.Mesh(new T.SphereGeometry(discDiameter / 2, 24, 24), discMat);
-    disc.name = `SunDisc_${id}`;
-    disc.frustumCulled = false;
-    disc.renderOrder = 1;
-    (disc as unknown as { raycast: () => void }).raycast = () => {};
-    scene.add(disc);
-
-    // The camera-glare star. A Sprite rather than a quad: Three has no
-    // per-object billboard flag, and a Sprite is camera-facing by construction —
-    // which is the whole requirement here.
-    let star: THREE.Sprite | undefined;
-    if (spec.starburst) {
-      const sb = spec.starburst;
-      const texels = sb.texels ?? SUN_STARBURST_TEXELS;
-      const seed = sb.seed ?? 1;
-      const texHandle = this.createDynamicTexture(`sun-starburst-${texels}-${seed}`, {
-        width: texels,
-        height: texels,
-        pixels: rasterizeSunStarburst(texels, seed),
-        srgb: true,
-        hasAlpha: true,
-        wrap: 'clamp',
-      });
-      const starMat = new T.SpriteMaterial({
-        map: this.textures.get(texHandle) as THREE.Texture,
-        // HDR (raw, no sRGB clamp), same as the disc, so it clears the bloom
-        // threshold rather than sitting at white.
-        color: new T.Color(sb.color[0], sb.color[1], sb.color[2]),
-        transparent: true,
-        depthWrite: false,
-        fog: false,
-      });
-      star = new T.Sprite(starMat);
-      star.name = `SunStar_${id}`;
-      star.scale.set(sb.size, sb.size, 1);
-      star.frustumCulled = false;
-      star.renderOrder = 2;
-      scene.add(star);
-    }
-
-    this.sun = { light, disc, star, direction: dir, distance: spec.distance };
-    this.positionSunDisc(this.renderCamera());
-
-    const handle = this.makeHandle<LightHandle>('sun', id);
-    this.lights.set(handle, light);
-    return handle;
-  }
-
-  /** Tear down the current sun — light, target, disc and star. Idempotent. */
-  private disposeSun(): void {
-    if (!this.sun || !this.scene) return;
-    const { light, disc, star } = this.sun;
-    this.scene.remove(light);
-    this.scene.remove(light.target);
-    light.dispose();
-    this.scene.remove(disc);
-    disc.geometry.dispose();
-    (disc.material as THREE.Material).dispose();
-    if (star) {
-      this.scene.remove(star);
-      // The star's MAP is the cached dynamic texture, shared with the next sun —
-      // only the material it was mounted in goes.
-      star.material.dispose();
-    }
-    for (const [handle, l] of this.lights) {
-      if (l === light) { this.lights.delete(handle); break; }
-    }
-    this.sun = undefined;
-  }
 
   private renderScale = 1;
 
@@ -3050,33 +2929,6 @@ export class ThreeAdapter implements RendererAdapter {
     };
   }
 
-  setSunOccluded(occluded: boolean): void {
-    if (!this.sun) return;
-    this.sun.disc.visible = !occluded;
-    if (this.sun.star) this.sun.star.visible = !occluded;
-  }
-
-  getSunWorldPosition(out: Vec3): Vec3 | null {
-    if (!this.sun || !this.THREE) return null;
-    const v = this.sun.disc.getWorldPosition(this._sunVec ??= new this.THREE.Vector3());
-    out[0] = v.x; out[1] = v.y; out[2] = v.z;
-    return out;
-  }
-
-  /** Re-seat the sun disc + light up-sun of the active camera (parallax-free). */
-  private positionSunDisc(camera?: THREE.PerspectiveCamera): void {
-    if (!this.sun) return;
-    const cam = camera ?? this.renderCamera();
-    const cx = cam?.position.x ?? 0, cy = cam?.position.y ?? 0, cz = cam?.position.z ?? 0;
-    const { direction: d, distance: dist } = this.sun;
-    this.sun.disc.position.set(cx - d[0] * dist, cy - d[1] * dist, cz - d[2] * dist);
-    // The star rides the disc exactly; the Sprite handles its own facing.
-    this.sun.star?.position.copy(this.sun.disc.position);
-    // Park the directional light up-sun of the camera and aim it at the camera so
-    // its ortho shadow frustum tracks the scene around the player.
-    this.sun.light.position.set(cx - d[0] * dist * 0.5, cy - d[1] * dist * 0.5, cz - d[2] * dist * 0.5);
-    this.sun.light.target.position.set(cx, cy, cz);
-  }
 
   /** sRGB-tagged color (matches how scene-JSON numbers are authored). */
   private toSRGB(rgb: Color): THREE.Color {
@@ -3217,7 +3069,6 @@ export class ThreeAdapter implements RendererAdapter {
         // Phase-3: keep the camera-anchored sun + skybox-style meshes parked on
         // the camera, advance the CPU particle integrator, then draw — through
         // the bloom composer when one is live, else straight to the canvas.
-        if (this.sun) this.positionSunDisc(camera);
         if (this.particleRuntimes.size > 0) this.updateParticles(dt, camera);
         if (this.composer) this.composer.render();
         else this.renderer!.render(this.scene!, camera);
@@ -3292,15 +3143,6 @@ export class ThreeAdapter implements RendererAdapter {
     this.disposeComposer();
     this.glowMeshes.clear();
     this.glowSpec = null;
-    this.bloomSpec = null;
-    if (this.sun) {
-      this.scene?.remove(this.sun.light);
-      this.scene?.remove(this.sun.light.target);
-      this.scene?.remove(this.sun.disc);
-      this.sun.disc.geometry.dispose();
-      (this.sun.disc.material as THREE.Material).dispose();
-      this.sun = undefined;
-    }
     this.dynamicTexturesByKey.clear();
     // Audio: detach sounds/listener from the scene graph before it goes.
     for (const entry of this.sounds.values()) {

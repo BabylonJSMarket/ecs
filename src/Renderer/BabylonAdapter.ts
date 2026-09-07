@@ -106,7 +106,6 @@ import type {
   ParticleEmitterSpec,
   ParticleEmitterHandle,
   GlowSpec,
-  BloomSpec,
   SunSpec,
   SpotLightSpec,
   FogSpec,
@@ -122,7 +121,6 @@ import {
   hash as rockHash,
   clamp01,
 } from './proceduralRock';
-import { rasterizeSunStarburst, SUN_STARBURST_TEXELS } from './sunStarburst';
 
 function notImplemented(method: string): never {
   throw new Error(`BabylonAdapter.${method}: not implemented yet`);
@@ -337,17 +335,8 @@ export class BabylonAdapter implements RendererAdapter {
   private glowBuiltSamples = 0;
   /** The new-mesh listener; registered only while some root is enrolled. */
   private glowNewMeshObserver: Observer<AbstractMesh> | null = null;
-  /** The HDR bloom pipeline, created lazily on the first setBloom call. */
+  /** The shared HDR post pipeline, built lazily on first use. */
   private renderPipeline: DefaultRenderingPipeline | null = null;
-  /** Camera-following sun: emissive disc, its per-frame follow observer + offset. */
-  private sunDisc: Mesh | null = null;
-  /** The camera-glare star billboarded over the disc. Null unless spec.starburst. */
-  private sunStarburst: Mesh | null = null;
-  private sunObserver: Observer<Scene> | null = null;
-  /** The current sun's light + handle, so a second createSun can replace it. */
-  private sunLight: BabylonDirectionalLight | null = null;
-  private sunLightHandle: LightHandle | null = null;
-  private readonly sunOffset = new Vector3();
   /**
    * Card meshes built by createCardMesh: the PBR material, its rounded-rect
    * alpha mask, and the front/back face textures. setMeshFaceTexture swaps the
@@ -939,20 +928,6 @@ export class BabylonAdapter implements RendererAdapter {
     return this.meshesByMeshId.get(meshId) ?? null;
   }
   /**
-   * The sun's emissive disc, for a plugin that must render the sun BY ITSELF.
-   *
-   * A screen-space lens flare has to derive its ghosts from the sun alone. Given
-   * the composited scene it cannot: every bright pixel qualifies, so engine
-   * plumes and sunlit rock throw ghosts too, and no brightness threshold
-   * separates them — set it high enough to exclude a lit asteroid and the sun
-   * (clamped to white like everything else) is excluded with it. Handing the
-   * plugin the disc lets it render that one mesh into its own black target and
-   * flare from a picture containing nothing else.
-   */
-  getSunDisc(): Mesh | null {
-    return this.sunDisc;
-  }
-  /**
    * Host accessors for the Physics component's adapter plugin, which owns every
    * capability only that component (and the ones that query it) needs: scene
    * casts, a box-shape hot-swap, angular velocity, pre-step ownership.
@@ -1316,6 +1291,25 @@ export class BabylonAdapter implements RendererAdapter {
     const handle = this.makeHandle<MeshHandle>('plugin', id);
     this.meshes.set(handle, mesh);
     return handle;
+  }
+  /**
+   * The shared HDR post pipeline, built on first use, for a plugin that drives
+   * one of its passes. SpaceDust's sun plugin turns bloom on through it.
+   *
+   * It is SHARED — the pipeline also carries the render passes the perf rig
+   * toggles — so a plugin sets its own knobs and leaves the rest alone rather
+   * than building a second one.
+   */
+  getRenderPipeline(): DefaultRenderingPipeline | null {
+    return this.ensureRenderPipeline();
+  }
+  /**
+   * The engine texture behind a handle, for a plugin that must hand one to a
+   * material it builds itself. The handle-minting and the dedupe-by-key stay on
+   * the adapter, so two plugins asking for the same key still share one upload.
+   */
+  getTextureObject(h: TextureHandle): Texture | undefined {
+    return this.textures.get(h);
   }
 
   setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
@@ -2847,62 +2841,12 @@ export class BabylonAdapter implements RendererAdapter {
     // Live-settable, unlike the two above: Babylon rebuilds the blur
     // post-processes on assignment.
     if (spec.blurKernelSize !== undefined) this.glowLayer.blurKernelSize = spec.blurKernelSize;
-    // A sun created BEFORE the layer existed would otherwise never glow. Callers
-    // set the layer up first today, but the two are independent calls and the
-    // failure is silent, so re-enrol rather than depend on the order.
-    this.enrolSunInGlow();
+    // A mesh enrolled BEFORE the layer existed would otherwise never glow, so
+    // every remembered root is re-enrolled above rather than depending on the
+    // order of setGlowLayer and addGlowMesh.
   }
 
-  /**
-   * Opt the sun's disc and star into the glow layer. Idempotent — Babylon's
-   * include list is a Set, so re-adding is free and calling this from both
-   * `createSun` and `setGlowLayer` covers either order.
-   */
-  private enrolSunInGlow(): void {
-    if (!this.glowLayer) return;
-    if (this.sunDisc) this.glowLayer.addIncludedOnlyMesh(this.sunDisc);
-    if (this.sunStarburst) this.glowLayer.addIncludedOnlyMesh(this.sunStarburst);
-  }
 
-  /**
-   * Tear down the current sun: light, disc, star and the per-frame follow
-   * observer. Idempotent — no sun is the normal state before the first
-   * `createSun`.
-   */
-  private disposeSun(): void {
-    if (this.sunObserver) {
-      this.scene?.onBeforeRenderObservable.remove(this.sunObserver);
-      this.sunObserver = null;
-    }
-    // Take the meshes out of the glow whitelist first: the layer outlives the
-    // sun, and a disposed mesh left in its include list keeps being walked.
-    if (this.glowLayer) {
-      if (this.sunDisc) this.glowLayer.removeIncludedOnlyMesh(this.sunDisc);
-      if (this.sunStarburst) this.glowLayer.removeIncludedOnlyMesh(this.sunStarburst);
-    }
-    this.sunStarburst?.material?.dispose();
-    this.sunStarburst?.dispose();
-    this.sunStarburst = null;
-    this.sunDisc?.material?.dispose();
-    this.sunDisc?.dispose();
-    this.sunDisc = null;
-    // The starburst TEXTURE deliberately survives: it is keyed in the dynamic
-    // texture cache, costs a rasterise to rebuild, and is identical for the same
-    // (texels, seed). The next sun reuses it from the cache.
-    if (this.sunLightHandle) {
-      this.lights.delete(this.sunLightHandle);
-      // The shadow generator hangs off the light, so it goes with it or the next
-      // sun's rocks are shadowed by a generator aimed from the last one.
-      const sg = this.shadowGenerators.get(this.sunLightHandle);
-      if (sg) {
-        sg.dispose();
-        this.shadowGenerators.delete(this.sunLightHandle);
-      }
-    }
-    this.sunLight?.dispose();
-    this.sunLight = null;
-    this.sunLightHandle = null;
-  }
 
   addGlowMesh(h: MeshHandle): void {
     const node = this.meshes.get(h);
@@ -2992,21 +2936,6 @@ export class BabylonAdapter implements RendererAdapter {
     }
   }
 
-  setBloom(spec: BloomSpec | null): void {
-    if (!this.scene) return;
-    if (!spec) {
-      if (this.renderPipeline) this.renderPipeline.bloomEnabled = false;
-      return;
-    }
-    const pipeline = this.ensureRenderPipeline();
-    if (!pipeline) return;
-    pipeline.bloomEnabled = true;
-    pipeline.bloomWeight = spec.weight;
-    if (spec.threshold !== undefined) pipeline.bloomThreshold = spec.threshold;
-    if (spec.scale !== undefined) pipeline.bloomScale = spec.scale;
-    if (spec.kernel !== undefined) pipeline.bloomKernel = spec.kernel;
-  }
-
   /** Lazily build the HDR pipeline (with whatever camera is active) for bloom. */
   private ensureRenderPipeline(): DefaultRenderingPipeline | null {
     if (this.renderPipeline) return this.renderPipeline;
@@ -3048,125 +2977,6 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   // ─── Phase-3: camera-following sun + directional-light query ───
-  /**
-   * Create a camera-following sun: a DirectionalLight whose rays travel along
-   * `spec.direction`, plus an emissive disc parked at `camera − direction*distance`
-   * (re-seated each frame so it reads as an infinitely-distant star). An optional
-   * ShadowGenerator drives crisp rock-on-rock shadows. Returns the directional
-   * light's handle; the disc's world position is read back via
-   * {@link getSunWorldPosition}. (Lens flare / RTT are deferred to Phase 3b.)
-   */
-  createSun(id: string, spec: SunSpec): LightHandle {
-    if (!this.scene) throw new Error('BabylonAdapter.createSun: call init() first');
-    const scene = this.scene;
-    // There is exactly one sun. Calling this again REPLACES it rather than
-    // stacking a second one on the scene — which is what a round reset does, and
-    // what used to leave the old light burning (the scene brightening by one
-    // directional light per death), the old disc parked inside the new one, and
-    // the old follow observer running forever.
-    this.disposeSun();
-    const dir = normalizeVec3(spec.direction);
-    const light = new BabylonDirectionalLight(`Sun_${id}`, new Vector3(dir[0], dir[1], dir[2]), scene);
-    light.intensity = spec.intensity;
-    light.diffuse = Color3.FromArray(spec.diffuse);
-    light.specular = Color3.FromArray(spec.specular);
-    const handle = this.makeHandle<LightHandle>('sun', id);
-    this.lights.set(handle, light);
-    this.sunLight = light;
-    this.sunLightHandle = handle;
-
-    // Emissive disc. Unlit + HDR emissive so it clears the bloom threshold; the
-    // starburst flare / lens-flare RTT is Phase-3b.
-    const disc = MeshBuilder.CreateSphere(`Sun_${id}_disc`, {
-      diameter: spec.discDiameter ?? 90,
-      segments: 16,
-    }, scene);
-    const discMat = new PBRMaterial(`Sun_${id}_disc_mat`, scene);
-    discMat.unlit = true;
-    discMat.disableLighting = true;
-    discMat.albedoColor = new Color3(1, 0.96, 0.82);
-    const dc = spec.discColor ?? [14, 12, 8.5];
-    discMat.emissiveColor = new Color3(dc[0], dc[1], dc[2]);
-    disc.material = discMat;
-    disc.isPickable = false;
-    disc.applyFog = false;
-    this.sunDisc = disc;
-
-    // The camera-glare star. A billboard rather than a shader term: the flare
-    // pass reads a 512-texel picture of the disc, where a ray thin enough to
-    // look like a lens artefact is under a texel wide and turns to mush.
-    if (spec.starburst) {
-      const sb = spec.starburst;
-      const texels = sb.texels ?? SUN_STARBURST_TEXELS;
-      const seed = sb.seed ?? 1;
-      // Keyed by what changes the pixels, so two suns in one scene rasterise
-      // once and share the upload.
-      const texHandle = this.createDynamicTexture(`sun-starburst-${texels}-${seed}`, {
-        width: texels,
-        height: texels,
-        pixels: rasterizeSunStarburst(texels, seed),
-        // Colour data, and the alpha is the star's shape — without hasAlpha the
-        // quad renders as a black square with a star painted on it.
-        srgb: true,
-        hasAlpha: true,
-        wrap: 'clamp',
-      });
-      const starTex = this.textures.get(texHandle)!;
-      const star = MeshBuilder.CreatePlane(`Sun_${id}_starburst`, { size: sb.size }, scene);
-      const starMat = new StandardMaterial(`Sun_${id}_starburst_mat`, scene);
-      // Nothing lights this: it IS the light. Diffuse and specular go to black
-      // so only the emissive term survives, and the same texture drives both
-      // the colour and the opacity so the rays fade out instead of ending on
-      // the edge of their quad.
-      starMat.diffuseColor = new Color3(0, 0, 0);
-      starMat.specularColor = new Color3(0, 0, 0);
-      starMat.emissiveColor = new Color3(sb.color[0], sb.color[1], sb.color[2]);
-      starMat.emissiveTexture = starTex;
-      starMat.opacityTexture = starTex;
-      starMat.disableLighting = true;
-      starMat.backFaceCulling = false;
-      star.material = starMat;
-      star.isPickable = false;
-      star.applyFog = false;
-      star.billboardMode = Mesh.BILLBOARDMODE_ALL;
-      this.sunStarburst = star;
-    }
-
-    // Both meshes into the glow layer, which is where the soft bloom around the
-    // star comes from. GlowLayer's include list is a WHITELIST: leave the sun
-    // out of it and the layer runs, costs its pass, and glows nothing.
-    this.enrolSunInGlow();
-
-    // The disc sits OPPOSITE the ray-travel direction. Seed its position now (no
-    // render has run yet) and follow the camera every frame thereafter.
-    this.sunOffset.set(-dir[0] * spec.distance, -dir[1] * spec.distance, -dir[2] * spec.distance);
-    const cam = scene.activeCamera;
-    const cp = cam ? cam.position : Vector3.Zero();
-    disc.position.set(cp.x + this.sunOffset.x, cp.y + this.sunOffset.y, cp.z + this.sunOffset.z);
-    this.sunStarburst?.position.copyFrom(disc.position);
-    this.sunObserver = scene.onBeforeRenderObservable.add(() => {
-      const c = scene.activeCamera;
-      if (!c) return;
-      disc.position.set(c.position.x + this.sunOffset.x, c.position.y + this.sunOffset.y, c.position.z + this.sunOffset.z);
-      // The star rides the disc exactly. Billboarding handles the facing.
-      this.sunStarburst?.position.copyFrom(disc.position);
-    });
-
-    // Lazy shadow generator — only paid for if shadows are asked for.
-    if (spec.shadow?.enabled) {
-      const sg = new ShadowGenerator(spec.shadow.mapSize, light);
-      sg.forceBackFacesOnly = spec.shadow.forceBackFacesOnly ?? true;
-      sg.bias = spec.shadow.bias ?? 0.005;
-      sg.normalBias = spec.shadow.normalBias ?? 0.04;
-      sg.darkness = spec.shadow.darkness ?? 0.25;
-      sg.usePoissonSampling = false;
-      sg.useExponentialShadowMap = false;
-      light.autoUpdateExtends = true;
-      light.autoCalcShadowZBounds = true;
-      this.shadowGenerators.set(handle, sg);
-    }
-    return handle;
-  }
 
   /** Render scale as a fraction of native, for getRenderScale. */
   private renderScale = 1;
@@ -3424,23 +3234,6 @@ export class BabylonAdapter implements RendererAdapter {
     };
   }
 
-  setSunOccluded(occluded: boolean): void {
-    // setEnabled, not visibility/alpha: the mesh has to leave the render loop
-    // entirely, or the glow layer keeps drawing it into its own buffer and the
-    // halo goes on bleeding over the rock that is supposedly hiding it.
-    this.sunDisc?.setEnabled(!occluded);
-    this.sunStarburst?.setEnabled(!occluded);
-  }
-
-  getSunWorldPosition(out: Vec3): Vec3 | null {
-    if (!this.sunDisc) return null;
-    const p = this.sunDisc.position;
-    out[0] = p.x;
-    out[1] = p.y;
-    out[2] = p.z;
-    return out;
-  }
-
   // ─── Spatial audio (AudioEngineV2) ───
   initAudio(): Promise<boolean> {
     if (this.audioInitPromise) return this.audioInitPromise;
@@ -3669,11 +3462,6 @@ export class BabylonAdapter implements RendererAdapter {
     this.glowRoots.clear();
     this.glowNewMeshObserver = null;
     this.renderPipeline = null;
-    this.sunDisc = null;
-    this.sunStarburst = null;
-    this.sunObserver = null;
-    this.sunLight = null;
-    this.sunLightHandle = null;
   }
 }
 

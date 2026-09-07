@@ -774,23 +774,6 @@ export interface GlowSpec {
 }
 
 /**
- * Config for {@link RendererAdapter.setBloom}: HDR bloom on the default
- * rendering pipeline (depth-tested, so it naturally hides emissive pixels
- * occluded by nearer geometry — unlike the additive glow layer). Pass `null`
- * to disable.
- */
-export interface BloomSpec {
-  /** Bloom contribution weight. */
-  weight: number;
-  /** Brightness above which pixels bloom. Default engine-defined. */
-  threshold?: number;
-  /** Bloom blur scale. Default engine-defined. */
-  scale?: number;
-  /** Blur kernel size in px. Default engine-defined. */
-  kernel?: number;
-}
-
-/**
  * Spec for {@link RendererAdapter.createSun}: a camera-following sun — a
  * DirectionalLight whose rays travel along {@link direction}, plus an emissive
  * disc parked at {@link distance} from the active camera in the OPPOSITE
@@ -1668,12 +1651,6 @@ export interface RendererAdapter {
   /** Remove a mesh from the glow whitelist. No-op if absent / no glow layer. */
   removeGlowMesh(h: MeshHandle): void;
   /**
-   * Enable / configure HDR bloom on the default pipeline (depth-tested, so it
-   * respects occlusion — preferred over the glow layer for emissive gates
-   * behind rocks). Pass `null` to disable. Adapters without a pipeline no-op.
-   */
-  setBloom(spec: BloomSpec | null): void;
-  /**
    * Unlit-aware emissive setter keyed by the same id passed to
    * {@link createMesh}/{@link createProceduralMesh}. On a normal (lit) material
    * the emissive is the given color × `intensity` (it overpowers lighting); on
@@ -1685,40 +1662,6 @@ export interface RendererAdapter {
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void;
 
   // ─── Phase-3: camera-following sun + directional-light query ───
-  /**
-   * Create a camera-following sun (directional light + emissive disc, optional
-   * shadow generator; see {@link SunSpec}) registered under `id`, returning the
-   * {@link LightHandle} for the directional light. The disc parks at a fixed
-   * offset from the active camera so it reads as infinitely distant. Adapters
-   * without a sun concept create just the directional light.
-   */
-  createSun(id: string, spec: SunSpec): LightHandle;
-  /**
-   * World-space position of the sun disc (camera-relative — it moves every
-   * frame), written into `out` and returned. Drives the HUD's off-screen sun
-   * arrow via {@link worldToScreen}. Returns `null` (leaving `out` untouched) if
-   * no sun has been created.
-   */
-  getSunWorldPosition(out: Vec3): Vec3 | null;
-  /**
-   * Hide or show the sun's disc and star — what a caller does when it has
-   * worked out that something is between the camera and the sun.
-   *
-   * Depth alone does not cover this. The disc IS depth-tested and disappears
-   * behind a rock correctly; the GLOW LAYER around it does not, because a glow
-   * pass re-renders its whitelisted meshes into a separate buffer and ADDS the
-   * blurred result over the finished frame. The halo therefore spills across
-   * whatever is in front, and a sun behind an asteroid reads as a sun painted on
-   * top of it. The lens flare has the same problem for the same reason: it
-   * derives from a target containing only the disc, where no occluder exists.
-   *
-   * So occlusion is answered in the WORLD, by whoever knows where the rocks are,
-   * and the answer arrives here. Taking the meshes out of the scene takes them
-   * out of the glow pass and empties the flare's target in one move.
-   *
-   * No-op when there is no sun.
-   */
-  setSunOccluded(occluded: boolean): void;
   /**
    * A snapshot of what the renderer is actually carrying this frame, for a
    * performance readout.

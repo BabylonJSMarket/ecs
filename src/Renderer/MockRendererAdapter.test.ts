@@ -992,24 +992,6 @@ describe('MockRendererAdapter', () => {
       const h = renderer.createParticleEmitter('seeded', spec);
       expect(renderer.particleEmitters.get(h)?.position).toEqual([7, 8, 9]);
     });
-
-    it('createSun tolerates a zero-length direction via the hypot guard', () => {
-      const spec: SunSpec = {
-        direction: [0, 0, 0], // degenerate → hypot || 1 keeps the readback finite
-        distance: 1000,
-        intensity: 1,
-        diffuse: [1, 1, 1],
-        specular: [1, 1, 1],
-        discDiameter: 10,
-        discColor: [1, 1, 1],
-      };
-      renderer.createSun('degenerate-sun', spec);
-      const out: Vec3 = [7, 7, 7];
-      const ret = renderer.getSunWorldPosition(out);
-      expect(ret).toBe(out);
-      // -(0/1)*distance on every axis → a finite (signed) zero, not NaN.
-      expect(out.every(v => Number.isFinite(v) && v === 0)).toBe(true);
-    });
   });
 });
 

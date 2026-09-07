@@ -71,7 +71,6 @@ import type {
   ParticleEmitterSpec,
   ParticleEmitterHandle,
   GlowSpec,
-  BloomSpec,
   SunSpec,
   SpotLightSpec,
   FogSpec,
@@ -252,13 +251,11 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private glowSpec: GlowSpec | null = null;
   private glowMeshes = new Set<MeshHandle>();
   /** HDR bloom config recorded for the pipeline. Null = disabled. */
-  private bloomSpec: BloomSpec | null = null;
   /**
    * The camera-following sun: its directional light, the emissive disc parked at
    * a fixed offset from the active camera, and a `disposed` flag the per-frame
    * follow observer checks (Lite's onBeforeRender has no unsubscribe handle).
    */
-  private sun?: { light: BLNS.DirectionalLight; disc: LiteMesh; offsetLH: Vec3; disposed: boolean };
 
   private onFrame?: (dt: number) => void;
   /** True once the per-frame onBeforeRender hook is installed (install once). */
@@ -1799,9 +1796,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   removeGlowMesh(h: MeshHandle): void {
     this.glowMeshes.delete(h);
   }
-  setBloom(spec: BloomSpec | null): void {
-    this.bloomSpec = spec;
-  }
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
     const mesh = this.meshesByMeshId.get(meshId);
     if (!mesh) return;
@@ -1815,70 +1809,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Phase-3: camera-following sun + directional-light query ───
-  createSun(id: string, spec: SunSpec): LightHandle {
-    const engine = this.requireEngine();
-    const scene = this.requireScene();
-    // Unit direction the light TRAVELS, RH→LH (negate Z, as elsewhere).
-    const d = spec.direction;
-    const dl = Math.hypot(d[0], d[1], d[2]) || 1;
-    const dirLH: Vec3 = [d[0] / dl, d[1] / dl, -d[2] / dl];
-
-    const light = BL.createDirectionalLight([dirLH[0], dirLH[1], dirLH[2]], spec.intensity);
-    light.diffuse = [spec.diffuse[0], spec.diffuse[1], spec.diffuse[2]];
-    light.specular = [spec.specular[0], spec.specular[1], spec.specular[2]];
-    BL.addToScene(scene, light);
-
-    const handle = this.makeHandle<LightHandle>('sun', id);
-    this.lights.set(handle, light);
-
-    if (spec.shadow?.enabled) {
-      // The ortho X/Y bounds auto-fit the casters; depth runs from just in front
-      // of the disc out to its distance. Lite's ShadowGenerator is opaque, so the
-      // darkness/bias/normalBias/forceBackFacesOnly tuning isn't settable here.
-      const gen = BL.createPcfDirectionalShadowGenerator(engine, light, {
-        mapSize: spec.shadow.mapSize,
-        orthoMinZ: 1,
-        orthoMaxZ: spec.distance,
-      });
-      light.shadowGenerator = gen;
-      this.shadowGenerators.set(handle, gen);
-    }
-
-    // `spec.starburst` is not drawn here. The camera-glare star is a per-mesh
-    // camera-facing quad, and Lite has no per-mesh billboard (see
-    // setMeshBillboardMode) — its billboards are a sprite-atlas system, a
-    // different pipeline than one quad hanging at the sun. The disc renders on
-    // its own; the sun is dimmer than under Babylon/Three, not missing.
-
-    // Emissive disc parked OPPOSITE the light direction so it reads as the star.
-    const disc = BL.createSphere(engine, { diameter: spec.discDiameter ?? 90, segments: 16 });
-    disc.name = `${id}-disc`;
-    disc.pickable = false;
-    const dc = spec.discColor ?? [14, 12, 8.5];
-    disc.material = BL.createPbrMaterial({
-      unlit: true,
-      baseColorFactor: [dc[0], dc[1], dc[2], 1],
-      emissiveColor: [dc[0], dc[1], dc[2]],
-      metallicFactor: 0,
-      roughnessFactor: 1,
-    });
-    BL.addToScene(scene, disc);
-
-    // disc = camera − direction*distance  (all in the LH frame).
-    const offsetLH: Vec3 = [-dirLH[0] * spec.distance, -dirLH[1] * spec.distance, -dirLH[2] * spec.distance];
-    const rec = { light, disc, offsetLH, disposed: false };
-    this.sun = rec;
-    const cam0 = this.activeCameraPositionLH();
-    disc.position.set(cam0[0] + offsetLH[0], cam0[1] + offsetLH[1], cam0[2] + offsetLH[2]);
-    // Re-seat the disc on the active camera each frame; Lite's onBeforeRender has
-    // no unsubscribe, so the closure early-returns once the sun is disposed.
-    BL.onBeforeRender(scene, () => {
-      if (rec.disposed) return;
-      const c = this.activeCameraPositionLH();
-      rec.disc.position.set(c[0] + rec.offsetLH[0], c[1] + rec.offsetLH[1], c[2] + rec.offsetLH[2]);
-    });
-    return handle;
-  }
 
   /** World-space position (LH frame) of the active camera, for the camera-locked sun. */
   private activeCameraPositionLH(): Vec3 {
@@ -1950,20 +1880,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     // Lite's scene graph is opaque from here — it exposes no counters, so this
     // reports the one number it can stand behind rather than inventing the rest.
     return { ...{ meshes: 0, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0, frames: 0 }, meshes: this.meshes.size };
-  }
-
-  setSunOccluded(occluded: boolean): void {
-    // Only the disc — Lite draws no starburst (see createSun).
-    if (this.sun) this.sun.disc.visible = !occluded;
-  }
-
-  getSunWorldPosition(out: Vec3): Vec3 | null {
-    if (!this.sun) return null;
-    const p = this.sun.disc.position;
-    out[0] = p.x;
-    out[1] = p.y;
-    out[2] = -p.z; // LH→RH (see createArcCamera)
-    return out;
   }
 
   // ─── Loop / resize / dispose ───
@@ -2087,13 +2003,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.boxExtents.clear();
     this.pivotOffsets.clear();
     // Phase-3 visual state.
-    if (this.sun) this.sun.disposed = true;
-    this.sun = undefined;
     this.dynamicTextures.clear();
     this.dynamicTextureObjects.clear();
     this.particleEmitters.clear();
     this.glowMeshes.clear();
     this.glowSpec = null;
-    this.bloomSpec = null;
   }
 }

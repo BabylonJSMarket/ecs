@@ -47,7 +47,6 @@ import type {
   ParticleEmitterSpec,
   ParticleEmitterHandle,
   GlowSpec,
-  BloomSpec,
   SunSpec,
   SpotLightSpec,
   FogSpec,
@@ -852,7 +851,6 @@ export class MockRendererAdapter implements RendererAdapter {
    * stands for its whole subtree (the engines enrol the descendants for real).
    */
   glow: GlowSpec | null = null;
-  bloom: BloomSpec | null = null;
   glowMeshes = new Set<MeshHandle>();
 
   setGlowLayer(spec: GlowSpec | null): void {
@@ -868,34 +866,9 @@ export class MockRendererAdapter implements RendererAdapter {
     this.glowMeshes.delete(h);
     this.record('removeGlowMesh', h);
   }
-  setBloom(spec: BloomSpec | null): void {
-    this.bloom = spec;
-    this.record('setBloom', spec);
-  }
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
     this.record('setMeshEmissiveById', meshId, r, g, b, intensity);
   }
-
-  // ─── Phase-3: camera-following sun ───
-  /** Recorded sun world position; null until createSun. Tests can override. */
-  sunWorldPosition: Vec3 | null = null;
-
-  createSun(id: string, spec: SunSpec): LightHandle {
-    const h = makeHandle<LightHandle>('sun', id);
-    // Disc parks at `-direction * distance` from the (origin) camera by default;
-    // gives a finite, deterministic readback for getSunWorldPosition.
-    const d = spec.direction;
-    const dl = Math.hypot(d[0], d[1], d[2]) || 1;
-    this.sunWorldPosition = [
-      -(d[0] / dl) * spec.distance,
-      -(d[1] / dl) * spec.distance,
-      -(d[2] / dl) * spec.distance,
-    ];
-    this.record('createSun', id, spec);
-    return h;
-  }
-  /** Whether the sun is currently hidden. Tests read this instead of a mesh. */
-  sunOccluded = false;
 
   /** Stats a test can drive. Meshes defaults to what the mock actually holds. */
   renderStats: Partial<RenderStats> = {};
@@ -946,20 +919,6 @@ export class MockRendererAdapter implements RendererAdapter {
     this.record('getRenderStats');
     const created = this.calls.filter((c) => c.method === 'createMesh').length;
     return { meshes: created, activeMeshes: 0, drawCalls: 0, faces: 0, materials: 0, textures: 0, particleSystems: 0, renderTargets: 0, frames: 0, ...this.renderStats };
-  }
-
-  setSunOccluded(occluded: boolean): void {
-    this.sunOccluded = occluded;
-    this.record('setSunOccluded', occluded);
-  }
-
-  getSunWorldPosition(out: Vec3): Vec3 | null {
-    this.record('getSunWorldPosition');
-    if (!this.sunWorldPosition) return null;
-    out[0] = this.sunWorldPosition[0];
-    out[1] = this.sunWorldPosition[1];
-    out[2] = this.sunWorldPosition[2];
-    return out;
   }
 
   // ─── Spatial audio: recorded, with a synthetic handle so tests can drive the

@@ -43,7 +43,6 @@ import type {
   DynamicTextureSpec,
   ParticleBurstSpec,
   ParticleEmitterSpec,
-  SunSpec,
 } from './types';
 
 export interface RendererAdapterContractOptions {
@@ -1433,15 +1432,13 @@ export function runRendererAdapterContract(
     // Phase-3: glow / bloom / emissive / render ordering. All smoke-safe,
     // including on unknown ids/handles (Systems call them speculatively).
     // ---------------------------------------------------------------------
-    describe('glow, bloom & render order', () => {
-      it('setGlowLayer / addGlowMesh / removeGlowMesh / setBloom are smoke-safe (incl. disable)', () => {
+    describe('glow & render order', () => {
+      it('setGlowLayer / addGlowMesh / removeGlowMesh are smoke-safe (incl. disable)', () => {
         const m = adapter.createProceduralMesh('gate', { shape: 'waypoint', size: [20, 0, 0], emissive: 1 });
         expect(() => {
           adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.5 });
           adapter.addGlowMesh(m);
           adapter.removeGlowMesh(m);
-          adapter.setBloom({ weight: 0.3, threshold: 0.8 });
-          adapter.setBloom(null);
           adapter.setGlowLayer(null);
           adapter.addGlowMesh(m); // no-op after disable
         }).not.toThrow();
@@ -1492,34 +1489,9 @@ export function runRendererAdapterContract(
     });
 
     // ---------------------------------------------------------------------
-    // Phase-3: camera-following sun + directional-light query.
+    // Render scale + the readouts a perf panel asks for every frame.
     // ---------------------------------------------------------------------
-    describe('sun', () => {
-      const sunSpec: SunSpec = {
-        direction: [0, -0.22, 1], distance: 2400, intensity: 4.5,
-        diffuse: [1, 0.95, 0.85], specular: [1, 0.95, 0.85], discDiameter: 90,
-        discColor: [14, 12, 8.5], shadow: { enabled: true, mapSize: 2048, darkness: 0.25 },
-      };
-
-      it('getSunWorldPosition returns null before any sun is created', () => {
-        const out: Vec3 = [42, 42, 42];
-        expect(adapter.getSunWorldPosition(out)).toBeNull();
-        expect(out).toEqual([42, 42, 42]); // untouched on null
-      });
-
-      it('createSun returns a light handle; getSunWorldPosition then writes a finite Vec3 and returns out', () => {
-        // A perspective camera exists first so engine suns can park their disc
-        // relative to the active camera.
-        adapter.createPerspectiveCamera('cam', { fov: Math.PI / 3, near: 0.1, far: 200000 });
-        const light = adapter.createSun('sun', sunSpec);
-        expect(light).toBeDefined();
-        expect(() => adapter.updateLightIntensity(light, 3.0)).not.toThrow();
-        const out: Vec3 = [0, 0, 0];
-        const returned = adapter.getSunWorldPosition(out);
-        expect(returned).toBe(out);
-        expect(Number.isFinite(out[0]) && Number.isFinite(out[1]) && Number.isFinite(out[2])).toBe(true);
-      });
-
+    describe('render scale & readouts', () => {
       it('setRenderScale clamps into 0.25..1 and reads back', () => {
         // The knob that separates a fill-rate problem from everything else, so
         // it has to mean the same thing on every adapter — including the ones
@@ -1656,42 +1628,6 @@ export function runRendererAdapterContract(
         }).not.toThrow();
       });
 
-      it('setSunOccluded is safe before a sun exists, and round-trips after', () => {
-        // Occlusion is answered in the world by whoever knows where the rocks
-        // are, and the answer lands here every frame — including on the frames
-        // before the sun has been built. It must not throw on those.
-        expect(() => adapter.setSunOccluded(true)).not.toThrow();
-        adapter.createPerspectiveCamera('cam', { fov: Math.PI / 3, near: 0.1, far: 200000 });
-        adapter.createSun('sun', sunSpec);
-        expect(() => {
-          adapter.setSunOccluded(true);
-          adapter.setSunOccluded(false);
-        }).not.toThrow();
-        // Hiding the sun must not lose track of WHERE it is — the off-screen sun
-        // indicator keeps pointing at it while it is behind a rock.
-        const out: Vec3 = [0, 0, 0];
-        adapter.setSunOccluded(true);
-        expect(adapter.getSunWorldPosition(out)).toBe(out);
-        expect(out.every((n) => Number.isFinite(n))).toBe(true);
-      });
-
-      it('a starburst sun still reports a finite disc position, with or without a glow layer', () => {
-        // The star is internal — nothing in the interface hands it back. What
-        // this pins is that the optional spec field cannot take an adapter down:
-        // one that ignores it must behave exactly as it did, and one that draws
-        // it must not disturb the disc readback the off-screen sun indicator
-        // steers by. Both orders, because the glow layer and the sun are
-        // independent calls and either can land first.
-        adapter.createPerspectiveCamera('cam', { fov: Math.PI / 3, near: 0.1, far: 200000 });
-        adapter.setGlowLayer({ intensity: 0.9 });
-        const spec = { ...sunSpec, starburst: { size: 850, color: [3, 2.5, 1.5] as Color, texels: 64, seed: 7 } };
-        expect(() => adapter.createSun('starry-sun', spec)).not.toThrow();
-        const out: Vec3 = [0, 0, 0];
-        expect(adapter.getSunWorldPosition(out)).toBe(out);
-        expect(out.every((n) => Number.isFinite(n))).toBe(true);
-        // Enrolling a sun that already exists is the other order, and idempotent.
-        expect(() => adapter.setGlowLayer({ intensity: 0.5 })).not.toThrow();
-      });
     });
 
     // ---------------------------------------------------------------------
