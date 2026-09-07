@@ -989,23 +989,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const entry = this.cameras.get(h);
     if (entry) entry.camera.alpha += delta;
   }
-  nudgeCameraBeta(h: CameraHandle, delta: number): void {
-    const entry = this.cameras.get(h);
-    if (!entry) return;
-    let next = entry.camera.beta + delta;
-    const lo = entry.camera.lowerBetaLimit;
-    const hi = entry.camera.upperBetaLimit;
-    if (lo !== undefined) next = Math.max(lo, next);
-    if (hi !== undefined) next = Math.min(hi, next);
-    entry.camera.beta = next;
-  }
-  nudgeCameraTarget(h: CameraHandle, dx: number, dy: number, dz: number): void {
-    const entry = this.cameras.get(h);
-    if (!entry) return;
-    entry.camera.target.x += dx;
-    entry.camera.target.y += dy;
-    entry.camera.target.z += dz;
-  }
   nudgeCameraRadius(h: CameraHandle, delta: number): void {
     const entry = this.cameras.get(h);
     if (!entry) return;

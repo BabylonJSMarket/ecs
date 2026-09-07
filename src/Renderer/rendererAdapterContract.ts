@@ -714,14 +714,6 @@ export function runRendererAdapterContract(
         expect(after - before).toBeCloseTo(0.5, 5);
       });
 
-      it('nudgeCameraBeta keeps beta within (0, π) regardless of nudge size', () => {
-        const h = adapter.createArcCamera('main', camSpec);
-        adapter.nudgeCameraBeta(h, 100);
-        expect(adapter.getCameraAngles(h).beta).toBeLessThan(Math.PI);
-        adapter.nudgeCameraBeta(h, -100);
-        expect(adapter.getCameraAngles(h).beta).toBeGreaterThan(0);
-      });
-
       it('nudgeCameraRadius keeps radius strictly positive', () => {
         const h = adapter.createArcCamera('main', camSpec);
         adapter.nudgeCameraRadius(h, -10000);

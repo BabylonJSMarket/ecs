@@ -1333,14 +1333,6 @@ export interface RendererAdapter {
   getMeshWorldBounds(meshId: string, outMin: Vec3, outMax: Vec3): boolean;
   nudgeCameraAlpha(h: CameraHandle, delta: number): void;
   /**
-   * Add `delta` to the orbit pitch (Babylon ArcRotateCamera.beta, Three
-   * OrbitControls polar angle). Positive values pitch the camera DOWN toward
-   * the horizon; negative values tilt UP toward overhead. Adapters clamp to
-   * their configured beta limits.
-   */
-  nudgeCameraBeta(h: CameraHandle, delta: number): void;
-  nudgeCameraTarget(h: CameraHandle, dx: number, dy: number, dz: number): void;
-  /**
    * Add `delta` to the orbit radius (Babylon ArcRotateCamera.radius, Three
    * OrbitControls spherical radius). Positive values dolly the camera OUT
    * (further from the target); negative values dolly IN. Adapters should

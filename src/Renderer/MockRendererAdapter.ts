@@ -450,23 +450,10 @@ export class MockRendererAdapter implements RendererAdapter {
     if (a) a.alpha += delta;
     this.record('nudgeCameraAlpha', h, delta);
   }
-  nudgeCameraTarget(h: CameraHandle, dx: number, dy: number, dz: number): void {
-    const t = this.cameraTargets.get(h) ?? [0, 0, 0];
-    t[0] += dx;
-    t[1] += dy;
-    t[2] += dz;
-    this.cameraTargets.set(h, t);
-    this.record('nudgeCameraTarget', h, dx, dy, dz);
-  }
   nudgeCameraRadius(h: CameraHandle, delta: number): void {
     const a = this.cameraAngles.get(h);
     if (a) a.radius = Math.max(0.01, a.radius + delta);
     this.record('nudgeCameraRadius', h, delta);
-  }
-  nudgeCameraBeta(h: CameraHandle, delta: number): void {
-    const a = this.cameraAngles.get(h);
-    if (a) a.beta = Math.max(0.01, Math.min(Math.PI - 0.01, a.beta + delta));
-    this.record('nudgeCameraBeta', h, delta);
   }
   setCameraRadius(h: CameraHandle, radius: number): void {
     const a = this.cameraAngles.get(h);

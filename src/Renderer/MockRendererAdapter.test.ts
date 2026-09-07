@@ -233,34 +233,24 @@ describe('MockRendererAdapter', () => {
       expect(renderer.calls.some((c) => c.method === 'setCameraTarget')).toBe(true);
     });
 
-    it('nudgeCameraAlpha / nudgeCameraRadius / nudgeCameraBeta update angles and record calls', () => {
+    it('nudgeCameraAlpha / nudgeCameraRadius update angles and record calls', () => {
       const cam = renderer.createArcCamera('main', camSpec);
       renderer.nudgeCameraAlpha(cam, 0.5);
       renderer.nudgeCameraRadius(cam, -2);
-      renderer.nudgeCameraBeta(cam, -0.1);
 
       const angles = renderer.getCameraAngles(cam);
       expect(angles.alpha).toBeCloseTo(0.5);
       expect(angles.radius).toBeCloseTo(8);
-      expect(angles.beta).toBeCloseTo(Math.PI / 3 - 0.1);
 
       const methods = renderer.calls.map((c) => c.method);
       expect(methods).toContain('nudgeCameraAlpha');
       expect(methods).toContain('nudgeCameraRadius');
-      expect(methods).toContain('nudgeCameraBeta');
     });
 
     it('nudgeCameraRadius clamps to a small positive floor', () => {
       const cam = renderer.createArcCamera('main', camSpec);
       renderer.nudgeCameraRadius(cam, -9999);
       expect(renderer.getCameraAngles(cam).radius).toBeGreaterThan(0);
-    });
-
-    it('nudgeCameraTarget accumulates into cameraTargets', () => {
-      const cam = renderer.createArcCamera('main', camSpec);
-      renderer.nudgeCameraTarget(cam, 1, 0, 0);
-      renderer.nudgeCameraTarget(cam, 0, 2, 0);
-      expect(renderer.cameraTargets.get(cam)).toEqual([1, 2, 0]);
     });
 
     it('getCameraForward returns a unit vector derived from alpha', () => {
@@ -662,31 +652,15 @@ describe('MockRendererAdapter', () => {
       expect(out[2]).toBeCloseTo(0);
     });
 
-    it('nudgeCameraAlpha / nudgeCameraRadius / nudgeCameraBeta on unknown handle record without throwing', () => {
+    it('nudgeCameraAlpha / nudgeCameraRadius on unknown handle record without throwing', () => {
       const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
       renderer.nudgeCameraAlpha(fakeHandle, 0.1);
       renderer.nudgeCameraRadius(fakeHandle, 1);
-      renderer.nudgeCameraBeta(fakeHandle, 0.1);
       const methods = renderer.calls.map((c) => c.method);
       expect(methods).toContain('nudgeCameraAlpha');
       expect(methods).toContain('nudgeCameraRadius');
-      expect(methods).toContain('nudgeCameraBeta');
     });
 
-    it('nudgeCameraBeta clamps to (0.01, π − 0.01)', () => {
-      const cam = renderer.createArcCamera('main', { ...camSpec, beta: Math.PI / 2 });
-      renderer.nudgeCameraBeta(cam, 9999);
-      expect(renderer.getCameraAngles(cam).beta).toBeLessThan(Math.PI);
-      renderer.nudgeCameraBeta(cam, -9999);
-      expect(renderer.getCameraAngles(cam).beta).toBeGreaterThan(0);
-    });
-
-    it('nudgeCameraTarget on unknown handle creates and records a new entry', () => {
-      const fakeHandle = { __mockHandle: 'arcCamera:ghost' } as any;
-      renderer.nudgeCameraTarget(fakeHandle, 1, 2, 3);
-      const last = renderer.calls[renderer.calls.length - 1];
-      expect(last.method).toBe('nudgeCameraTarget');
-    });
   });
 
   describe('picking', () => {

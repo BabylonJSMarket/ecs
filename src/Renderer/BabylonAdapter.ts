@@ -1011,6 +1011,15 @@ export class BabylonAdapter implements RendererAdapter {
    * hold a `PhysicsBody` or a `HavokPlugin`; the free interface is not, which is
    * why those six methods left it.
    */
+  /**
+   * The engine's orbit camera behind a handle, for the ArcCamera component's
+   * adapter plugin. Pitch is the one orbit axis no interface method can reach,
+   * and holding an ArcRotateCamera is a plugin's business, not the free
+   * interface's.
+   */
+  getOrbitCamera(h: CameraHandle): ArcRotateCamera | null {
+    return this.cameras.get(h) ?? null;
+  }
   getPhysicsBody(meshId: string): PhysicsBody | null {
     return this.physicsAggregates.get(meshId)?.body ?? null;
   }
@@ -1779,23 +1788,6 @@ export class BabylonAdapter implements RendererAdapter {
   nudgeCameraAlpha(h: CameraHandle, delta: number): void {
     const cam = this.cameras.get(h);
     if (cam) cam.alpha += delta;
-  }
-  nudgeCameraBeta(h: CameraHandle, delta: number): void {
-    const cam = this.cameras.get(h);
-    if (!cam) return;
-    const next = cam.beta + delta;
-    // ArcRotateCamera clamps to lowerBetaLimit/upperBetaLimit when set, but
-    // defaults leave them `null`. Clamp defensively to [0.01, PI - 0.01].
-    const lo = cam.lowerBetaLimit ?? 0.01;
-    const hi = cam.upperBetaLimit ?? Math.PI - 0.01;
-    cam.beta = Number.isFinite(next) ? Math.max(lo, Math.min(hi, next)) : cam.beta;
-  }
-  nudgeCameraTarget(h: CameraHandle, dx: number, dy: number, dz: number): void {
-    const cam = this.cameras.get(h);
-    if (cam) {
-      const t = cam.getTarget();
-      cam.setTarget(new Vector3(t.x + dx, t.y + dy, t.z + dz));
-    }
   }
   nudgeCameraRadius(h: CameraHandle, delta: number): void {
     const cam = this.cameras.get(h);

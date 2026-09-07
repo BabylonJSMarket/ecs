@@ -1296,6 +1296,15 @@ export class ThreeAdapter implements RendererAdapter {
    * the adapter was given a pure-core integrator instead (which tracks neither
    * angular velocity nor body reshaping), or before Rapier has loaded.
    */
+  /**
+   * The camera + OrbitControls behind a handle, for the ArcCamera component's
+   * adapter plugin. Three has no beta: pitch is a spherical-coordinate rewrite
+   * of the camera position about the controls' target, which is exactly the kind
+   * of engine-shaped work a plugin should own.
+   */
+  getOrbitCamera(h: CameraHandle): { camera: THREE.PerspectiveCamera; controls?: unknown } | null {
+    return this.cameras.get(h) ?? null;
+  }
   getRapierBackend(): RapierPhysics | null {
     return this.usesRapier ? this.rapier : null;
   }
@@ -1861,17 +1870,6 @@ export class ThreeAdapter implements RendererAdapter {
     entry.camera.lookAt(tx, ty, tz);
     ctrl?.update();
   }
-  nudgeCameraTarget(h: CameraHandle, dx: number, dy: number, dz: number): void {
-    const entry = this.cameras.get(h);
-    if (!entry) return;
-    const ctrl = entry.controls as { target: THREE.Vector3; update(): void } | undefined;
-    if (ctrl) {
-      ctrl.target.x += dx;
-      ctrl.target.y += dy;
-      ctrl.target.z += dz;
-      ctrl.update();
-    }
-  }
   nudgeCameraRadius(h: CameraHandle, delta: number): void {
     const entry = this.cameras.get(h);
     if (!entry) return;
@@ -1887,31 +1885,6 @@ export class ThreeAdapter implements RendererAdapter {
     const next = Math.max(0.01, radius + delta);
     const s = next / radius;
     entry.camera.position.set(tx + dx * s, ty + dy * s, tz + dz * s);
-    entry.camera.lookAt(tx, ty, tz);
-    ctrl?.update();
-  }
-  nudgeCameraBeta(h: CameraHandle, delta: number): void {
-    const entry = this.cameras.get(h);
-    if (!entry) return;
-    const ctrl = entry.controls as { target: THREE.Vector3; update(): void } | undefined;
-    const tx = ctrl?.target.x ?? 0;
-    const ty = ctrl?.target.y ?? 0;
-    const tz = ctrl?.target.z ?? 0;
-    const dx = entry.camera.position.x - tx;
-    const dy = entry.camera.position.y - ty;
-    const dz = entry.camera.position.z - tz;
-    const radius = Math.hypot(dx, dy, dz);
-    if (radius < 1e-6) return;
-    // Convert to spherical, adjust polar angle, convert back. Three's
-    // OrbitControls treats y as up; polar = angle from +Y axis.
-    const polar = Math.acos(Math.max(-1, Math.min(1, dy / radius)));
-    const nextPolar = Math.max(0.05, Math.min(Math.PI - 0.05, polar + delta));
-    const azimuth = Math.atan2(dx, dz);
-    const sinP = Math.sin(nextPolar);
-    const nx = radius * sinP * Math.sin(azimuth);
-    const ny = radius * Math.cos(nextPolar);
-    const nz = radius * sinP * Math.cos(azimuth);
-    entry.camera.position.set(tx + nx, ty + ny, tz + nz);
     entry.camera.lookAt(tx, ty, tz);
     ctrl?.update();
   }
