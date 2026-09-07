@@ -1310,14 +1310,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
 
   // Lite's glTF loader carries no skeletons, so every mesh honestly reports
   // "no bones" — the same answer the full adapters give for an unrigged prop.
-  getBoneWorldPose(
-    _meshId: string,
-    _boneName: string,
-    _outPosition: Vec3,
-    _outOrientation: Quaternion,
-  ): boolean {
-    return false;
-  }
 
   // ─── Labels ───
   // Babylon Lite's text/sprite rendering needs a glyph atlas + font pipeline
@@ -1638,9 +1630,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   // handle + position so the create→setPosition→dispose surface is structurally
   // correct. The GPU/CPU auto-select + ParticleBurst/Emitter spec mapping lives
   // in the (core-backed) Babylon adapter; revisit once Lite's emitter lands.
-  createParticleBurst(spec: ParticleBurstSpec): void {
-    void spec;
-  }
   createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
     const handle = this.makeHandle<ParticleEmitterHandle>('emitter', id);
     this.particleEmitters.set(handle, {

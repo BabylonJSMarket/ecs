@@ -542,44 +542,6 @@ export class MockRendererAdapter implements RendererAdapter {
     this.record('setAnimationSpeed', meshId, clipName, speed);
   }
 
-  /**
-   * Skeleton stub. Tests seed a fake rig with `setMockBones(meshId, bones)`;
-   * `listBones`/`getBoneWorldPose` then answer from it exactly like a real
-   * adapter would from a loaded GLB. Unseeded meshes report no skeleton.
-   */
-  mockBones = new Map<string, Map<string, { position: Vec3; orientation: Quaternion }>>();
-  setMockBones(
-    meshId: string,
-    bones: Array<{ name: string; position?: Vec3; orientation?: Quaternion }>,
-  ): void {
-    const byName = new Map<string, { position: Vec3; orientation: Quaternion }>();
-    for (const b of bones) {
-      byName.set(b.name, {
-        position: b.position ? ([...b.position] as Vec3) : [0, 0, 0],
-        orientation: b.orientation ? { ...b.orientation } : { x: 0, y: 0, z: 0, w: 1 },
-      });
-    }
-    this.mockBones.set(meshId, byName);
-  }
-  getBoneWorldPose(
-    meshId: string,
-    boneName: string,
-    outPosition: Vec3,
-    outOrientation: Quaternion,
-  ): boolean {
-    this.record('getBoneWorldPose', meshId, boneName);
-    const bone = this.mockBones.get(meshId)?.get(boneName);
-    if (!bone) return false;
-    outPosition[0] = bone.position[0];
-    outPosition[1] = bone.position[1];
-    outPosition[2] = bone.position[2];
-    outOrientation.x = bone.orientation.x;
-    outOrientation.y = bone.orientation.y;
-    outOrientation.z = bone.orientation.z;
-    outOrientation.w = bone.orientation.w;
-    return true;
-  }
-
   /** Tests can preload the clip names `loadModelTemplate` resolves with. */
   modelTemplateAnimationNames: string[] = [];
 

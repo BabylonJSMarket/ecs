@@ -1394,22 +1394,6 @@ export interface RendererAdapter {
   setAnimationWeight(meshId: string, clipName: string, weight: number): void;
   /** Playback rate multiplier for the named clip. 1 = normal. */
   setAnimationSpeed(meshId: string, clipName: string, speed: number): void;
-  /**
-   * Read the CURRENT world-space pose of one bone: position into `outPosition`,
-   * unit orientation quaternion into `outOrientation` (out-params, same shape
-   * as {@link getCameraPose}). "World-space" means the same space
-   * `setMeshPosition`/{@link setMeshOrientation} write, with the mesh's own
-   * transform and any playing animation folded in — so a mesh given this pose
-   * verbatim sits ON the bone. Returns `false` — leaving the outs untouched —
-   * when the mesh or bone is unknown, so callers can degrade instead of
-   * flickering to the origin.
-   */
-  getBoneWorldPose(
-    meshId: string,
-    boneName: string,
-    outPosition: Vec3,
-    outOrientation: Quaternion,
-  ): boolean;
 
   /**
    * Instanced model loading for pools of animated characters that share one
@@ -1567,12 +1551,6 @@ export interface RendererAdapter {
   createDynamicTexture(key: string, spec: DynamicTextureSpec): TextureHandle;
 
   // ─── Phase-3: particle systems ───
-  /**
-   * Fire a ONE-SHOT particle burst (explosion, muzzle/launch flash) at a world
-   * point and auto-dispose it after {@link ParticleBurstSpec.duration}. The
-   * adapter auto-selects GPU vs CPU particles. Fire-and-forget — no handle.
-   */
-  createParticleBurst(spec: ParticleBurstSpec): void;
   /**
    * Create a CONTINUOUS particle emitter (camera-anchored space dust, engine
    * trails) registered under `id`, returning a handle for repositioning /

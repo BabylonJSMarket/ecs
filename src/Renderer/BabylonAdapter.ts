@@ -307,20 +307,6 @@ export class BabylonAdapter implements RendererAdapter {
   /** Monotonic suffix so each fire-and-forget burst / emitter gets a unique name. */
   private particleCounter = 0;
 
-  // ── Pooled GPU bursts ──────────────────────────────────────────────────────
-  /**
-   * Particles one pooled burst system can hold. A burst asking for more is
-   * clamped: GPU buffers are sized once per system, so this is the ceiling for
-   * a single explosion, not a per-frame budget.
-   */
-  private static readonly BURST_CAPACITY = 2048;
-  /** Bursts in flight at once before the oldest is recycled, as any pool does. */
-  private static readonly BURST_POOL_MAX = 24;
-  /** Systems between bursts — stopped, reset, and OUT of `scene.particleSystems`. */
-  private burstIdle: GPUParticleSystem[] = [];
-  /** Systems mid-burst, oldest first, each with the wall-clock time it is spent. */
-  private burstLive: { system: GPUParticleSystem; endsAt: number }[] = [];
-  private burstSweep: Observer<Scene> | null = null;
   /** The selective glow post-pass (empty whitelist until addGlowMesh). */
   private glowLayer: GlowLayer | null = null;
   /**
@@ -1233,39 +1219,6 @@ export class BabylonAdapter implements RendererAdapter {
     this.bonesByMeshId.delete(id);
   }
 
-  getBoneWorldPose(
-    meshId: string,
-    boneName: string,
-    outPosition: Vec3,
-    outOrientation: QuaternionSpec,
-  ): boolean {
-    const bone = this.bonesByMeshId.get(meshId)?.get(boneName);
-    if (!bone) return false;
-    const node = bone.getTransformNode();
-    if (node) {
-      // glTF rigs animate the linked TransformNodes directly — their world
-      // matrix IS the bone's world transform. Force a fresh compute: a System
-      // reads this mid-frame, before the render pass updates matrices.
-      node.computeWorldMatrix(true).decompose(this._boneScale, this._boneQuat, this._bonePos);
-    } else {
-      // Non-glTF skeleton: absolute (skeleton-space) matrix composed with the
-      // model root's world matrix.
-      const root = this.meshesByMeshId.get(meshId);
-      if (!root) return false;
-      bone.getSkeleton().computeAbsoluteMatrices(true);
-      bone.getAbsoluteMatrix().multiplyToRef(root.computeWorldMatrix(true), this._boneMat);
-      this._boneMat.decompose(this._boneScale, this._boneQuat, this._bonePos);
-    }
-    outPosition[0] = this._bonePos.x;
-    outPosition[1] = this._bonePos.y;
-    outPosition[2] = this._bonePos.z;
-    outOrientation.x = this._boneQuat.x;
-    outOrientation.y = this._boneQuat.y;
-    outOrientation.z = this._boneQuat.z;
-    outOrientation.w = this._boneQuat.w;
-    return true;
-  }
-
   /** Back-compat accessor used by not-yet-migrated Systems (ArcCamera, Shadow). */
   getMeshObject(h: MeshHandle): Mesh | undefined {
     return this.meshes.get(h);
@@ -1295,6 +1248,16 @@ export class BabylonAdapter implements RendererAdapter {
    */
   markMaterialShared(mat: object): void {
     sharedMaterialRegistry.add(mat);
+  }
+  /**
+   * A named bone on a loaded rig, for a plugin that reads or drives skeletons.
+   *
+   * The bone MAP stays here because `loadMesh` is what fills it — a plugin that
+   * rebuilt it would be reading the glTF a second time. What a plugin does with
+   * the bone (measure it, graft onto it, report its world pose) is the plugin's.
+   */
+  getBone(meshId: string, boneName: string): Bone | undefined {
+    return this.bonesByMeshId.get(meshId)?.get(boneName);
   }
   /**
    * The shared HDR post pipeline, built on first use, for a plugin that drives
@@ -2563,112 +2526,6 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   // ─── Phase-3: particle systems ───
-  /**
-   * Fire a one-shot burst (explosion / muzzle flash / hit spark).
-   *
-   * On the GPU the burst is a POOLED system, because a GPU particle system never
-   * disposes itself. `disposeOnStop` is honoured only by the CPU system;
-   * `GPUParticleSystem` carries the flag for cloning and its `stop()` flips a
-   * bool. Creating one per burst, as this used to, left every hit spark and
-   * explosion in `scene.particleSystems` as a stopped-but-live system still
-   * running a transform-feedback update and a draw each frame, forever — a
-   * minute of dogfighting leaked hundreds and the frame rate slid from the 30s
-   * into the teens while every mesh count sat still. Falling back to CPU bursts
-   * fixed the slide and lost the look, so: a bounded set of GPU systems, each
-   * configured per burst, started, and — once its particles have had time to
-   * die — stopped, reset, and taken OUT of the scene, where it costs nothing
-   * until the next burst reuses it. `scene.particleSystems.length` now reads
-   * the dust plus the bursts actually in flight.
-   *
-   * Without WebGL2 (the NullEngine path) the CPU system carries it and really
-   * does dispose itself: manual emit spent → stop → last particle dies → gone.
-   */
-  createParticleBurst(spec: ParticleBurstSpec): void {
-    if (!this.scene) return;
-    const scene = this.scene;
-    if (!GPUParticleSystem.IsSupported) {
-      const system = new ParticleSystem(`burst-${this.particleCounter++}`, Math.max(1, spec.count), scene);
-      this.configureBurst(system, spec, spec.count);
-      system.disposeOnStop = true;
-      system.start();
-      return;
-    }
-    const system = this.acquireBurst(scene);
-    this.configureBurst(system, spec, Math.min(spec.count, BabylonAdapter.BURST_CAPACITY));
-    system.start();
-    // Spent once the emit window and the longest-lived particle are both over.
-    // Particle age advances by updateSpeed × Babylon's animation ratio, which
-    // is wall-clock seconds at any frame rate, so a clock is the right measure.
-    const duration = spec.duration ?? 0.06;
-    this.burstLive.push({ system, endsAt: performance.now() + (duration + spec.maxLifeTime) * 1000 + 250 });
-  }
-
-  /** Everything about a burst that is the burst's, not the system's. */
-  private configureBurst(system: ParticleSystem | GPUParticleSystem, spec: ParticleBurstSpec, count: number): void {
-    const tex = this.textures.get(spec.texture);
-    if (tex) system.particleTexture = tex;
-    system.emitter = new Vector3(spec.position[0], spec.position[1], spec.position[2]);
-    system.createSphereEmitter(spec.emitRadius, spec.emitRadiusRange ?? 1);
-    system.minSize = spec.minSize;
-    system.maxSize = spec.maxSize;
-    system.minLifeTime = spec.minLifeTime;
-    system.maxLifeTime = spec.maxLifeTime;
-    system.emitRate = 0;
-    system.manualEmitCount = count;
-    system.minEmitPower = spec.minEmitPower;
-    system.maxEmitPower = spec.maxEmitPower;
-    system.updateSpeed = 0.016;
-    system.gravity = toVec3(spec.gravity);
-    system.color1 = toColor4(spec.color1);
-    system.color2 = toColor4(spec.color2);
-    system.colorDead = toColor4(spec.colorDead);
-    system.blendMode = particleBlendMode(spec.blend);
-    system.targetStopDuration = spec.duration ?? 0.06;
-  }
-
-  /**
-   * A GPU system ready to be configured: an idle one put back into the scene,
-   * a new one while the pool is still filling, or — with every slot mid-flight
-   * — the oldest live burst cut short and reused.
-   */
-  private acquireBurst(scene: Scene): GPUParticleSystem {
-    let system = this.burstIdle.pop();
-    if (system) {
-      scene.addParticleSystem(system);
-    } else if (this.burstLive.length < BabylonAdapter.BURST_POOL_MAX) {
-      system = new GPUParticleSystem(
-        `burst-${this.particleCounter++}`,
-        { capacity: BabylonAdapter.BURST_CAPACITY },
-        scene,
-      );
-    } else {
-      const oldest = this.burstLive.shift()!;
-      system = oldest.system;
-      system.stop();
-      system.reset();
-    }
-    if (!this.burstSweep) {
-      this.burstSweep = scene.onAfterRenderObservable.add(() => this.sweepBursts(scene));
-    }
-    return system;
-  }
-
-  /**
-   * Retire every burst whose clock has run out: stop, reset (drops the GPU
-   * buffers; they come back on the next render after reuse), and leave the
-   * scene, so an idle system is neither updated nor drawn. Oldest first — the
-   * scan stops at the first burst still in flight.
-   */
-  private sweepBursts(scene: Scene): void {
-    const now = performance.now();
-    while (this.burstLive.length > 0 && this.burstLive[0].endsAt <= now) {
-      const { system } = this.burstLive.shift()!;
-      system.stop();
-      system.reset();
-      scene.removeParticleSystem(system);
-      this.burstIdle.push(system);
-    }
-  }
 
   /**
    * Create a continuous emitter (camera-anchored space dust, trails). With
@@ -3354,12 +3211,6 @@ export class BabylonAdapter implements RendererAdapter {
     this.havokPlugin = null;
     this.havokReady = false;
     this.havokInitPromise = null;
-    // Idle burst systems sit outside the scene, so scene.dispose() cannot reach
-    // them; the live ones are still in it and go with it.
-    for (const system of this.burstIdle) system.dispose();
-    this.burstIdle = [];
-    this.burstLive = [];
-    this.burstSweep = null;
     this.scene?.dispose();
     this.engine?.dispose();
     this.scene = undefined;

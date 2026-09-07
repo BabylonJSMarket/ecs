@@ -40,7 +40,6 @@ import type {
   ScreenPoint,
   Vec3,
   DynamicTextureSpec,
-  ParticleBurstSpec,
   ParticleEmitterSpec,
 } from './types';
 
@@ -1029,22 +1028,10 @@ export function runRendererAdapterContract(
     });
 
     // ---------------------------------------------------------------------
-    // Skeleton introspection (degrade contract — real bones need a loaded GLB,
-    // which the headless env can't fetch; the pose semantics are covered by
-    // each engine's browser path and the Mock's own seeded-rig unit tests)
+    // Skeleton-adjacent mesh orientation. Bone POSES live in the Hand
+    // component's plugin, which is the only thing that reads them.
     // ---------------------------------------------------------------------
     describe('skeleton', () => {
-
-      it('getBoneWorldPose returns false and LEAVES the outs untouched on a miss', () => {
-        // Systems poll this every frame while a host model is still loading —
-        // a miss that zeroed the outs would flicker an attachment to the origin.
-        const outPos: Vec3 = [7, 8, 9];
-        const outQ: Quaternion = { x: 0.5, y: 0.5, z: 0.5, w: 0.5 };
-        expect(adapter.getBoneWorldPose('ghost', 'LeftHand', outPos, outQ)).toBe(false);
-        expect(outPos).toEqual([7, 8, 9]);
-        expect(outQ).toEqual({ x: 0.5, y: 0.5, z: 0.5, w: 0.5 });
-      });
-
       it('setMeshOrientation is smoke-safe on live and unknown handles', () => {
         const h = adapter.createMesh('oriented', { kind: 'box' });
         const q: Quaternion = { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 };
@@ -1295,17 +1282,6 @@ export function runRendererAdapterContract(
     // ---------------------------------------------------------------------
     describe('particles', () => {
       const tex = (a: RendererAdapter) => a.createDynamicTexture('dot', { width: 2, height: 2, pixels: new Uint8ClampedArray(2 * 2 * 4).fill(255), hasAlpha: true });
-
-      it('createParticleBurst fires a one-shot without throwing', () => {
-        const burst: ParticleBurstSpec = {
-          position: [0, 0, 0], texture: tex(adapter), count: 200, emitRadius: 0.2,
-          minSize: 0.5, maxSize: 2.5, minLifeTime: 0.6, maxLifeTime: 1.6,
-          minEmitPower: 20, maxEmitPower: 120,
-          color1: [3, 2.5, 1, 1], color2: [2.5, 0.8, 0.2, 1], colorDead: [0.3, 0.05, 0, 0],
-          blend: 'add', duration: 0.06,
-        };
-        expect(() => adapter.createParticleBurst(burst)).not.toThrow();
-      });
 
       it('createParticleEmitter handle round-trips setPosition + dispose; handles are distinct', () => {
         const base: ParticleEmitterSpec = {

@@ -307,22 +307,6 @@ describe('MockRendererAdapter', () => {
   });
 
   describe('skeleton stub', () => {
-    it('setMockBones seeds a rig that getBoneWorldPose answers from', () => {
-      renderer.setMockBones('hero', [
-        { name: 'Hips' },
-        { name: 'LeftHand', position: [0.4, 1.2, 0.1], orientation: { x: 0, y: 1, z: 0, w: 0 } },
-      ]);
-
-      const outPos: Vec3 = [0, 0, 0];
-      const outQ = { x: 0, y: 0, z: 0, w: 1 };
-      expect(renderer.getBoneWorldPose('hero', 'LeftHand', outPos, outQ)).toBe(true);
-      expect(outPos).toEqual([0.4, 1.2, 0.1]);
-      expect(outQ).toEqual({ x: 0, y: 1, z: 0, w: 0 });
-
-      // Unseeded bone on a seeded mesh still misses cleanly.
-      expect(renderer.getBoneWorldPose('hero', 'Tail', outPos, outQ)).toBe(false);
-    });
-
     it('setMeshOrientation stores the last quaternion per handle for assertions', () => {
       const h = renderer.createMesh('spinner', { kind: 'box' });
       renderer.setMeshOrientation(h, { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 });

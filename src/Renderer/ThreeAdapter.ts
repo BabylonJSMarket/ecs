@@ -1264,6 +1264,10 @@ export class ThreeAdapter implements RendererAdapter {
     this.meshes.set(handle, mesh);
     return handle;
   }
+  /** A named bone on a loaded rig — the Three twin of BabylonAdapter.getBone. */
+  getBone(meshId: string, boneName: string): THREE.Bone | undefined {
+    return this.bonesByMeshId.get(meshId)?.get(boneName);
+  }
   getRapierBackend(): RapierPhysics | null {
     return this.usesRapier ? this.rapier : null;
   }
@@ -1427,31 +1431,6 @@ export class ThreeAdapter implements RendererAdapter {
     }
     this.meshes.delete(h);
     this.bonesByMeshId.delete(id);
-  }
-
-  getBoneWorldPose(
-    meshId: string,
-    boneName: string,
-    outPosition: Vec3,
-    outOrientation: Quaternion,
-  ): boolean {
-    const bone = this.bonesByMeshId.get(meshId)?.get(boneName);
-    if (!bone) return false;
-    const T = this.requireThree();
-    if (!this._boneVec) this._boneVec = new T.Vector3();
-    if (!this._boneQuat) this._boneQuat = new T.Quaternion();
-    // getWorld* refresh the ancestor chain themselves (updateWorldMatrix), so
-    // a System reading mid-frame sees the mixer's latest bone transforms.
-    bone.getWorldPosition(this._boneVec);
-    bone.getWorldQuaternion(this._boneQuat);
-    outPosition[0] = this._boneVec.x;
-    outPosition[1] = this._boneVec.y;
-    outPosition[2] = this._boneVec.z;
-    outOrientation.x = this._boneQuat.x;
-    outOrientation.y = this._boneQuat.y;
-    outOrientation.z = this._boneQuat.z;
-    outOrientation.w = this._boneQuat.w;
-    return true;
   }
 
   private _tmpThreeVec?: THREE.Vector3;
@@ -2358,28 +2337,6 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
   // ─── Particle systems (THREE.Points pool + CPU integrator) ───
-  createParticleBurst(spec: ParticleBurstSpec): void {
-    const T = this.requireThree();
-    const tex = this.textures.get(spec.texture);
-    const rt = this.createParticleRuntime(T, {
-      capacity: Math.max(1, spec.count),
-      texture: tex,
-      blend: spec.blend ?? 'add',
-      position: spec.position,
-      emitRadius: spec.emitRadius,
-      emitRadiusRange: spec.emitRadiusRange ?? 1,
-      minSize: spec.minSize, maxSize: spec.maxSize,
-      minLifeTime: spec.minLifeTime, maxLifeTime: spec.maxLifeTime,
-      minEmitPower: spec.minEmitPower, maxEmitPower: spec.maxEmitPower,
-      color1: spec.color1, color2: spec.color2, colorDead: spec.colorDead,
-      gravity: spec.gravity ?? [0, 0, 0],
-    });
-    rt.continuous = false;
-    rt.duration = spec.duration ?? 0.06;
-    // One-shot: emit the whole count now (Babylon's manualEmitCount).
-    for (let i = 0; i < spec.count; i++) this.spawnParticle(rt);
-    this.particleRuntimes.add(rt);
-  }
 
   createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
     const T = this.requireThree();
