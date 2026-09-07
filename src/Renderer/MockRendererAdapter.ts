@@ -32,7 +32,6 @@ import type {
   SkyboxHandle,
   SkyboxSpec,
   EnvironmentTextureOpts,
-  PbrMaterialSpec,
   PointLightSpec,
   MeshSkinSpec,
   TextureHandle,
@@ -49,7 +48,6 @@ import type {
   ParticleEmitterHandle,
   GlowSpec,
   BloomSpec,
-  MeshRenderOptions,
   SunSpec,
   SpotLightSpec,
   FogSpec,
@@ -531,22 +529,8 @@ export class MockRendererAdapter implements RendererAdapter {
   }
 
   // ─── Floating origin (Phase-1: contract-only, dormant) ───
-  /** Tracked floating-origin offset; round-trips via get/setOriginOffset. No active rebase. */
-  originOffset: Vec3 = [0, 0, 0];
   /** Recorded large-world config (Phase-1 records only; no rebase). */
   largeWorld: { enabled: boolean; farPlane?: number } = { enabled: false };
-
-  getOriginOffset(out: Vec3): Vec3 {
-    out[0] = this.originOffset[0];
-    out[1] = this.originOffset[1];
-    out[2] = this.originOffset[2];
-    this.record('getOriginOffset');
-    return out;
-  }
-  setOriginOffset(x: number, y: number, z: number): void {
-    this.originOffset = [x, y, z];
-    this.record('setOriginOffset', x, y, z);
-  }
 
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
     this.record('pickAtScreenPoint', x, y, opts);
@@ -704,9 +688,6 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   clearEnvironmentTexture(): void {
     this.record('clearEnvironmentTexture');
-  }
-  applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void {
-    this.record('applyPbrMaterial', handle, spec);
   }
   setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
     this.record('setMeshSkin', handle, spec);
@@ -873,7 +854,6 @@ export class MockRendererAdapter implements RendererAdapter {
   glow: GlowSpec | null = null;
   bloom: BloomSpec | null = null;
   glowMeshes = new Set<MeshHandle>();
-  meshRenderOptions = new Map<MeshHandle, MeshRenderOptions>();
 
   setGlowLayer(spec: GlowSpec | null): void {
     this.glow = spec;
@@ -894,10 +874,6 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
     this.record('setMeshEmissiveById', meshId, r, g, b, intensity);
-  }
-  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
-    this.meshRenderOptions.set(h, { ...(this.meshRenderOptions.get(h) ?? {}), ...opts });
-    this.record('setMeshRenderingOptions', h, opts);
   }
 
   // ─── Phase-3: camera-following sun ───

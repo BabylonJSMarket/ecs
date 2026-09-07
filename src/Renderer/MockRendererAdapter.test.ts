@@ -776,15 +776,6 @@ describe('MockRendererAdapter', () => {
       expect(renderer.getLightPosition(h)).toBeUndefined();
     });
 
-    it('applyPbrMaterial records the call with handle and spec', () => {
-      const h = renderer.createMesh('sphere', { kind: 'sphere', diameter: 1 });
-      const spec = { albedoColor: [1, 0, 0], metallic: 0.8, roughness: 0.2 };
-      renderer.applyPbrMaterial(h, spec as any);
-      const last = renderer.calls[renderer.calls.length - 1];
-      expect(last.method).toBe('applyPbrMaterial');
-      expect(last.args[0]).toBe(h);
-      expect(last.args[1]).toBe(spec);
-    });
   });
 
   describe('physics extended', () => {

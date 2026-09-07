@@ -55,24 +55,9 @@ describe('BabylonLiteAdapter (pre-device contract subset)', () => {
     expect(() => adapter.physicsStep(1 / 60)).not.toThrow();
   });
 
-  // ─── Phase-1 trio: the camera/projection/origin bookkeeping that does NOT
-  // touch the GPU device, so it runs in the headless subset. (The perspective
-  // camera CREATION + numeric projection need a live scene → browser-only.)
-
-  it('floating-origin round-trips the recorded offset (Z-sign convention is self-consistent)', () => {
-    const adapter = new BabylonLiteAdapter();
-    const out: Vec3 = [0, 0, 0];
-    // getOriginOffset writes into and returns the provided `out`.
-    expect(adapter.getOriginOffset(out)).toBe(out);
-    expect(out[0]).toBeCloseTo(0, 6); // default, dormant
-    expect(out[1]).toBeCloseTo(0, 6);
-    expect(out[2]).toBeCloseTo(0, 6);
-    adapter.setOriginOffset(1000, -2000, 3000);
-    adapter.getOriginOffset(out);
-    expect(out[0]).toBeCloseTo(1000, 4);
-    expect(out[1]).toBeCloseTo(-2000, 4);
-    expect(out[2]).toBeCloseTo(3000, 4);
-  });
+  // ─── Phase-1: the camera/projection bookkeeping that does NOT touch the GPU
+  // device, so it runs in the headless subset. (The perspective camera CREATION
+  // + numeric projection need a live scene → browser-only.)
 
   it('worldToScreen returns false (no active perspective camera) without a device', () => {
     const adapter = new BabylonLiteAdapter();

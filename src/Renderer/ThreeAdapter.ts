@@ -47,7 +47,6 @@ import type {
   SkyboxHandle,
   SkyboxSpec,
   EnvironmentTextureOpts,
-  PbrMaterialSpec,
   PointLightSpec,
   MeshSkinSpec,
   TextureHandle,
@@ -65,7 +64,6 @@ import type {
   ParticleEmitterHandle,
   GlowSpec,
   BloomSpec,
-  MeshRenderOptions,
   SunSpec,
   Color4,
   ModelFitSpec,
@@ -344,8 +342,6 @@ export class ThreeAdapter implements RendererAdapter {
   private composer?: { render(): void; setSize(w: number, h: number): void; dispose?(): void };
   private bloomPass?: { strength: number; threshold: number; radius: number };
   private composerPending = false;
-  /** Skybox-style meshes re-seated at the active camera each frame (infiniteDistance). */
-  private infiniteDistanceMeshes = new Set<THREE.Object3D>();
   /**
    * Camera-following sun: a DirectionalLight plus an emissive disc parked at a
    * fixed offset from the active camera (so it reads as an infinitely distant
@@ -2070,8 +2066,8 @@ export class ThreeAdapter implements RendererAdapter {
     const targets: THREE.Object3D[] = [];
     for (const [id, mesh] of this.meshesByMeshId) {
       if (opts?.meshPredicate && !opts.meshPredicate(id)) continue;
-      // Honor the per-mesh pickable flag set via setMeshRenderingOptions
-      // (decals / HUD widgets opt out of ray picks).
+      // Honor the per-mesh pickable flag a plugin may have stamped
+      // (a plume, a decal, a HUD widget opts out of ray picks).
       if (mesh.userData?.pickable === false) continue;
       idByMesh.set(mesh, id);
       targets.push(mesh);
@@ -2115,7 +2111,6 @@ export class ThreeAdapter implements RendererAdapter {
   // PMREM, then assign to scene.environment.
   setEnvironmentTexture(_url: string, _opts?: EnvironmentTextureOpts): void {}
   clearEnvironmentTexture(): void {}
-  applyPbrMaterial(_handle: MeshHandle, _spec: PbrMaterialSpec): void {}
 
   setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
     const obj = this.meshes.get(handle);
@@ -2860,34 +2855,6 @@ export class ThreeAdapter implements RendererAdapter {
     else if (mat) apply(mat);
   }
 
-  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
-    const mesh = this.meshes.get(h);
-    if (!mesh) return;
-    // renderingGroupId → renderOrder (higher draws later/on top); Three has no
-    // separate render groups, but renderOrder gives the same layering.
-    if (opts.renderingGroupId !== undefined) mesh.renderOrder = opts.renderingGroupId;
-    const applyMat = (m: THREE.Material): void => {
-      const anyMat = m as unknown as { depthWrite?: boolean; fog?: boolean; needsUpdate?: boolean };
-      if (opts.disableDepthWrite !== undefined) anyMat.depthWrite = !opts.disableDepthWrite;
-      if (opts.applyFog !== undefined && 'fog' in anyMat) anyMat.fog = opts.applyFog;
-      anyMat.needsUpdate = true;
-    };
-    const mat = mesh.material;
-    if (Array.isArray(mat)) mat.forEach(applyMat);
-    else if (mat) applyMat(mat);
-    // Three has no infiniteDistance flag — re-seat the mesh at the camera each
-    // frame instead (skybox dome that never parallaxes).
-    if (opts.infiniteDistance !== undefined) {
-      if (opts.infiniteDistance) { this.infiniteDistanceMeshes.add(mesh); mesh.frustumCulled = false; }
-      else this.infiniteDistanceMeshes.delete(mesh);
-    }
-    // pickable → a userData flag honored by pickAtScreenPoint's target filter.
-    if (opts.pickable !== undefined) mesh.userData.pickable = opts.pickable;
-  }
-
-  private updateInfiniteDistance(camera: THREE.PerspectiveCamera): void {
-    for (const mesh of this.infiniteDistanceMeshes) mesh.position.copy(camera.position);
-  }
 
   // ─── Camera-following sun + directional-light query ───
   createSun(id: string, spec: SunSpec): LightHandle {
@@ -3251,7 +3218,6 @@ export class ThreeAdapter implements RendererAdapter {
         // the camera, advance the CPU particle integrator, then draw — through
         // the bloom composer when one is live, else straight to the canvas.
         if (this.sun) this.positionSunDisc(camera);
-        if (this.infiniteDistanceMeshes.size > 0) this.updateInfiniteDistance(camera);
         if (this.particleRuntimes.size > 0) this.updateParticles(dt, camera);
         if (this.composer) this.composer.render();
         else this.renderer!.render(this.scene!, camera);
@@ -3327,7 +3293,6 @@ export class ThreeAdapter implements RendererAdapter {
     this.glowMeshes.clear();
     this.glowSpec = null;
     this.bloomSpec = null;
-    this.infiniteDistanceMeshes.clear();
     if (this.sun) {
       this.scene?.remove(this.sun.light);
       this.scene?.remove(this.sun.light.target);

@@ -943,30 +943,6 @@ export function runRendererAdapterContract(
     });
 
     // ---------------------------------------------------------------------
-    // Floating origin (Phase-1: contract-only, dormant — pure bookkeeping,
-    // so the round-trip runs on EVERY adapter)
-    // ---------------------------------------------------------------------
-    describe('floating origin', () => {
-      it('getOriginOffset writes into and returns the provided `out`', () => {
-        const out: Vec3 = [0, 0, 0];
-        const returned = adapter.getOriginOffset(out);
-        expect(returned).toBe(out);
-        expect(Number.isFinite(out[0])).toBe(true);
-        expect(Number.isFinite(out[1])).toBe(true);
-        expect(Number.isFinite(out[2])).toBe(true);
-      });
-
-      it('setOriginOffset → getOriginOffset round-trips the recorded offset', () => {
-        adapter.setOriginOffset(1000, -2000, 3000);
-        const out: Vec3 = [0, 0, 0];
-        adapter.getOriginOffset(out);
-        expect(out[0]).toBeCloseTo(1000, 4);
-        expect(out[1]).toBeCloseTo(-2000, 4);
-        expect(out[2]).toBeCloseTo(3000, 4);
-      });
-    });
-
-    // ---------------------------------------------------------------------
     // Shadows
     // ---------------------------------------------------------------------
     describe('shadows', () => {
@@ -1510,12 +1486,8 @@ export function runRendererAdapterContract(
         if (options.glowEnrolled) expect(options.glowEnrolled(adapter, 'lamp', lamp).enrolled).toBe(0);
       });
 
-      it('setMeshEmissiveById no-ops on an unknown id; setMeshRenderingOptions is smoke-safe', () => {
-        const m = adapter.createMesh('sky', { kind: 'box' });
-        expect(() => {
-          adapter.setMeshEmissiveById('does-not-exist', 1, 0.5, 0.2, 2);
-          adapter.setMeshRenderingOptions(m, { renderingGroupId: 1, disableDepthWrite: true, infiniteDistance: true, applyFog: false, pickable: false });
-        }).not.toThrow();
+      it('setMeshEmissiveById no-ops on an unknown id', () => {
+        expect(() => adapter.setMeshEmissiveById('does-not-exist', 1, 0.5, 0.2, 2)).not.toThrow();
       });
     });
 

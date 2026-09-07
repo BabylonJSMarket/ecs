@@ -90,7 +90,6 @@ import type {
   PickResult,
   PrimitiveSpec,
   RendererAdapter,
-  PbrMaterialSpec,
   PointLightSpec,
   MeshSkinSpec,
   RendererInitOptions,
@@ -108,7 +107,6 @@ import type {
   ParticleEmitterHandle,
   GlowSpec,
   BloomSpec,
-  MeshRenderOptions,
   SunSpec,
   SpotLightSpec,
   FogSpec,
@@ -270,16 +268,6 @@ export class BabylonAdapter implements RendererAdapter {
   /** Canonical +Z axis (never mutated) + scratch, for deriving camera forward. */
   private readonly _zAxisCanon = new Vector3(0, 0, 1);
   private readonly _fwdScratch = new Vector3();
-  /**
-   * Tracked floating-origin offset (Phase-1: contract-only / dormant). Babylon
-   * has no built-in floating-origin field, so we store the value `setOriginOffset`
-   * records and hand it back from `getOriginOffset`. No active per-frame rebase
-   * happens — the pure game keeps passing real world coordinates; a zero offset
-   * is the camera-relative "no rebase applied" default.
-   */
-  private originOffset: Vec3 = [0, 0, 0];
-  /** Large-world / floating-origin enable flag recorded by `configureLargeWorld`. */
-  private largeWorldEnabled = false;
   private shadowGenerators = new Map<LightHandle, ShadowGenerator>();
   private shadowCasters = new Map<ShadowCasterHandle, { light: LightHandle; mesh: MeshHandle }>();
   private skyboxes = new Map<SkyboxHandle, {
@@ -1330,19 +1318,6 @@ export class BabylonAdapter implements RendererAdapter {
     return handle;
   }
 
-  applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void {
-    const mesh = this.meshes.get(handle);
-    if (!mesh || !this.scene) return;
-    const mat = new PBRMaterial(spec.name ?? 'pbrMaterial', this.scene);
-    if (spec.metallic !== undefined) mat.metallic = spec.metallic;
-    if (spec.roughness !== undefined) mat.roughness = spec.roughness;
-    if (spec.albedoColor) {
-      mat.albedoColor = new Color3(spec.albedoColor[0], spec.albedoColor[1], spec.albedoColor[2]);
-    }
-    if (spec.environmentIntensity !== undefined) mat.environmentIntensity = spec.environmentIntensity;
-    mesh.material = mat;
-  }
-
   setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
     const node = this.meshes.get(handle);
     if (!node || !this.scene) return;
@@ -1951,19 +1926,6 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   // ─── Floating origin / large world (Phase-1: contract-only, dormant) ───
-  getOriginOffset(out: Vec3): Vec3 {
-    out[0] = this.originOffset[0];
-    out[1] = this.originOffset[1];
-    out[2] = this.originOffset[2];
-    return out;
-  }
-
-  setOriginOffset(x: number, y: number, z: number): void {
-    // Record only — Phase-1 performs no active per-frame scene-graph rebase.
-    this.originOffset[0] = x;
-    this.originOffset[1] = y;
-    this.originOffset[2] = z;
-  }
 
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
     if (!this.scene) return null;
@@ -3085,18 +3047,6 @@ export class BabylonAdapter implements RendererAdapter {
     }
   }
 
-  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
-    const mesh = this.meshes.get(h);
-    if (!mesh) return;
-    if (opts.renderingGroupId !== undefined) mesh.renderingGroupId = opts.renderingGroupId;
-    if (opts.infiniteDistance !== undefined) mesh.infiniteDistance = opts.infiniteDistance;
-    if (opts.applyFog !== undefined) mesh.applyFog = opts.applyFog;
-    if (opts.pickable !== undefined) mesh.isPickable = opts.pickable;
-    if (opts.disableDepthWrite !== undefined && mesh.material) {
-      mesh.material.disableDepthWrite = opts.disableDepthWrite;
-    }
-  }
-
   // ─── Phase-3: camera-following sun + directional-light query ───
   /**
    * Create a camera-following sun: a DirectionalLight whose rays travel along
@@ -3705,8 +3655,6 @@ export class BabylonAdapter implements RendererAdapter {
     this.cameras.clear();
     this.perspectiveCameras.clear();
     this.perspectiveOrientations.clear();
-    this.originOffset[0] = this.originOffset[1] = this.originOffset[2] = 0;
-    this.largeWorldEnabled = false;
     this.shadowGenerators.clear();
     this.shadowCasters.clear();
     this.labels.clear();

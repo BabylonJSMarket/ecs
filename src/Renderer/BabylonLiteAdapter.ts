@@ -45,7 +45,6 @@ import type {
   MeshLoadResult,
   MeshLoadSpec,
   ModelInstantiateSpec,
-  PbrMaterialSpec,
   PointLightSpec,
   MeshSkinSpec,
   PhysicsBodyOpts,
@@ -73,7 +72,6 @@ import type {
   ParticleEmitterHandle,
   GlowSpec,
   BloomSpec,
-  MeshRenderOptions,
   SunSpec,
   SpotLightSpec,
   FogSpec,
@@ -192,7 +190,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
    * vs. the caller's right-handed frame, matching positions/cameras). Phase-1 is
    * contract-only / dormant: recorded here but never applied as an active rebase.
    */
-  private originOffset: Vec3 = [0, 0, 0];
   /** Large-world enable flag recorded by {@link configureLargeWorld} (Phase-1: no active rebase). */
   private largeWorldEnabled = false;
   private shadowGenerators = new Map<LightHandle, BLNS.ShadowGenerator>();
@@ -1107,22 +1104,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Floating origin / large world (Phase-1: contract-only, dormant) ───
-  getOriginOffset(out: Vec3): Vec3 {
-    // Stored LH; present it RH (un-negate Z) — the inverse of setOriginOffset, so
-    // the round-trip is exact and the sign convention matches positions/cameras.
-    out[0] = this.originOffset[0];
-    out[1] = this.originOffset[1];
-    out[2] = -this.originOffset[2];
-    return out;
-  }
-
-  setOriginOffset(x: number, y: number, z: number): void {
-    // Record only (Phase-1 contract-only — no active per-frame rebase). RH→LH:
-    // negate Z so the stored offset stays consistent with the rest of the adapter.
-    this.originOffset[0] = x;
-    this.originOffset[1] = y;
-    this.originOffset[2] = -z;
-  }
 
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
     // Babylon Lite only offers GPU-async picking (`createGpuPicker` + async
@@ -1194,20 +1175,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
   clearEnvironmentTexture(): void {
     // Lite exposes no "clear environment" call in this preview; no-op.
-  }
-
-  applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void {
-    const mesh = this.meshes.get(handle);
-    if (!mesh) return;
-    const pbr = BL.createPbrMaterial({
-      baseColorFactor: spec.albedoColor
-        ? [spec.albedoColor[0], spec.albedoColor[1], spec.albedoColor[2], 1]
-        : [1, 1, 1, 1],
-      metallicFactor: spec.metallic ?? 1,
-      roughnessFactor: spec.roughness ?? 0,
-      environmentIntensity: spec.environmentIntensity,
-    });
-    mesh.material = pbr;
   }
 
   /**
@@ -1846,16 +1813,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const e = m.unlit === true ? Math.min(1, intensity) : intensity * 2.5;
     m.emissiveColor = [r * e, g * e, b * e];
   }
-  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void {
-    const mesh = this.meshes.get(h);
-    if (!mesh) return;
-    // Lite exposes per-mesh pick + render-order; it has no rendering-GROUP
-    // buckets, so renderingGroupId maps onto renderOrder (lower = drawn first).
-    if (opts.pickable !== undefined) mesh.pickable = opts.pickable;
-    if (opts.renderingGroupId !== undefined) mesh.renderOrder = opts.renderingGroupId;
-    // disableDepthWrite / infiniteDistance / applyFog aren't modeled per-mesh in
-    // this Lite preview (no skybox-locked depth path yet) — documented no-ops.
-  }
 
   // ─── Phase-3: camera-following sun + directional-light query ───
   createSun(id: string, spec: SunSpec): LightHandle {
@@ -2116,7 +2073,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.cameras.clear();
     this.perspectiveCameras.clear();
     this.activePerspective = undefined;
-    this.originOffset = [0, 0, 0];
     this.largeWorldEnabled = false;
     this.shadowGenerators.clear();
     this.shadowCasters.clear();

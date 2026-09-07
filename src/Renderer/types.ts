@@ -405,19 +405,6 @@ export interface RendererInitOptions {
 }
 
 /**
- * Physically-based material parameters for {@link RendererAdapter.applyPbrMaterial}.
- * All fields optional; adapters apply only what's provided. `albedoColor` is an
- * [r,g,b] tuple in 0..1. Adapters without a PBR pipeline no-op.
- */
-export interface PbrMaterialSpec {
-  name?: string;
-  metallic?: number;
-  roughness?: number;
-  albedoColor?: Color;
-  environmentIntensity?: number;
-}
-
-/**
  * A "skin": replacement texture maps swapped onto a mesh's ALREADY-LOADED
  * materials, for {@link RendererAdapter.setMeshSkin} and
  * {@link ModelInstantiateSpec.skin}.
@@ -801,30 +788,6 @@ export interface BloomSpec {
   scale?: number;
   /** Blur kernel size in px. Default engine-defined. */
   kernel?: number;
-}
-
-/**
- * Per-mesh draw-order / depth knobs for {@link RendererAdapter.setMeshRenderingOptions}.
- * These layer the skybox (behind everything, no depth write, camera-locked),
- * the sun/flare, decals, and HUD widgets so they composite correctly without a
- * component touching the engine. All fields optional; the adapter applies only
- * what's provided.
- */
-export interface MeshRenderOptions {
-  /**
-   * Draw bucket. Group 0 (default) renders first; higher groups render after,
-   * on top. The HUD plane + light gizmo use group 1 so asteroids can't
-   * occlude them.
-   */
-  renderingGroupId?: number;
-  /** Skip depth WRITES (skybox: never blocks the z-test of real geometry). */
-  disableDepthWrite?: boolean;
-  /** Render at the far plane, locked to the camera (skybox dome). */
-  infiniteDistance?: boolean;
-  /** Whether scene fog tints this mesh. Sun/flare/HUD set false. */
-  applyFog?: boolean;
-  /** Whether the mesh participates in ray picks. Decals/HUD set false. */
-  pickable?: boolean;
 }
 
 /**
@@ -1386,22 +1349,6 @@ export interface RendererAdapter {
   worldToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean;
 
   // ─── Floating origin / large world (Phase-1: contract-only, dormant) ───
-  /**
-   * Read the renderer's current floating-origin offset into `out` and return it.
-   * Phase-1 is CONTRACT-ONLY / dormant: there is no active per-frame rebase, so
-   * this returns whatever {@link setOriginOffset} last recorded (default
-   * `[0, 0, 0]`, a camera-relative fallback). The pure game always passes real
-   * world coordinates; this offset is how a future large-world backend would
-   * report the rebase it applied.
-   */
-  getOriginOffset(out: Vec3): Vec3;
-  /**
-   * Record the desired floating-origin offset `(x, y, z)`. Phase-1
-   * CONTRACT-ONLY — the adapter stores it (so {@link getOriginOffset}
-   * round-trips) but does NOT yet rebase the scene graph each frame. Active
-   * per-frame rebasing is out of scope for Phase 1.
-   */
-  setOriginOffset(x: number, y: number, z: number): void;
 
   /**
    * Cast a ray from a screen-space point and return the first world
@@ -1448,13 +1395,6 @@ export interface RendererAdapter {
    * scene exists).
    */
   setFog(spec: FogSpec | null): void;
-
-  /**
-   * Apply a physically-based material to a mesh by handle (e.g. a chrome ball).
-   * Adapters without a PBR pipeline no-op. Keeps material creation behind the
-   * adapter boundary so Systems don't import engine material types directly.
-   */
-  applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void;
 
   /**
    * Swap the texture maps on an already-loaded mesh's materials — see
@@ -1743,11 +1683,6 @@ export interface RendererAdapter {
    * drives the flat diffuse path.)
    */
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void;
-  /**
-   * Apply per-mesh draw-order / depth knobs (see {@link MeshRenderOptions}) so
-   * the skybox, sun, decals and HUD layer correctly. No-op on an unknown handle.
-   */
-  setMeshRenderingOptions(h: MeshHandle, opts: MeshRenderOptions): void;
 
   // ─── Phase-3: camera-following sun + directional-light query ───
   /**
