@@ -57,5 +57,10 @@ export {
   asteroidMaxReach,
   asteroidReachExtents,
   ASTEROID_RIPPLE_DURATION,
+  // The seeded hash and the 0..1 clamp behind all of the above. A plugin that
+  // builds rock geometry needs the same two, and reimplementing either is how
+  // the drawn shape and the collided shape drift apart.
+  hash as rockHash,
+  clamp01,
   type AsteroidShape,
 } from './Renderer/proceduralRock';

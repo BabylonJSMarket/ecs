@@ -731,49 +731,6 @@ export class MockRendererAdapter implements RendererAdapter {
   /** Per-procedural-mesh recorded spec, so tests can assert seed/shape/cut. */
   proceduralMeshes = new Map<MeshHandle, ProceduralMeshSpec>();
 
-  createProceduralMesh(id: string, spec: ProceduralMeshSpec, mat?: MaterialSpec): MeshHandle {
-    const h = makeHandle<MeshHandle>('proc', id);
-    this.proceduralMeshes.set(h, spec);
-    this.record('createProceduralMesh', id, spec, mat);
-    return h;
-  }
-  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3 {
-    const isRock = spec.shape === 'asteroid' || spec.shape === 'oil-blob' || spec.shape === 'asteroid-drop';
-    if (!isRock) return out; // ship/missile/waypoint have no radial surface field
-    const seed = spec.seed ?? 1;
-    const radius = spec.size[0];
-    // Normalize the input direction (callers pass icosphere vertex dirs).
-    const len = Math.hypot(dirX, dirY, dirZ) || 1;
-    const nx = dirX / len, ny = dirY / len, nz = dirZ / len;
-    // Deterministic multi-octave displacement keyed by seed + quantized dir.
-    // Quantizing makes the same vertex direction map to the same offset on
-    // every adapter/run; identical (seed,dir) ⇒ identical radius.
-    let amp = 0.5;
-    let freq = 2;
-    let disp = 0;
-    for (let o = 0; o < 4; o++) {
-      const qx = Math.round(nx * freq * 8);
-      const qy = Math.round(ny * freq * 8);
-      const qz = Math.round(nz * freq * 8);
-      disp += (mockHash3(qx + seed, qy + seed * 31, qz + seed * 131) - 0.5) * amp;
-      amp *= 0.5;
-      freq *= 2;
-    }
-    let r = radius * (1 + disp * 0.5); // silhouette varies ±~25%
-    // Optional cut-axis carve: flatten the cap on the far side of the plane.
-    if (spec.cutAxis && spec.cutDepth && spec.cutDepth > 0) {
-      const [cx, cy, cz] = spec.cutAxis;
-      const cl = Math.hypot(cx, cy, cz) || 1;
-      const proj = (nx * cx + ny * cy + nz * cz) / cl; // -1..1 along the cut normal
-      const threshold = 1 - spec.cutDepth;
-      if (proj > threshold) r = Math.min(r, radius * threshold);
-    }
-    out[0] = nx * r;
-    out[1] = ny * r;
-    out[2] = nz * r;
-    return out;
-  }
-
   // ─── Phase-3: runtime dynamic textures ───
   /** Dynamic textures deduped by key (mirrors the engine adapters' cache). */
   dynamicTextures = new Map<string, TextureHandle>();

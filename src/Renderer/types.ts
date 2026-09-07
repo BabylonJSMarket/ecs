@@ -1553,31 +1553,6 @@ export interface RendererAdapter {
   setCollidersVisible(visible: boolean): void;
 
   // ─── Phase-3: procedural seeded geometry ───
-  /**
-   * Build a deterministic, seed-driven mesh (asteroids/oil-blobs + the
-   * named ship/missile/waypoint silhouettes) and register it under `id` so the
-   * standard mesh ops (`setMeshPosition`/`setMeshRotation`/`setMeshScale`/
-   * `setMeshVisible`/`disposeMesh`, `setMeshEmissiveById`, `attachShadowCaster`)
-   * all address it. Distinct from {@link createMesh}, which builds engine
-   * PRIMITIVES — this builds noise-displaced/welded geometry from a
-   * {@link ProceduralMeshSpec}. Same `seed` (+`cutAxis`/`cutDepth`) ⇒ identical
-   * geometry on every client. Adapters that can't tessellate procedurally may
-   * fall back to a primitive of the same bounding size but MUST keep the handle
-   * contract.
-   */
-  createProceduralMesh(id: string, spec: ProceduralMeshSpec, mat?: MaterialSpec): MeshHandle;
-  /**
-   * Pure, ENGINE-FREE surface evaluation for a seeded rock shape: given the
-   * spec and a (need-not-be-unit) direction, write the displaced surface point
-   * (object-local, before the mesh's own transform) into `out` and return it.
-   * This is the SAME deterministic noise the adapter tessellates, exposed so
-   * collision/occlusion code and the renderer agree on one silhouette — and so
-   * the contract can prove determinism (same seed+dir ⇒ identical point) without
-   * a GPU. Every adapter MUST return byte-identical results for identical inputs
-   * (it's shared pure math, not an engine call). Returns `out` unchanged for the
-   * non-rock shapes (ship/missile/waypoint), which have no radial surface field.
-   */
-  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3;
 
   // ─── Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture) ───
   /**

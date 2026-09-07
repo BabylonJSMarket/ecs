@@ -1527,68 +1527,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Phase-3: procedural seeded geometry ───
-  createProceduralMesh(id: string, spec: ProceduralMeshSpec, mat?: MaterialSpec): MeshHandle {
-    const engine = this.requireEngine();
-    const scene = this.requireScene();
-    const isRock = spec.shape === 'asteroid' || spec.shape === 'oil-blob' || spec.shape === 'asteroid-drop';
-    const mesh = isRock
-      ? this.buildRockMesh(engine, id, spec)
-      : this.buildNamedShape(engine, id, spec);
-    mesh.name = id;
-    this.applyProceduralMaterial(mesh, spec, mat);
-    BL.addToScene(scene, mesh);
-
-    const handle = this.makeHandle<MeshHandle>('procMesh', id);
-    this.meshes.set(handle, mesh);
-    this.meshesByMeshId.set(id, mesh);
-    return handle;
-  }
-
-  /**
-   * Tessellate a seeded rock: subdivide an icosphere, displace each unit vertex
-   * by {@link sampleProceduralSurface} (the SAME deterministic noise the contract
-   * asserts), then upload via Lite's `createMeshFromData`. Positions are negated
-   * on Z and the winding reversed so the right-handed object surface renders with
-   * outward faces in Lite's left-handed frame (the conjugate of the Z-flip the
-   * rest of the adapter applies to positions/cameras).
-   */
-  private buildRockMesh(engine: BLNS.EngineContext, id: string, spec: ProceduralMeshSpec): LiteMesh {
-    const sub = spec.subdivisions ?? 8;
-    const depth = sub <= 4 ? 1 : sub <= 8 ? 2 : sub <= 16 ? 3 : 4;
-    const { dirs, indices } = buildIcosphere(depth);
-
-    const positions = new Float32Array(dirs.length * 3);
-    const tmp: Vec3 = [0, 0, 0];
-    for (let i = 0; i < dirs.length; i++) {
-      const d = dirs[i];
-      this.sampleProceduralSurface(spec, d[0], d[1], d[2], tmp);
-      positions[i * 3] = tmp[0];
-      positions[i * 3 + 1] = tmp[1];
-      positions[i * 3 + 2] = -tmp[2]; // RH→LH
-    }
-
-    // Reverse winding (the Z-flip mirrors handedness, which inverts front faces).
-    const tri = new Uint32Array(indices.length);
-    for (let f = 0; f < indices.length; f += 3) {
-      tri[f] = indices[f];
-      tri[f + 1] = indices[f + 2];
-      tri[f + 2] = indices[f + 1];
-    }
-
-    const normals = this.computeNormals(positions, tri);
-    const mesh = BL.createMeshFromData(engine, id, positions, normals, tri);
-    // Stamp local bounds so getMeshBoundingBoxExtents / shadow framing have an AABB.
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let i = 0; i < positions.length; i += 3) {
-      const x = positions[i], y = positions[i + 1], z = positions[i + 2];
-      if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
-    }
-    mesh.boundMin = [minX, minY, minZ];
-    mesh.boundMax = [maxX, maxY, maxZ];
-    return mesh;
-  }
 
   /** Per-vertex normals from face cross-products (Lite's createMeshFromData wants explicit normals). */
   private computeNormals(positions: Float32Array, indices: Uint32Array): Float32Array {
@@ -1663,41 +1601,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
       std.diffuseColor = [color[0], color[1], color[2]];
       mesh.material = std;
     }
-  }
-
-  sampleProceduralSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number, dirZ: number, out: Vec3): Vec3 {
-    const isRock = spec.shape === 'asteroid' || spec.shape === 'oil-blob' || spec.shape === 'asteroid-drop';
-    if (!isRock) return out; // ship/missile/waypoint have no radial surface field
-    const seed = spec.seed ?? 1;
-    const radius = spec.size[0];
-    const len = Math.hypot(dirX, dirY, dirZ) || 1;
-    const nx = dirX / len, ny = dirY / len, nz = dirZ / len;
-    // Deterministic multi-octave displacement keyed by seed + quantized dir, so
-    // identical (seed, dir) ⇒ identical radius on every adapter/run.
-    let amp = 0.5;
-    let freq = 2;
-    let disp = 0;
-    for (let o = 0; o < 4; o++) {
-      const qx = Math.round(nx * freq * 8);
-      const qy = Math.round(ny * freq * 8);
-      const qz = Math.round(nz * freq * 8);
-      disp += (liteHash3(qx + seed, qy + seed * 31, qz + seed * 131) - 0.5) * amp;
-      amp *= 0.5;
-      freq *= 2;
-    }
-    let r = radius * (1 + disp * 0.5); // silhouette varies ±~25%
-    // Optional cut-axis carve: flatten the cap on the far side of the plane.
-    if (spec.cutAxis && spec.cutDepth && spec.cutDepth > 0) {
-      const [cx, cy, cz] = spec.cutAxis;
-      const cl = Math.hypot(cx, cy, cz) || 1;
-      const proj = (nx * cx + ny * cy + nz * cz) / cl;
-      const threshold = 1 - spec.cutDepth;
-      if (proj > threshold) r = Math.min(r, radius * threshold);
-    }
-    out[0] = nx * r;
-    out[1] = ny * r;
-    out[2] = nz * r;
-    return out;
   }
 
   // ─── Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture) ───

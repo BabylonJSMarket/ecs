@@ -39,7 +39,6 @@ import type {
   RendererAdapter,
   ScreenPoint,
   Vec3,
-  ProceduralMeshSpec,
   DynamicTextureSpec,
   ParticleBurstSpec,
   ParticleEmitterSpec,
@@ -1272,83 +1271,6 @@ export function runRendererAdapterContract(
     }
 
     // ---------------------------------------------------------------------
-    // Phase-3: procedural seeded geometry. The mesh build is a no-throw smoke
-    // (engines tessellate; Mock records), but `sampleProceduralSurface` is PURE
-    // shared math — its determinism + cut-axis behavior run on EVERY adapter,
-    // no GPU needed. That's the seeded-mesh-is-deterministic contract.
-    // ---------------------------------------------------------------------
-    describe('procedural mesh', () => {
-      const rock: ProceduralMeshSpec = { shape: 'asteroid', seed: 7, size: [100, 0, 0] };
-
-      it('createProceduralMesh returns distinct handles and round-trips position', () => {
-        const a = adapter.createProceduralMesh('rock-a', rock);
-        const b = adapter.createProceduralMesh('rock-b', { ...rock, seed: 8 });
-        expect(a).not.toBe(b);
-        adapter.setMeshPosition(a, 5, -6, 7);
-        const out: Vec3 = [0, 0, 0];
-        adapter.getMeshWorldPosition(a, out);
-        // Mock round-trips exactly; engines place the displaced mesh root there too.
-        expect(Number.isFinite(out[0])).toBe(true);
-        expect(() => adapter.disposeMesh(a)).not.toThrow();
-      });
-
-      it('createProceduralMesh accepts every named shape + a cut-axis carve without throwing', () => {
-        const shapes: ProceduralMeshSpec['shape'][] = [
-          'asteroid', 'oil-blob', 'asteroid-drop', 'spaceplane', 'kilrathi',
-          'freighter-head', 'freighter-car', 'missile', 'waypoint',
-        ];
-        expect(() => {
-          for (const shape of shapes) {
-            adapter.createProceduralMesh(`s-${shape}`, { shape, seed: 3, size: [4, 2, 9], color: [0.6, 0.6, 0.6] });
-          }
-          adapter.createProceduralMesh('carved', { ...rock, cutAxis: [0, 1, 0], cutDepth: 0.4 });
-        }).not.toThrow();
-      });
-
-      it('sampleProceduralSurface is deterministic for the same seed + direction', () => {
-        const a: Vec3 = [0, 0, 0];
-        const b: Vec3 = [0, 0, 0];
-        adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, a);
-        adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, b);
-        expect(a).toEqual(b); // byte-identical — the determinism lock
-        expect(Number.isFinite(a[0]) && Number.isFinite(a[1]) && Number.isFinite(a[2])).toBe(true);
-        const r = Math.hypot(a[0], a[1], a[2]);
-        expect(r).toBeGreaterThan(0); // displaced onto a real radius
-      });
-
-      it('sampleProceduralSurface changes with the seed and leaves non-rock shapes untouched', () => {
-        const a: Vec3 = [0, 0, 0];
-        const c: Vec3 = [0, 0, 0];
-        adapter.sampleProceduralSurface(rock, 0.3, 0.5, 0.81, a);
-        adapter.sampleProceduralSurface({ ...rock, seed: 99 }, 0.3, 0.5, 0.81, c);
-        expect(c).not.toEqual(a); // a different seed yields a different surface
-        // Ship/missile/waypoint have no radial field → `out` is returned untouched.
-        const untouched: Vec3 = [1, 2, 3];
-        const ret = adapter.sampleProceduralSurface({ shape: 'missile', size: [1, 1, 4] }, 0, 0, 1, untouched);
-        expect(ret).toBe(untouched);
-        expect(untouched).toEqual([1, 2, 3]);
-      });
-
-      it('sampleProceduralSurface carves along the cut axis on both sides of the plane, deterministically', () => {
-        // A hemisphere-facing cut (asteroid halves after a split). Sampling ALONG
-        // +cutAxis lands inside the carve (the near-plane flatten branch runs);
-        // sampling along −cutAxis is on the far, un-carved side (the branch is
-        // skipped). Both must stay finite, and the near-cut sample reproduces.
-        const carved: ProceduralMeshSpec = { shape: 'asteroid', seed: 11, size: [100, 0, 0], cutAxis: [0, 1, 0], cutDepth: 0.5 };
-        const nearCut: Vec3 = [0, 0, 0];
-        const farSide: Vec3 = [0, 0, 0];
-        const a = adapter.sampleProceduralSurface(carved, 0, 1, 0, nearCut);
-        const b = adapter.sampleProceduralSurface(carved, 0, -1, 0, farSide);
-        expect(a).toBe(nearCut);
-        expect(b).toBe(farSide);
-        expect([...nearCut, ...farSide].every(Number.isFinite)).toBe(true);
-        const again: Vec3 = [0, 0, 0];
-        adapter.sampleProceduralSurface(carved, 0, 1, 0, again);
-        expect(again).toEqual(nearCut); // same seed + cut + dir → byte-identical
-      });
-    });
-
-    // ---------------------------------------------------------------------
     // Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture). The
     // dedupe-by-key bookkeeping needs no canvas or fetch, so it runs on every
     // adapter.
@@ -1411,7 +1333,7 @@ export function runRendererAdapterContract(
     // ---------------------------------------------------------------------
     describe('glow & render order', () => {
       it('setGlowLayer / addGlowMesh / removeGlowMesh are smoke-safe (incl. disable)', () => {
-        const m = adapter.createProceduralMesh('gate', { shape: 'waypoint', size: [20, 0, 0], emissive: 1 });
+        const m = adapter.createMesh('gate', { kind: 'box' });
         expect(() => {
           adapter.setGlowLayer({ intensity: 0.9, textureRatio: 0.5 });
           adapter.addGlowMesh(m);

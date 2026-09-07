@@ -947,21 +947,6 @@ describe('MockRendererAdapter', () => {
     });
   });
 
-  describe('procedural surface guard branches', () => {
-    it('sampleProceduralSurface defaults a missing seed and tolerates a zero-length direction', () => {
-      // No `seed` → the `?? 1` default; a [0,0,0] dir → the `hypot || 1` guard.
-      const spec: ProceduralMeshSpec = { shape: 'asteroid', size: [10, 0, 0] };
-      const out: Vec3 = [0, 0, 0];
-      const ret = renderer.sampleProceduralSurface(spec, 0, 0, 0, out);
-      expect(ret).toBe(out);
-      expect(out.every(Number.isFinite)).toBe(true);
-      // Deterministic for the defaulted seed.
-      const again: Vec3 = [0, 0, 0];
-      renderer.sampleProceduralSurface(spec, 0, 0, 0, again);
-      expect(again).toEqual(out);
-    });
-  });
-
   describe('particle + sun guard branches', () => {
     it('createParticleEmitter copies an explicit spec.position into the record', () => {
       const spec: ParticleEmitterSpec = {
