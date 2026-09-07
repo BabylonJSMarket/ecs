@@ -592,11 +592,6 @@ export class MockRendererAdapter implements RendererAdapter {
   extension<T = object>(name: string): T | undefined {
     return this.extensions.get(name) as T | undefined;
   }
-  /**
-   * Duration `playAnimationOnce` reports back (seconds). Default 0 so consumers
-   * fall back to their own configured one-shot durations in unit tests.
-   */
-  animationOnceDuration = 0;
 
   async loadModelTemplate(
     url: string,
@@ -619,10 +614,6 @@ export class MockRendererAdapter implements RendererAdapter {
   disposeModel(id: string, h: MeshHandle): void {
     this.record('disposeModel', id, h);
   }
-  playAnimationOnce(meshId: string, clipName: string): number {
-    this.record('playAnimationOnce', meshId, clipName);
-    return this.animationOnceDuration;
-  }
 
   createLabel(id: string, spec: LabelSpec): LabelHandle {
     const h = makeHandle<LabelHandle>('label', id);
@@ -640,9 +631,6 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   setLabelAlpha(h: LabelHandle, alpha: number): void {
     this.record('setLabelAlpha', h, alpha);
-  }
-  setLabelScale(h: LabelHandle, scale: number): void {
-    this.record('setLabelScale', h, scale);
   }
   setLabelVisible(h: LabelHandle, visible: boolean): void {
     this.record('setLabelVisible', h, visible);
@@ -814,11 +802,6 @@ export class MockRendererAdapter implements RendererAdapter {
     });
     this.record('createParticleEmitter', id, spec);
     return h;
-  }
-  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
-    const rec = this.particleEmitters.get(h);
-    if (rec) rec.position = [x, y, z];
-    this.record('setParticleEmitterPosition', h, x, y, z);
   }
   disposeParticleEmitter(h: ParticleEmitterHandle): void {
     this.particleEmitters.delete(h);

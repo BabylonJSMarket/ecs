@@ -982,7 +982,6 @@ export function runRendererAdapterContract(
             adapter.setLabelPosition(h, 1, 2, 3);
             adapter.setLabelColor(h, 0.2, 0.4, 0.6);
             adapter.setLabelAlpha(h, 0.5);
-            adapter.setLabelScale(h, 2);
             adapter.setLabelVisible(h, false);
             adapter.setLabelVisible(h, true);
           }).not.toThrow();
@@ -1028,14 +1027,6 @@ export function runRendererAdapterContract(
         }).not.toThrow();
       });
 
-      it('playAnimationOnce returns a number and no-ops on an unknown mesh id', () => {
-        // One-shot driver for hit/death reactions. Unknown id → 0, no throw.
-        let dur: number | undefined;
-        expect(() => {
-          dur = adapter.playAnimationOnce('ghost', 'hit');
-        }).not.toThrow();
-        expect(typeof dur).toBe('number');
-      });
     });
 
     // ---------------------------------------------------------------------
@@ -1407,7 +1398,6 @@ export function runRendererAdapterContract(
         expect(a).toBeDefined();
         expect(a).not.toBe(b);
         expect(() => {
-          adapter.setParticleEmitterPosition(b, 10, 0, -5);
           adapter.disposeParticleEmitter(a);
           adapter.disposeParticleEmitter(b);
           adapter.disposeParticleEmitter(a); // idempotent

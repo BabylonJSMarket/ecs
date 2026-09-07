@@ -343,7 +343,6 @@ describe('MockRendererAdapter', () => {
       renderer.setLabelPosition(label, 0, 2, 0);
       renderer.setLabelColor(label, 1, 0, 0);
       renderer.setLabelAlpha(label, 0.8);
-      renderer.setLabelScale(label, 1.5);
       renderer.setLabelVisible(label, false);
       renderer.disposeLabel(label);
 
@@ -354,7 +353,6 @@ describe('MockRendererAdapter', () => {
         'setLabelPosition',
         'setLabelColor',
         'setLabelAlpha',
-        'setLabelScale',
         'setLabelVisible',
         'disposeLabel',
       ]);
@@ -699,12 +697,6 @@ describe('MockRendererAdapter', () => {
       expect(methods).toContain('disposeModel');
     });
 
-    it('playAnimationOnce returns animationOnceDuration and records the call', () => {
-      renderer.animationOnceDuration = 1.5;
-      const dur = renderer.playAnimationOnce('hero1', 'attack');
-      expect(dur).toBe(1.5);
-      expect(renderer.calls[0]).toMatchObject({ method: 'playAnimationOnce', args: ['hero1', 'attack'] });
-    });
   });
 
   describe('skybox', () => {

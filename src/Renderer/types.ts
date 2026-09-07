@@ -1450,14 +1450,6 @@ export interface RendererAdapter {
   setModelAlpha(id: string, alpha: number): void;
   /** Dispose a clone instantiated under `id` and free its animation groups. */
   disposeModel(id: string, h: MeshHandle): void;
-  /**
-   * Play a clip ONCE (non-looping) from frame 0, restarting it even if it was
-   * already running (unlike `playAnimation`, which no-ops while the clip
-   * plays). Returns the clip's duration in seconds (0 if unknown), so callers
-   * can time a return-to-idle transition. Used for one-shot reactions (hit
-   * stagger, death). No-ops on an unknown mesh id, returning 0.
-   */
-  playAnimationOnce(meshId: string, clipName: string): number;
 
   /**
    * Adapter extension seam — lets a component ship its OWN engine-specific
@@ -1486,7 +1478,6 @@ export interface RendererAdapter {
   setLabelPosition(h: LabelHandle, x: number, y: number, z: number): void;
   setLabelColor(h: LabelHandle, r: number, g: number, b: number): void;
   setLabelAlpha(h: LabelHandle, alpha: number): void;
-  setLabelScale(h: LabelHandle, scale: number): void;
   setLabelVisible(h: LabelHandle, visible: boolean): void;
   disposeLabel(h: LabelHandle): void;
 
@@ -1614,8 +1605,6 @@ export interface RendererAdapter {
    * it at the active camera each frame internally.
    */
   createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle;
-  /** Move a continuous emitter (no-op when `followCamera` drives it / unknown handle). */
-  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void;
   /** Dispose a continuous emitter and free its GPU buffers. Idempotent. */
   disposeParticleEmitter(h: ParticleEmitterHandle): void;
 

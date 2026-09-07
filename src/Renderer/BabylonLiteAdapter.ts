@@ -1318,14 +1318,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   ): boolean {
     return false;
   }
-  playAnimationOnce(meshId: string, clipName: string): number {
-    const g = this.animationGroups.get(`${meshId}/${clipName}`);
-    if (!g) return 0;
-    g.loopAnimation = false;
-    (g as unknown as { currentFrame: number }).currentFrame = 0;
-    g.isPlaying = true;
-    return g.duration ?? 0;
-  }
 
   // ─── Labels ───
   // Babylon Lite's text/sprite rendering needs a glyph atlas + font pipeline
@@ -1355,10 +1347,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   setLabelAlpha(h: LabelHandle, alpha: number): void {
     void h;
     void alpha;
-  }
-  setLabelScale(h: LabelHandle, scale: number): void {
-    void h;
-    void scale;
   }
   setLabelVisible(h: LabelHandle, visible: boolean): void {
     void h;
@@ -1757,10 +1745,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
       followCamera: spec.followCamera ?? false,
     });
     return handle;
-  }
-  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
-    const rec = this.particleEmitters.get(h);
-    if (rec) rec.position = [x, y, z];
   }
   disposeParticleEmitter(h: ParticleEmitterHandle): void {
     this.particleEmitters.delete(h);

@@ -1266,17 +1266,6 @@ export class BabylonAdapter implements RendererAdapter {
     return true;
   }
 
-  playAnimationOnce(meshId: string, clipName: string): number {
-    const group = this.findAnimationGroup(meshId, clipName);
-    if (!group) return 0;
-    // Restart from frame 0 even if already running — playAnimation no-ops while
-    // a clip plays, which would block re-triggering a one-shot (hit/death).
-    group.stop();
-    group.start(false, 1, group.from, group.to, false);
-    const fps = group.targetedAnimations[0]?.animation?.framePerSecond ?? 60;
-    return fps > 0 ? (group.to - group.from) / fps : 0;
-  }
-
   /** Back-compat accessor used by not-yet-migrated Systems (ArcCamera, Shadow). */
   getMeshObject(h: MeshHandle): Mesh | undefined {
     return this.meshes.get(h);
@@ -1310,6 +1299,32 @@ export class BabylonAdapter implements RendererAdapter {
    */
   getTextureObject(h: TextureHandle): Texture | undefined {
     return this.textures.get(h);
+  }
+  /**
+   * The billboarded plane behind a label handle, for a plugin that needs a
+   * label property the interface does not carry. The label's material, texture
+   * and text layout stay on the adapter — several components share those.
+   */
+  getLabelPlane(h: LabelHandle): Mesh | undefined {
+    return this.labels.get(h)?.plane;
+  }
+  /**
+   * A continuous emitter's mutable position and whether the adapter is already
+   * re-seating it at the camera each frame. A plugin that moves an emitter has
+   * to know: writing a position into an emitter that follows the camera loses
+   * the write on the very next frame, silently.
+   */
+  getParticleEmitterSeat(h: ParticleEmitterHandle): { position: Vector3; followsCamera: boolean } | undefined {
+    const rec = this.particleEmitters.get(h);
+    return rec ? { position: rec.emitter, followsCamera: rec.followCamera } : undefined;
+  }
+  /**
+   * A loaded clip by mesh id and name, for a plugin that drives playback the
+   * interface's play/stop pair cannot express. Scoped to the mesh first, so two
+   * entities loaded from one glb never step on each other's clips.
+   */
+  getAnimationGroup(meshId: string, clipName: string): AnimationGroup | undefined {
+    return this.findAnimationGroup(meshId, clipName);
   }
 
   setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
@@ -2150,11 +2165,6 @@ export class BabylonAdapter implements RendererAdapter {
     if (entry) entry.material.alpha = alpha;
   }
 
-  setLabelScale(h: LabelHandle, scale: number): void {
-    const entry = this.labels.get(h);
-    if (entry) entry.plane.scaling.set(scale, scale, scale);
-  }
-
   setLabelVisible(h: LabelHandle, visible: boolean): void {
     const entry = this.labels.get(h);
     if (entry) entry.plane.isVisible = visible;
@@ -2772,12 +2782,6 @@ export class BabylonAdapter implements RendererAdapter {
     const handle = this.makeHandle<ParticleEmitterHandle>('emitter', id);
     this.particleEmitters.set(handle, { system, emitter, observer, followCamera });
     return handle;
-  }
-
-  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
-    const rec = this.particleEmitters.get(h);
-    // followCamera drives the position each frame — an explicit set would fight it.
-    if (rec && !rec.followCamera) rec.emitter.set(x, y, z);
   }
 
   disposeParticleEmitter(h: ParticleEmitterHandle): void {

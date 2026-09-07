@@ -1454,16 +1454,6 @@ export class ThreeAdapter implements RendererAdapter {
     return true;
   }
 
-  playAnimationOnce(meshId: string, clipName: string): number {
-    const action = this.findAnimationAction(meshId, clipName);
-    if (!action || !this.THREE) return 0;
-    action.setLoop(this.THREE.LoopOnce, 1);
-    action.reset();
-    action.clampWhenFinished = true;
-    action.play();
-    return action.getClip().duration;
-  }
-
   private _tmpThreeVec?: THREE.Vector3;
 
   /**
@@ -2256,11 +2246,6 @@ export class ThreeAdapter implements RendererAdapter {
     if (entry) entry.material.opacity = alpha;
   }
 
-  setLabelScale(h: LabelHandle, scale: number): void {
-    const entry = this.labels.get(h);
-    if (entry) entry.sprite.scale.set(scale * entry.aspect, scale, 1);
-  }
-
   setLabelVisible(h: LabelHandle, visible: boolean): void {
     const entry = this.labels.get(h);
     if (entry) entry.sprite.visible = visible;
@@ -2533,14 +2518,6 @@ export class ThreeAdapter implements RendererAdapter {
     this.particleRuntimes.add(rt);
     this.particleEmitters.set(handle, rt);
     return handle;
-  }
-
-  setParticleEmitterPosition(h: ParticleEmitterHandle, x: number, y: number, z: number): void {
-    const rt = this.particleEmitters.get(h);
-    if (!rt) return;
-    rt.position = [x, y, z];
-    // followCamera overrides this each frame; otherwise it sticks.
-    if (!rt.followCamera) rt.points.position.set(x, y, z);
   }
 
   disposeParticleEmitter(h: ParticleEmitterHandle): void {
