@@ -521,7 +521,9 @@ export type Color4 = [number, number, number, number];
 export type ParticleEmitterHandle = { readonly __particleEmitter: unique symbol };
 
 /**
- * Named procedural mesh shapes built by {@link RendererAdapter.createProceduralMesh}.
+ * Named procedural mesh shapes built by the Renderable component's engine
+ * plugin (`CodeLibrary/Components/Renderable/adapter/`), not by the adapter
+ * interface — the shape catalogue is one game's art and lives with it.
  * `asteroid` / `oil-blob` / `asteroid-drop` are seeded rock geometry (a
  * subdivided icosphere displaced by deterministic multi-octave noise); the
  * remaining shapes are the ship / projectile / gate silhouettes
@@ -539,14 +541,15 @@ export type ProceduralMeshShape =
   | 'waypoint';
 
 /**
- * Spec for {@link RendererAdapter.createProceduralMesh}: a deterministic,
+ * Spec for the Renderable plugin's `createProceduralMesh`: a deterministic,
  * seed-driven mesh. `createMesh` builds engine PRIMITIVES (box/sphere/…);
  * this builds the procedural shapes — seeded asteroids/oil-blobs whose surface is
  * displaced by an integer-seeded noise field (same `seed` ⇒ byte-identical
  * geometry, so the same rock renders the same on every client and frame), plus
  * the named ship/missile/waypoint silhouettes. The pure surface-displacement
- * math is exposed separately via {@link RendererAdapter.sampleProceduralSurface}
- * so collision/occlusion code and the adapter agree on the same shape.
+ * math is exposed separately by the same plugin (`sampleProceduralSurface`,
+ * over the shared `proceduralRock.ts` kernel) so collision/occlusion code and
+ * the drawn geometry agree on the same shape.
  */
 export interface ProceduralMeshSpec {
   shape: ProceduralMeshShape;
@@ -1574,7 +1577,7 @@ export interface RendererAdapter {
   removeGlowMesh(h: MeshHandle): void;
   /**
    * Unlit-aware emissive setter keyed by the same id passed to
-   * {@link createMesh}/{@link createProceduralMesh}. On a normal (lit) material
+   * {@link createMesh} (or the Renderable plugin's `createProceduralMesh`). On a normal (lit) material
    * the emissive is the given color × `intensity` (it overpowers lighting); on
    * an UNLIT material (waypoint gates, sun disc) the value is treated as a
    * literal clamped emissive so bloom+tonemap don't blow it to white. No-op on

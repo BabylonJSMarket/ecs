@@ -1,8 +1,8 @@
 /**
  * proceduralRock — renderer-free seeded-asteroid surface math.
  *
- * The seeded displacement math is defined here ONCE so the
- * BabylonAdapter's `createProceduralMesh` (which displaces an icosphere) and its
+ * The seeded displacement math is defined here ONCE so the Renderable plugin's
+ * `createProceduralMesh` (which displaces an icosphere) and its
  * `sampleProceduralSurface` (which collision/occlusion code calls) evaluate ONE
  * shared displacement function. That's what makes the contract's determinism
  * REAL rather than only Mock-real: the same `seed` (+ `cutAxis`/`cutDepth`)

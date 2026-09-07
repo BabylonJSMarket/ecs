@@ -100,7 +100,6 @@ import type {
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
-  ProceduralMeshSpec,
   DynamicTextureSpec,
   ParticleBurstSpec,
   ParticleEmitterSpec,
