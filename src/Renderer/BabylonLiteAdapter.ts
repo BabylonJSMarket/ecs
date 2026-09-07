@@ -41,7 +41,6 @@ import type {
   LineHandle,
   LoadModelTemplateOptions,
   MaterialSpec,
-  MeshGeometry,
   MeshHandle,
   MeshLoadResult,
   MeshLoadSpec,
@@ -438,28 +437,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     void prim;
   }
 
-  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null {
-    const engine = this.requireEngine();
-    const scene = this.requireScene();
-    const parentMesh = this.meshes.get(parent);
-    if (!parentMesh) return null;
-
-    const box = BL.createBox(engine, 1);
-    box.name = id;
-    box.pickable = false;
-    const mat = BL.createStandardMaterial();
-    mat.emissiveColor = [color[0], color[1], color[2]];
-    mat.diffuseColor = [0, 0, 0];
-    box.material = mat;
-    // Parent so setMeshPosition/setMeshScale apply in LOCAL space.
-    box.parent = parentMesh;
-    BL.addToScene(scene, box);
-
-    const handle = this.makeHandle<MeshHandle>('debugBox', id);
-    this.meshes.set(handle, box);
-    return handle;
-  }
-
   setMeshPosition(h: MeshHandle, x: number, y: number, z: number): void {
     // Add any base-pivot offset so the *base* lands at y (matches Babylon/Three,
     // which bake the pivot into geometry). Negate Z: RH→LH (see createArcCamera).
@@ -688,7 +665,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const bow = spec.bow ?? 0;
     if (bow !== 0) {
       // Lite exposes no in-place vertex-buffer mutation in this preview (see
-      // replaceMeshGeometry), so the parabolic bow can't be baked into the
+      // the Flipper plugin's geometry rewrite), so the parabolic bow can't be baked into the
       // geometry; the flat quad is the provisional fallback.
       void bow;
     }
@@ -1438,13 +1415,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Geometry / billboard ───
-  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
-    // Babylon Lite's preview build exposes no in-place vertex-buffer swap on a
-    // live Mesh, so geometry replacement (used by FlipperSystem) is a no-op
-    // here. Provisional — wire a Lite geometry-update call once one exists.
-    void h;
-    void geom;
-  }
   setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void {
     // Per-mesh camera-facing billboard isn't modeled for arbitrary meshes in
     // this Lite preview (Lite has dedicated billboard *sprite* systems, not a

@@ -28,7 +28,6 @@ export type {
   RendererAdapter,
   FrameTimings,
   EnvironmentTextureOpts,
-  MeshGeometry,
   BillboardMode,
   PickOptions,
   PickResult,

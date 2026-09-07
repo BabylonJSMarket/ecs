@@ -16,7 +16,6 @@ import type {
   LineHandle,
   LightHandle,
   MaterialSpec,
-  MeshGeometry,
   MeshHandle,
   MeshLoadResult,
   MeshLoadSpec,
@@ -157,13 +156,6 @@ export class MockRendererAdapter implements RendererAdapter {
     this.record('createMesh', id, prim, mat);
     return h;
   }
-  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null {
-    // No rendering — fabricate a handle the same way createMesh does so the
-    // returned handle is accepted by subsequent setMeshScale/disposeMesh calls.
-    const h = makeHandle<MeshHandle>('debugBox', id);
-    this.record('createDebugBox', id, parent, color);
-    return h;
-  }
   setMeshPosition(h: MeshHandle, x: number, y: number, z: number): void {
     // Update the round-trip stub so getMeshWorldPosition returns what was
     // last set. Tests that want to preload a different value can still
@@ -188,9 +180,6 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
     this.record('setMeshScale', h, sx, sy, sz);
-  }
-  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
-    this.record('replaceMeshGeometry', h, geom);
   }
   setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void {
     this.record('setMeshBillboardMode', h, mode);

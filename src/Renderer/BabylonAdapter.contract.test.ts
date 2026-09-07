@@ -18,7 +18,7 @@
  *     the Arcade panel tests instead.
  */
 
-import { AbstractMesh, NullEngine, Scene } from '@babylonjs/core';
+import { AbstractMesh, Mesh, NullEngine, Scene } from '@babylonjs/core';
 import type { GlowLayer } from '@babylonjs/core';
 import { BabylonAdapter } from './BabylonAdapter';
 import { runRendererAdapterContract } from './rendererAdapterContract';
@@ -36,6 +36,15 @@ runRendererAdapterContract(
     // default 512×256), so the pixel-basis cases run on Babylon's own view /
     // projection math. That is what pins the right-handed picture and the
     // in-front/behind sign of worldToScreen to the real engine.
+    parentMeshUnder(adapter, id, parent) {
+      // The interface has no parenting call, so the subtree the glow layer has
+      // to enrol is built here in Babylon's own terms.
+      const ba = adapter as BabylonAdapter;
+      const parentMesh = ba.getMeshObject(parent);
+      if (!ba.scene || !parentMesh) return;
+      const child = new Mesh(id, ba.scene);
+      child.parent = parentMesh;
+    },
     glowEnrolled(adapter, meshId) {
       // Read the real GlowLayer's include list: the registered node (when it is
       // a mesh) plus every mesh under it, as Babylon's per-mesh whitelist sees them.

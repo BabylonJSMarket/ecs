@@ -378,22 +378,7 @@ export interface EnvironmentTextureOpts {
   level?: number;
 }
 
-/**
- * Raw vertex data for a runtime geometry replacement. Positions and
- * indices are required; normals/UVs are optional (the adapter computes
- * normals if absent).
- */
-export interface MeshGeometry {
-  /** Flat xyz triples — length = vertexCount * 3. */
-  positions: number[];
-  /** Triangle indices into `positions`. */
-  indices: number[];
-  /** Flat xyz triples of vertex normals. Computed from positions if omitted. */
-  normals?: number[];
-  /** Flat uv pairs. */
-  uvs?: number[];
-}
-
+/** How a mesh faces the camera: not at all, about Y only, or fully. */
 export type BillboardMode = 'none' | 'all' | 'y';
 
 export interface PickOptions {
@@ -502,7 +487,7 @@ export interface TextureLoadOpts {
  * face albedo textures may be supplied now or attached later via
  * {@link RendererAdapter.setMeshFaceTexture}. The returned mesh is registered in
  * the adapter's normal mesh registry, so `setMeshPosition`/`setMeshRotation`/
- * `setMeshScale`/`setMeshVisible`, `attachShadowCaster`, `replaceMeshGeometry`
+ * `setMeshScale`/`setMeshVisible`, `attachShadowCaster`
  * and `pickAtScreenPoint` all address it like any other mesh.
  */
 export interface CardMeshSpec {
@@ -1159,14 +1144,6 @@ export interface RendererAdapter {
    */
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void;
   /**
-   * Replace the mesh's vertex buffer in place. The new geometry must be
-   * supplied as flat arrays of positions (xyz xyz xyz) and triangle
-   * indices. Adapters that can't mutate geometry no-op. Used by
-   * FlipperSystem to retake the box mesh as a tapered prism with the
-   * pivot at the origin.
-   */
-  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void;
-  /**
    * Make the mesh always face the active camera. `none` disables
    * billboarding. Used by HealthBar's bar quads. Three.js equivalent is
    * Sprite/orient-to-camera-each-frame; not all adapters implement.
@@ -1204,18 +1181,6 @@ export interface RendererAdapter {
   updateLineSystem(h: LineHandle, lines: Vec3[][], color?: Color): void;
   setLineSystemVisible(h: LineHandle, visible: boolean): void;
   disposeLineSystem(h: LineHandle): void;
-
-  /**
-   * Debug overlay box: a unit (1×1×1) wireframe cube parented to the mesh
-   * referenced by `parent`, drawn unlit in `color`, non-pickable. Returned as a
-   * normal MeshHandle so callers position/size it with the existing
-   * `setMeshPosition` / `setMeshScale` (in LOCAL space, since it's parented to
-   * `parent`) and remove it with `disposeMesh`. Used by debug viz that draws a
-   * collider outline tracking a moving mesh (e.g. the flipper collider overlay).
-   * Returns null if `parent` resolves to no mesh; adapters with no scene-graph
-   * may return a no-op handle.
-   */
-  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null;
 
   // ─── Thin-instance fields ───
   /**

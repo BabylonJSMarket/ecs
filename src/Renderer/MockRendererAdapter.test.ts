@@ -438,15 +438,6 @@ describe('MockRendererAdapter', () => {
       expect(last.args).toEqual([h, 2, 3, 4]);
     });
 
-    it('replaceMeshGeometry records the call with the geometry', () => {
-      const h = renderer.createMesh('block', prim);
-      const geom = { positions: [0, 1, 2], indices: [0, 1, 2], normals: [0, 1, 0] };
-      renderer.replaceMeshGeometry(h, geom as any);
-      const last = renderer.calls[renderer.calls.length - 1];
-      expect(last.method).toBe('replaceMeshGeometry');
-      expect(last.args[1]).toBe(geom);
-    });
-
     it('setMeshBillboardMode records the call with the mode', () => {
       const h = renderer.createMesh('sprite', prim);
       renderer.setMeshBillboardMode(h, 'all');

@@ -79,7 +79,6 @@ import type {
   LabelSpec,
   LightHandle,
   MaterialSpec,
-  MeshGeometry,
   MeshHandle,
   MeshLoadResult,
   MeshLoadSpec,
@@ -560,28 +559,6 @@ export class BabylonAdapter implements RendererAdapter {
     return handle;
   }
 
-  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null {
-    if (!this.scene) return null;
-    const parentMesh = this.meshes.get(parent);
-    if (!parentMesh) return null;
-
-    const box = MeshBuilder.CreateBox(id, { width: 1, height: 1, depth: 1 }, this.scene);
-    box.parent = parentMesh;
-    box.isPickable = false;
-    const material = new StandardMaterial(`${id}_material`, this.scene);
-    material.wireframe = true;
-    material.disableLighting = true;
-    material.emissiveColor = new Color3(color[0], color[1], color[2]);
-    box.material = material;
-
-    // Registered like any other mesh, so setMeshPosition/setMeshScale/
-    // setMeshVisible/disposeMesh work on the returned handle — and since the
-    // box is parented, those transforms apply in the parent's LOCAL space.
-    const handle = this.makeHandle<MeshHandle>('debugBox', id);
-    this.meshes.set(handle, box);
-    return handle;
-  }
-
   setMeshPosition(h: MeshHandle, x: number, y: number, z: number): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.position.set(x, y, z);
@@ -612,21 +589,6 @@ export class BabylonAdapter implements RendererAdapter {
     mesh.scaling.x = sx;
     mesh.scaling.y = sy;
     mesh.scaling.z = sz;
-  }
-  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
-    const mesh = this.meshes.get(h);
-    if (!mesh) return;
-    // `updatable = true` so subsequent calls can rewrite the same buffer.
-    mesh.setVerticesData('position', geom.positions, true);
-    mesh.setIndices(geom.indices);
-    if (geom.normals) {
-      mesh.setVerticesData('normal', geom.normals, true);
-    } else {
-      // No normals supplied — recompute from positions so lighting works.
-      mesh.createNormals(true);
-    }
-    if (geom.uvs) mesh.setVerticesData('uv', geom.uvs, true);
-    mesh.refreshBoundingInfo();
   }
   setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void {
     const mesh = this.meshes.get(h);
@@ -1355,6 +1317,17 @@ export class BabylonAdapter implements RendererAdapter {
   /** Back-compat accessor used by not-yet-migrated Systems (ArcCamera, Shadow). */
   getMeshObject(h: MeshHandle): Mesh | undefined {
     return this.meshes.get(h);
+  }
+  /**
+   * Register a mesh a PLUGIN built, so the handle it gets back works with every
+   * ordinary mesh op — setMeshPosition, setMeshScale, setMeshVisible,
+   * disposeMesh. Without this a plugin that creates geometry would have to
+   * reimplement all of them, which is how a plugin turns into a second adapter.
+   */
+  adoptMesh(id: string, mesh: Mesh): MeshHandle {
+    const handle = this.makeHandle<MeshHandle>('plugin', id);
+    this.meshes.set(handle, mesh);
+    return handle;
   }
 
   applyPbrMaterial(handle: MeshHandle, spec: PbrMaterialSpec): void {

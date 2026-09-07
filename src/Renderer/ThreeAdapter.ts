@@ -30,7 +30,6 @@ import type {
   LineHandle,
   LightHandle,
   MaterialSpec,
-  MeshGeometry,
   MeshHandle,
   MeshLoadResult,
   MeshLoadSpec,
@@ -588,29 +587,6 @@ export class ThreeAdapter implements RendererAdapter {
     return handle;
   }
 
-  createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null {
-    const T = this.requireThree();
-    const parentMesh = this.meshes.get(parent);
-    if (!parentMesh) return null;
-
-    const geometry = new T.BoxGeometry(1, 1, 1);
-    const material = new T.MeshBasicMaterial({
-      color: new T.Color().setRGB(color[0], color[1], color[2], T.SRGBColorSpace),
-      wireframe: true,
-    });
-    const box = new T.Mesh(geometry, material);
-    box.name = id;
-    // Non-pickable: drop it out of raycasts (the Three idiom — pickAtScreenPoint
-    // raycasts the scene graph).
-    box.raycast = () => {};
-    // Parent to the target mesh so setMeshPosition/setMeshScale apply in LOCAL space.
-    parentMesh.add(box);
-
-    const handle = this.makeHandle<MeshHandle>('debugBox', id);
-    this.meshes.set(handle, box);
-    return handle;
-  }
-
   setMeshPosition(h: MeshHandle, x: number, y: number, z: number): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.position.set(x, y, z);
@@ -636,28 +612,6 @@ export class ThreeAdapter implements RendererAdapter {
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
     const m = this.meshes.get(h);
     if (m) m.scale.set(sx, sy, sz);
-  }
-  replaceMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
-    const T = this.THREE;
-    const mesh = this.meshes.get(h);
-    if (!mesh || !T) return;
-    // Build a fresh BufferGeometry from the supplied buffers and hot-swap it,
-    // disposing the old one. Mirrors BabylonAdapter.replaceMeshGeometry (used
-    // for flipper geometry rewrites).
-    const next = new T.BufferGeometry();
-    next.setAttribute('position', new T.Float32BufferAttribute(geom.positions, 3));
-    next.setIndex(geom.indices);
-    if (geom.normals) {
-      next.setAttribute('normal', new T.Float32BufferAttribute(geom.normals, 3));
-    } else {
-      // No normals supplied — compute from positions so lighting works.
-      next.computeVertexNormals();
-    }
-    if (geom.uvs) next.setAttribute('uv', new T.Float32BufferAttribute(geom.uvs, 2));
-    next.computeBoundingBox();
-    next.computeBoundingSphere();
-    mesh.geometry.dispose();
-    mesh.geometry = next;
   }
   setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void {
     // Three has no built-in billboard mode, so the mesh is registered here and
@@ -1304,6 +1258,19 @@ export class ThreeAdapter implements RendererAdapter {
    */
   getOrbitCamera(h: CameraHandle): { camera: THREE.PerspectiveCamera; controls?: unknown } | null {
     return this.cameras.get(h) ?? null;
+  }
+  /** The engine mesh behind a handle, for a plugin that must touch geometry. */
+  getMeshObject(h: MeshHandle): THREE.Mesh | undefined {
+    return this.meshes.get(h);
+  }
+  /**
+   * Register a mesh a PLUGIN built, so the handle it gets back works with every
+   * ordinary mesh op. The Three twin of BabylonAdapter.adoptMesh.
+   */
+  adoptMesh(id: string, mesh: THREE.Mesh): MeshHandle {
+    const handle = this.makeHandle<MeshHandle>('plugin', id);
+    this.meshes.set(handle, mesh);
+    return handle;
   }
   getRapierBackend(): RapierPhysics | null {
     return this.usesRapier ? this.rapier : null;

@@ -114,6 +114,17 @@ export interface RendererAdapterContractOptions {
     handle: MeshHandle,
   ) => { enrolled: number; total: number };
   /**
+   * Parent a NEW child mesh named `id` under `parent`, in engine terms.
+   *
+   * The interface has no parenting call — nothing needed one until the glow
+   * layer, which enrols a whole subtree and therefore has to be shown a subtree.
+   * That case used to build one with `createDebugBox`, which was really
+   * Flipper's collider cage doing double duty; it lives in that component's
+   * plugin now. Leave this undefined on an adapter with no scene graph and the
+   * subtree assertions are skipped rather than faked.
+   */
+  parentMeshUnder?: (adapter: RendererAdapter, id: string, parent: MeshHandle) => void;
+  /**
    * Optional async setup hook called once per test (after the factory). Use
    * it to drive `adapter.init(canvas)` if the adapter is engine-coupled.
    */
@@ -233,18 +244,6 @@ export function runRendererAdapterContract(
         }).not.toThrow();
       });
 
-      it('createDebugBox parents a unit wire box to a mesh; layout + dispose are smoke-safe', () => {
-        const parent = adapter.createMesh('parent', prim, mat);
-        const box = adapter.createDebugBox('dbg', parent, [1, 0.2, 0.9]);
-        expect(box).not.toBeNull();
-        expect(() => {
-          adapter.setMeshScale(box!, 2, 1, 3);
-          adapter.setMeshPosition(box!, 0.5, 0, -0.5);
-          adapter.setMeshVisible(box!, false);
-          adapter.disposeMesh(box!);
-        }).not.toThrow();
-      });
-
       it('disposeMesh does not throw, and adapter remains usable afterward', () => {
         const h = adapter.createMesh('hero', prim, mat);
         expect(() => adapter.disposeMesh(h)).not.toThrow();
@@ -351,21 +350,6 @@ export function runRendererAdapterContract(
     describe('geometry, billboard & bounds', () => {
       const prim: PrimitiveSpec = { kind: 'box', width: 1, height: 1, depth: 1 };
       const mat: MaterialSpec = { diffuse: [0.5, 0.5, 0.5] };
-
-      it('replaceMeshGeometry swaps vertex data without throwing', () => {
-        const h = adapter.createMesh('m', prim, mat);
-        expect(() =>
-          adapter.replaceMeshGeometry(h, {
-            positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
-            indices: [0, 1, 2],
-            normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
-          }),
-        ).not.toThrow();
-        // Without supplied normals it must recompute them, also without throwing.
-        expect(() =>
-          adapter.replaceMeshGeometry(h, { positions: [0, 0, 0, 2, 0, 0, 0, 2, 0], indices: [0, 1, 2] }),
-        ).not.toThrow();
-      });
 
       it('setMeshBillboardMode accepts every mode without throwing', () => {
         const h = adapter.createMesh('m', prim, mat);
@@ -1492,14 +1476,14 @@ export function runRendererAdapterContract(
         // surfaces that should bloom (a cabinet's CRT, marquee, coin slot) are
         // meshes UNDER it. Engines can't fetch a GLB headlessly, so the root is
         // stood up the way a model looks to the adapter: a node with meshes
-        // parented beneath it (createDebugBox parents a real mesh on every
-        // scene-graph adapter). Smoke-safe everywhere; an adapter that can be
-        // read (options.glowEnrolled) also proves the whole subtree was
-        // enrolled, then released — a mesh parented under the root AFTER the
-        // call included, which removal must not leave glowing either.
+        // parented beneath it via options.parentMeshUnder. Smoke-safe
+        // everywhere; an adapter that can be read (options.glowEnrolled) also
+        // proves the whole subtree was enrolled, then released — a mesh parented
+        // under the root AFTER the call included, which removal must not leave
+        // glowing either.
         const root = adapter.createMesh('cabinet', { kind: 'box' });
-        adapter.createDebugBox('cabinet-screen', root, [1, 1, 1]);
-        adapter.createDebugBox('cabinet-marquee', root, [1, 1, 1]);
+        options.parentMeshUnder?.(adapter, 'cabinet-screen', root);
+        options.parentMeshUnder?.(adapter, 'cabinet-marquee', root);
         // A second, unrelated enrolment that stays put: on Babylon an EMPTY
         // include list means "everything glows", so releasing the only root
         // would read as enrolled again. Keeping the list non-empty keeps the
@@ -1513,7 +1497,7 @@ export function runRendererAdapterContract(
           expect(r.total).toBeGreaterThan(0);
           expect(r.enrolled).toBe(r.total);
         }
-        expect(() => adapter.createDebugBox('cabinet-coin', root, [1, 1, 1])).not.toThrow();
+        expect(() => options.parentMeshUnder?.(adapter, 'cabinet-coin', root)).not.toThrow();
         expect(() => adapter.removeGlowMesh(root)).not.toThrow();
         if (options.glowEnrolled) expect(options.glowEnrolled(adapter, 'cabinet', root).enrolled).toBe(0);
         expect(() => {

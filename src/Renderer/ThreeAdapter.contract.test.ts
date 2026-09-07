@@ -50,6 +50,16 @@ runRendererAdapterContract('Three (headless)', () => new ThreeAdapter(), {
   // (identity → +Z — the ThreeAdapter applies a +Y look-flip so its free camera
   // matches the Mock/Babylon convention instead of Three's native −Z) all run.
 
+  parentMeshUnder(adapter, id, parent) {
+    // The interface has no parenting call, so the subtree the glow layer has to
+    // enrol is built here in Three's own terms.
+    const ta = adapter as ThreeAdapter;
+    const parentMesh = ta.getMeshObject(parent);
+    if (!parentMesh) return;
+    const child = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+    child.name = id;
+    parentMesh.add(child);
+  },
   glowEnrolled(adapter, meshId) {
     // Read the per-object layer mask the adapter marks glow meshes with.
     const root = (adapter as ThreeAdapter).getMeshRootObject(meshId);
@@ -156,7 +166,9 @@ describe('ThreeAdapter glow — an enrolled subtree picks up late children', () 
   it('a child (and a grandchild via a late group) added after enrolment is masked; removal clears and stops listening', () => {
     const adapter = headless();
     const root = adapter.createMesh('cabinet', { kind: 'box' });
-    adapter.createDebugBox('screen', root, [1, 1, 1]);
+    const screen = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+    screen.name = 'screen';
+    adapter.getMeshObject(root)!.add(screen);
     adapter.setGlowLayer({ intensity: 0.9 });
     adapter.addGlowMesh(root);
     const rootObj = adapter.getMeshRootObject('cabinet')!;
@@ -181,7 +193,9 @@ describe('ThreeAdapter glow — an enrolled subtree picks up late children', () 
   it('disabling the layer releases every enrolled subtree', () => {
     const adapter = headless();
     const root = adapter.createMesh('cabinet', { kind: 'box' });
-    adapter.createDebugBox('screen', root, [1, 1, 1]);
+    const screen = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+    screen.name = 'screen';
+    adapter.getMeshObject(root)!.add(screen);
     adapter.setGlowLayer({ intensity: 0.9 });
     adapter.addGlowMesh(root);
     const rootObj = adapter.getMeshRootObject('cabinet')!;
