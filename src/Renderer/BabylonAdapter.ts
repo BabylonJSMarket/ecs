@@ -655,6 +655,14 @@ export class BabylonAdapter implements RendererAdapter {
     const material = mesh?.material as StandardMaterial | null;
     if (material) material.diffuseColor = new Color3(r, g, b);
   }
+  setMeshEmissive(h: MeshHandle, r: number, g: number, b: number): void {
+    const mesh = this.meshes.get(h);
+    const material = mesh?.material as StandardMaterial | PBRMaterial | null;
+    // Written into the existing Color3 rather than replacing it: a GlowLayer
+    // holds a reference to the material, and swapping the object out from under
+    // it is how a live brightness knob stops moving the glow.
+    if (material?.emissiveColor) material.emissiveColor.set(r, g, b);
+  }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.isVisible = visible;

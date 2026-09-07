@@ -1208,6 +1208,19 @@ export interface RendererAdapter {
    */
   setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void;
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void;
+  /**
+   * Set a mesh's EMISSIVE colour by handle — the light a surface makes on its
+   * own, before any lamp reaches it.
+   *
+   * Literal, unlike {@link setMeshEmissiveById}, which multiplies lit
+   * materials by 2.5 so a Renderable's emissive overpowers the scene
+   * lighting. That fudge is right for the thing it was written for and wrong
+   * for a caller holding a number it wants to see on the surface — a slider
+   * driving a flame's brightness reads as broken if the value it sets is not
+   * the value that lands. Values above 1 are meaningful: they are what a glow
+   * or bloom pass keys off.
+   */
+  setMeshEmissive(h: MeshHandle, r: number, g: number, b: number): void;
   setMeshVisible(h: MeshHandle, visible: boolean): void;
   getMeshWorldPosition(h: MeshHandle, out: Vec3): Vec3;
   /**

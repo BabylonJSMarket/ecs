@@ -187,6 +187,9 @@ export class MockRendererAdapter implements RendererAdapter {
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     this.record('setMeshColor', h, r, g, b);
   }
+  setMeshEmissive(h: MeshHandle, r: number, g: number, b: number): void {
+    this.record('setMeshEmissive', h, r, g, b);
+  }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     this.record('setMeshVisible', h, visible);
   }

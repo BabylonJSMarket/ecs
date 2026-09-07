@@ -639,6 +639,14 @@ export class ThreeAdapter implements RendererAdapter {
     const mat = mesh?.material as THREE.MeshPhongMaterial | undefined;
     if (mat?.color && T) mat.color.setRGB(r, g, b, T.SRGBColorSpace);
   }
+  setMeshEmissive(h: MeshHandle, r: number, g: number, b: number): void {
+    const mesh = this.meshes.get(h);
+    const mat = mesh?.material as THREE.MeshPhongMaterial | undefined;
+    // LINEAR, not sRGB — unlike the diffuse above. Emissive above 1 is the
+    // whole point (it is what a bloom pass keys off), and an sRGB conversion
+    // would both clamp it and bend the values a caller set deliberately.
+    if (mat?.emissive) mat.emissive.setRGB(r, g, b);
+  }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.visible = visible;
