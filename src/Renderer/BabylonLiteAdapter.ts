@@ -60,8 +60,6 @@ import type {
   ShadowCasterHandle,
   SkyboxHandle,
   SkyboxSpec,
-  ThinFieldHandle,
-  ThinFieldSpec,
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
@@ -222,8 +220,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   /** Loaded model templates, deduped by url (see loadModelTemplate). */
   private modelTemplates = new Map<string, LiteTemplate>();
   private instantiatedModelRoots = new Map<string, LiteMesh>();
-  /** Thin-instance fields: master mesh + stored normalization scale. */
-  private thinFields = new Map<ThinFieldHandle, { mesh: LiteMesh; baseScale: number }>();
   /**
    * Texture handles, deduped by key. Babylon Lite's preview build doesn't wire a
    * URL→Texture2D loader through this adapter (see applyMaterialSpec), so the
@@ -593,79 +589,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Thin-instance fields ───
-  async loadThinField(spec: ThinFieldSpec): Promise<ThinFieldHandle | null> {
-    const engine = this.requireEngine();
-    const scene = this.requireScene();
-    let container: BLNS.AssetContainer;
-    try {
-      container = await BL.loadGltf(engine, spec.src);
-    } catch (err) {
-      console.error('[BabylonLiteAdapter] loadThinField failed to load', spec.src, err);
-      return null;
-    }
-    // Lite has no geometry-merge utility (unlike Three's BufferGeometryUtils),
-    // so we can't fuse the node's sub-meshes into one master here. Use the first
-    // mesh entity as the instancing master and normalize its largest bounding
-    // dimension to desiredSize. Provisional: a true merge needs a Lite geometry
-    // util that isn't in this preview build.
-    const master = this.firstMeshEntity(container);
-    if (!master) {
-      console.warn('[BabylonLiteAdapter] loadThinField: no mesh under', spec.nodeName, 'in', spec.src);
-      return null;
-    }
-    master.name = `thinField_${spec.nodeName}`;
-    master.pickable = false;
-    let baseScale = 1;
-    if (master.boundMin && master.boundMax) {
-      const dx = master.boundMax[0] - master.boundMin[0];
-      const dy = master.boundMax[1] - master.boundMin[1];
-      const dz = master.boundMax[2] - master.boundMin[2];
-      const maxDim = Math.max(dx, dy, dz);
-      if (maxDim > 1e-5) baseScale = spec.desiredSize / maxDim;
-    }
-    BL.setThinInstanceCount(master, 0);
-    BL.addToScene(scene, master);
-
-    const handle = this.makeHandle<ThinFieldHandle>('thinField', spec.nodeName);
-    this.thinFields.set(handle, { mesh: master, baseScale });
-    return handle;
-  }
-
-  setThinFieldInstances(handle: ThinFieldHandle, packed: Float32Array, count: number): void {
-    const field = this.thinFields.get(handle);
-    if (!field) return;
-    const { mesh, baseScale } = field;
-    // 16 floats (one Mat4) per instance. Reuse a scratch buffer sized to the
-    // packed count so the per-frame sweep stays allocation-free.
-    const needed = count * 16;
-    if (!this._tfMatrices || this._tfMatrices.length < needed) {
-      this._tfMatrices = new Float32Array(needed);
-    }
-    const out = this._tfMatrices;
-    for (let i = 0; i < count; i++) {
-      const o = i * 5;
-      const x = packed[o]!;
-      const y = packed[o + 1]!;
-      const z = packed[o + 2]!;
-      const yaw = packed[o + 3]!;
-      const s = baseScale * packed[o + 4]!;
-      // Quaternion for a yaw about +Y: (0, sin(yaw/2), 0, cos(yaw/2)).
-      const half = yaw * 0.5;
-      const qy = Math.sin(half);
-      const qw = Math.cos(half);
-      const m = BL.mat4Compose(x, y, z, 0, qy, 0, qw, s, s, s);
-      for (let j = 0; j < 16; j++) out[i * 16 + j] = m[j]!;
-    }
-    BL.setThinInstances(mesh, out, count);
-  }
-
-  disposeThinField(handle: ThinFieldHandle): void {
-    const field = this.thinFields.get(handle);
-    if (!field) return;
-    // No per-mesh dispose in Lite — hide the master and drop the record.
-    field.mesh.visible = false;
-    this.thinFields.delete(handle);
-  }
 
   /** First entity in a container that looks like a Mesh (has a `material` field). */
   private firstMeshEntity(container: BLNS.AssetContainer): LiteMesh | undefined {
@@ -2281,7 +2204,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.animationGroups.clear();
     this.modelTemplates.clear();
     this.instantiatedModelRoots.clear();
-    this.thinFields.clear();
     this.texturesByKey.clear();
     this.cards.clear();
     this.boxExtents.clear();

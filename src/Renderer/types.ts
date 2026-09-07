@@ -41,7 +41,6 @@ export type ShadowCasterHandle = { readonly __shadow: unique symbol };
 export type LabelHandle = { readonly __label: unique symbol };
 export type SkyboxHandle = { readonly __skybox: unique symbol };
 export type LineHandle = { readonly __line: unique symbol };
-export type ThinFieldHandle = { readonly __thinField: unique symbol };
 export type TextureHandle = { readonly __texture: unique symbol };
 /**
  * Opaque handle for a loaded sound (see {@link RendererAdapter.createSound}).
@@ -396,25 +395,6 @@ export interface MeshGeometry {
 }
 
 export type BillboardMode = 'none' | 'all' | 'y';
-
-/**
- * Spec for a GPU-instanced "field" of a single small mesh repeated thousands of
- * times (coin piles, debris, foliage). The adapter loads the GLB at `src`,
- * merges the geometry under `nodeName` into ONE master mesh, normalizes its
- * largest bounding-box dimension to `desiredSize`, and prepares an instance
- * buffer with `capacity` slots. Per-instance transforms are written later via
- * {@link RendererAdapter.setThinFieldInstances}.
- */
-export interface ThinFieldSpec {
-  /** GLB/glTF url. */
-  src: string;
-  /** Node whose geometry is merged into the instanced master. */
-  nodeName: string;
-  /** Largest bbox dimension of the master normalized to this world size. */
-  desiredSize: number;
-  /** Max concurrent instances (buffer capacity). */
-  capacity: number;
-}
 
 export interface PickOptions {
   /**
@@ -1238,29 +1218,6 @@ export interface RendererAdapter {
   createDebugBox(id: string, parent: MeshHandle, color: Color): MeshHandle | null;
 
   // ─── Thin-instance fields ───
-  /**
-   * Load the GLB at `spec.src`, merge all geometry under the node named
-   * `spec.nodeName` into ONE master mesh recentered on its own bounding-box
-   * center, and set up GPU instancing (Babylon thin-instances / Three
-   * InstancedMesh) with `spec.capacity` slots and an initial draw count of 0.
-   * The master is added to the scene, made non-pickable, and has per-instance
-   * frustum culling disabled so the field never pops out when the (origin)
-   * master leaves view. The normalization scale (`desiredSize / largestBBoxDim`)
-   * is STORED on the field record and applied per instance, not baked. Returns a
-   * handle, or `null` if the node is missing or the load fails.
-   */
-  loadThinField(spec: ThinFieldSpec): Promise<ThinFieldHandle | null>;
-  /**
-   * Write the first `count` instances from `packed` (a flat Float32Array, stride
-   * 5 per instance: `[x, y, z, yaw, scale]`) into the field's instance buffer.
-   * Each instance's world matrix is translation(x,y,z) ∘ yaw-rotation about +Y ∘
-   * uniform-scale(baseScale * scale). The drawn instance count is set to `count`
-   * and the buffer flagged updated. Allocation-free (reuses scratch math on the
-   * adapter).
-   */
-  setThinFieldInstances(handle: ThinFieldHandle, packed: Float32Array, count: number): void;
-  /** Dispose the master mesh + instance buffers and drop the field record. */
-  disposeThinField(handle: ThinFieldHandle): void;
   /**
    * Build a ray from `camera` through normalized screen fraction `(nx, ny)`
    * (both in [0,1], origin = top-left), project `distance` world units along it

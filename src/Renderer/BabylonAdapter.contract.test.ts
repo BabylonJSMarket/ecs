@@ -29,7 +29,6 @@ runRendererAdapterContract(
   {
     skipPhysics: true,
     skipLabels: true,
-    skipThinField: true,
     skipMeshLoad: true, // needs a real GLB fetch; covered by the browser demo
     skipTextureLoad: true, // needs a real image fetch; covered by the browser demo
     skipAudio: true, // jsdom has no AudioContext; the headless-degrade path is locked in BabylonAdapter.test.ts

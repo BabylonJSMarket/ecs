@@ -13,8 +13,6 @@
  *     @babylonjsmarket/arcade and by browser/integration smoke.
  *   - skipLabels: jsdom's 2D canvas context is a stub, so the DynamicTexture-style
  *     label path can't render. Labels are exercised via the Arcade panel tests.
- *   - skipThinField: loading + merging a GLB needs the addons bundle + fetch,
- *     unavailable headless.
  */
 
 import * as THREE from 'three';
@@ -42,7 +40,6 @@ class StubOrbitControls {
 runRendererAdapterContract('Three (headless)', () => new ThreeAdapter(), {
   skipPhysics: true,
   skipLabels: true,
-  skipThinField: true,
   skipMeshLoad: true, // needs a real GLB fetch; covered by the browser demo
   skipTextureLoad: true, // needs a real image fetch; covered by the browser demo
   skipAudio: true, // jsdom has no AudioContext; the headless-degrade path is locked below

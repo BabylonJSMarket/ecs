@@ -37,8 +37,6 @@ import type {
   PbrMaterialSpec,
   PointLightSpec,
   MeshSkinSpec,
-  ThinFieldHandle,
-  ThinFieldSpec,
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
@@ -246,23 +244,6 @@ export class MockRendererAdapter implements RendererAdapter {
   }
 
   /** Per-thin-field stub; tests can assert the last packed buffer + draw count. */
-  thinFields = new Map<ThinFieldHandle, { spec: ThinFieldSpec; count: number }>();
-
-  async loadThinField(spec: ThinFieldSpec): Promise<ThinFieldHandle | null> {
-    const h = makeHandle<ThinFieldHandle>('thinField', spec.nodeName);
-    this.thinFields.set(h, { spec, count: 0 });
-    this.record('loadThinField', spec);
-    return h;
-  }
-  setThinFieldInstances(handle: ThinFieldHandle, packed: Float32Array, count: number): void {
-    const rec = this.thinFields.get(handle);
-    if (rec) rec.count = count;
-    this.record('setThinFieldInstances', handle, packed, count);
-  }
-  disposeThinField(handle: ThinFieldHandle): void {
-    this.thinFields.delete(handle);
-    this.record('disposeThinField', handle);
-  }
   screenToWorldPoint(camera: CameraHandle, nx: number, ny: number, distance: number, out: Vec3): Vec3 {
     // Project along the camera forward direction a fixed distance from the
     // target — enough for tests to get a finite, written-into-out Vec3.

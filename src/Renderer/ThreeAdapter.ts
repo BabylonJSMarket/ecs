@@ -52,8 +52,6 @@ import type {
   PbrMaterialSpec,
   PointLightSpec,
   MeshSkinSpec,
-  ThinFieldHandle,
-  ThinFieldSpec,
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
@@ -285,12 +283,6 @@ export class ThreeAdapter implements RendererAdapter {
    */
   private modelTemplates = new Map<string, { root: THREE.Object3D; animations: THREE.AnimationClip[] }>();
   private instantiatedModelRoots = new Map<string, THREE.Object3D>();
-  /**
-   * Thin-instance fields (coin piles, debris) realized as THREE.InstancedMesh.
-   * Each holds the instanced mesh and the stored normalization scale applied
-   * per instance in setThinFieldInstances.
-   */
-  private thinFields = new Map<ThinFieldHandle, { mesh: THREE.InstancedMesh; baseScale: number }>();
   /** Loaded textures deduped by the caller's key (see loadTexture). */
   private textures = new Map<TextureHandle, THREE.Texture>();
   private texturesByKey = new Map<string, TextureHandle>();
@@ -784,116 +776,6 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
   // ─── Thin-instance fields ───
-  async loadThinField(spec: ThinFieldSpec): Promise<ThinFieldHandle | null> {
-    const T = this.requireThree();
-    if (!this.scene) throw new Error('ThreeAdapter.loadThinField: call init() first');
-
-    // BufferGeometryUtils lives in the addons bundle; loaded via a non-literal
-    // specifier so Vite's import analyzer leaves it alone (same trick as
-    // OrbitControls). The glTF load itself goes through the shared
-    // Draco-capable loader.
-    const utilSpec = 'three/addons/utils/BufferGeometryUtils.js';
-    let gltf: { scene: THREE.Object3D };
-    let mergeGeometries: (geoms: THREE.BufferGeometry[], useGroups?: boolean) => THREE.BufferGeometry | null;
-    try {
-      const utilMod = (await import(/* @vite-ignore */ utilSpec)) as unknown as {
-        mergeGeometries: (geoms: THREE.BufferGeometry[], useGroups?: boolean) => THREE.BufferGeometry | null;
-      };
-      mergeGeometries = utilMod.mergeGeometries;
-      const loader = await this.gltfLoader();
-      gltf = await loader.loadAsync(spec.src);
-    } catch (err) {
-      console.error('[ThreeAdapter] loadThinField failed to load', spec.src, err);
-      return null;
-    }
-
-    // Find the named node, then collect every Mesh geometry under it (baking
-    // each mesh's world transform into a clone so the merge is positionally
-    // correct regardless of how the GLB split the node).
-    const node = gltf.scene.getObjectByName(spec.nodeName);
-    if (!node) {
-      console.warn('[ThreeAdapter] loadThinField: node', spec.nodeName, 'missing in', spec.src);
-      return null;
-    }
-    node.updateWorldMatrix(true, true);
-    const geoms: THREE.BufferGeometry[] = [];
-    let material: THREE.Material | undefined;
-    node.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (!m.isMesh || !m.geometry) return;
-      const g = m.geometry.clone();
-      g.applyMatrix4(m.matrixWorld);
-      geoms.push(g);
-      if (!material) {
-        material = Array.isArray(m.material) ? m.material[0] : m.material;
-      }
-    });
-    if (!geoms.length) return null;
-
-    const merged = geoms.length === 1 ? geoms[0]! : mergeGeometries(geoms, false);
-    if (!merged) return null;
-    if (geoms.length > 1) for (const g of geoms) g.dispose();
-
-    // Recenter on the merged bounding-box center so instance positions are
-    // exact, then normalize the largest dimension to desiredSize via baseScale.
-    merged.computeBoundingBox();
-    const bb = merged.boundingBox!;
-    const cx = (bb.min.x + bb.max.x) / 2;
-    const cy = (bb.min.y + bb.max.y) / 2;
-    const cz = (bb.min.z + bb.max.z) / 2;
-    merged.translate(-cx, -cy, -cz);
-    merged.computeBoundingBox();
-    const ext = merged.boundingBox!;
-    const maxDim = Math.max(ext.max.x - ext.min.x, ext.max.y - ext.min.y, ext.max.z - ext.min.z);
-    const baseScale = maxDim > 1e-5 ? spec.desiredSize / maxDim : 1;
-
-    const mesh = new T.InstancedMesh(merged, material ?? new T.MeshPhongMaterial(), spec.capacity);
-    mesh.name = `thinField_${spec.nodeName}`;
-    mesh.count = 0; // grows to the drawn count in setThinFieldInstances
-    mesh.instanceMatrix.setUsage(T.DynamicDrawUsage);
-    // Field spans the arena; skip per-instance frustum culling so it never pops
-    // out when the (origin) bounds leave view.
-    mesh.frustumCulled = false;
-    (mesh as unknown as { raycast: () => void }).raycast = () => {}; // non-pickable
-    this.scene.add(mesh);
-
-    const handle = this.makeHandle<ThinFieldHandle>('thinField', spec.nodeName);
-    this.thinFields.set(handle, { mesh, baseScale });
-    return handle;
-  }
-
-  setThinFieldInstances(handle: ThinFieldHandle, packed: Float32Array, count: number): void {
-    const field = this.thinFields.get(handle);
-    const T = this.THREE;
-    if (!field || !T) return;
-    if (!this._tfPos) this._tfPos = new T.Vector3();
-    if (!this._tfQuat) this._tfQuat = new T.Quaternion();
-    if (!this._tfScale) this._tfScale = new T.Vector3();
-    if (!this._tfMat) this._tfMat = new T.Matrix4();
-    if (!this._tfUpY) this._tfUpY = new T.Vector3(0, 1, 0);
-    const { mesh, baseScale } = field;
-    for (let i = 0; i < count; i++) {
-      const o = i * 5;
-      const s = baseScale * packed[o + 4]!;
-      this._tfPos.set(packed[o]!, packed[o + 1]!, packed[o + 2]!);
-      // Yaw about +Y.
-      this._tfQuat.setFromAxisAngle(this._tfUpY, packed[o + 3]!);
-      this._tfScale.set(s, s, s);
-      this._tfMat.compose(this._tfPos, this._tfQuat, this._tfScale);
-      mesh.setMatrixAt(i, this._tfMat);
-    }
-    mesh.count = count;
-    if (count > 0) mesh.instanceMatrix.needsUpdate = true;
-  }
-
-  disposeThinField(handle: ThinFieldHandle): void {
-    const field = this.thinFields.get(handle);
-    if (!field) return;
-    this.scene?.remove(field.mesh);
-    field.mesh.geometry.dispose();
-    field.mesh.dispose();
-    this.thinFields.delete(handle);
-  }
 
   screenToWorldPoint(camera: CameraHandle, nx: number, ny: number, distance: number, out: Vec3): Vec3 {
     const T = this.THREE;
@@ -1437,6 +1319,16 @@ export class ThreeAdapter implements RendererAdapter {
    *  meshes/skeletons (e.g. the Hand rig graft). */
   getMeshRootObject(meshId: string): THREE.Object3D | undefined {
     return this.meshesByMeshId.get(meshId);
+  }
+  /** The live THREE.Scene, for a plugin that adds its own objects to it (e.g.
+   *  MoneyField's instanced coin field). Undefined before `init()`. */
+  getSceneObject(): THREE.Scene | undefined {
+    return this.scene ?? undefined;
+  }
+  /** The adapter's shared Draco-capable glTF loader, so a plugin that loads its
+   *  own GLB decodes the same compressed marketplace assets the adapter does. */
+  async loadGltf(url: string): Promise<{ scene: THREE.Object3D; animations: THREE.AnimationClip[] }> {
+    return (await this.gltfLoader()).loadAsync(url);
   }
 
   async loadModelTemplate(
@@ -3543,11 +3435,6 @@ export class ThreeAdapter implements RendererAdapter {
     this.renderer?.dispose();
     this.renderer = undefined;
     this.scene = undefined;
-    for (const field of this.thinFields.values()) {
-      field.mesh.geometry.dispose();
-      field.mesh.dispose();
-    }
-    this.thinFields.clear();
     for (const tex of this.textures.values()) tex.dispose();
     this.textures.clear();
     this.texturesByKey.clear();
