@@ -232,24 +232,14 @@ export function runRendererAdapterContract(
         }
       });
 
-      it('setMeshRotation / setMeshColor / setMeshEmissive / setMeshVisible are smoke-safe', () => {
+      it('setMeshRotation / setMeshColor / setMeshVisible are smoke-safe', () => {
         const h = adapter.createMesh('hero', prim, mat);
         expect(() => {
           adapter.setMeshRotation(h, 0.1, 0.2, 0.3);
           adapter.setMeshColor(h, 0.8, 0.1, 0.1);
-          // Emissive takes values ABOVE 1 on purpose — that is the range a glow
-          // or bloom pass keys off, and an adapter that clamps or throws on it
-          // cannot drive a flame.
-          adapter.setMeshEmissive(h, 0.2, 0.9, 2.4);
           adapter.setMeshVisible(h, false);
           adapter.setMeshVisible(h, true);
         }).not.toThrow();
-      });
-
-      it('setMeshEmissive on an unknown handle is a no-op, not a throw', () => {
-        const ghost = adapter.createMesh('ghost', prim, mat);
-        adapter.disposeMesh(ghost);
-        expect(() => adapter.setMeshEmissive(ghost, 1, 1, 1)).not.toThrow();
       });
 
       it('createDebugBox parents a unit wire box to a mesh; layout + dispose are smoke-safe', () => {

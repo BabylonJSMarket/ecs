@@ -516,15 +516,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     if (m.diffuseColor) m.diffuseColor = [r, g, b];
     if (m.baseColorFactor) m.baseColorFactor = [r, g, b, m.baseColorFactor[3] ?? 1];
   }
-  setMeshEmissive(h: MeshHandle, r: number, g: number, b: number): void {
-    const mesh = this.meshes.get(h);
-    if (!mesh) return;
-    // Both the standard and PBR prop bags spell it `emissiveColor`, and it is
-    // assigned unconditionally: a material that has not emitted before is
-    // exactly the one a caller is turning on.
-    const m = mesh.material as Partial<BLNS.StandardMaterialProps & BLNS.PbrMaterialProps>;
-    m.emissiveColor = [r, g, b];
-  }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.visible = visible;
