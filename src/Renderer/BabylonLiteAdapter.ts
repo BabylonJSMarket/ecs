@@ -50,7 +50,6 @@ import type {
   PointLightSpec,
   MeshSkinSpec,
   PhysicsBodyOpts,
-  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PickOptions,
   PickResult,
@@ -1541,19 +1540,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return true;
   }
 
-  /** The lite build carries no scene queries; callers keep their own geometry test. */
-  physicsCanQuery(): boolean {
-    return false;
-  }
-
-  physicsRaycast(_from: Vec3, _to: Vec3): PhysicsQueryHit | null {
-    return null;
-  }
-
-  physicsSphereCast(_from: Vec3, _to: Vec3, _radius: number): PhysicsQueryHit | null {
-    return null;
-  }
-
   physicsDestroyBody(meshId: string): void {
     // Lite exposes no per-body removal; drop our handle (the body is reclaimed
     // when the world is disposed). Acceptable for entity churn in a single scene.
@@ -1565,26 +1551,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
     if (agg && this.havokWorld) BL.setPhysicsBodyLinearVelocity(this.havokWorld, agg.body, { x: vx, y: vy, z: vz });
   }
 
-  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void {
-    const agg = this.aggregates.get(meshId);
-    if (agg && this.havokWorld) BL.setPhysicsBodyAngularVelocity(this.havokWorld, agg.body, { x: vx, y: vy, z: vz });
-  }
-
-  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
-    // drivenByMesh=true → pre-step reads the mesh transform into the body.
-    const agg = this.aggregates.get(meshId);
-    if (agg) BL.setPhysicsBodyPreStep(agg.body, drivenByMesh);
-  }
-
   physicsSetGravity(x: number, y: number, z: number): void {
     // Gravity is set at world creation; Lite exposes no runtime gravity setter.
     void x; void y; void z;
-  }
-
-  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void {
-    // Reshaping needs createPhysicsShape + setPhysicsBodyShape; not wired (unused
-    // by current scenes). Documented gap rather than a silent wrong result.
-    void meshId; void halfExtents;
   }
 
   physicsStep(dt: number): void {

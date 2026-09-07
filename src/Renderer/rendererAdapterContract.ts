@@ -1339,15 +1339,6 @@ export function runRendererAdapterContract(
             adapter.physicsDestroyBody('rock');
           }).not.toThrow();
         });
-
-        it('scene queries: physicsCanQuery is a boolean, and without it the casts answer null instead of throwing', () => {
-          const can = adapter.physicsCanQuery();
-          expect(typeof can).toBe('boolean');
-          if (!can) {
-            expect(adapter.physicsRaycast([0, 0, 0], [0, 0, 10])).toBeNull();
-            expect(adapter.physicsSphereCast([0, 0, 0], [0, 0, 10], 1)).toBeNull();
-          }
-        });
       });
     }
 

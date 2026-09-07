@@ -23,7 +23,6 @@ import type {
   LoadModelTemplateOptions,
   ModelInstantiateSpec,
   PhysicsBodyOpts,
-  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PickOptions,
   PickResult,
@@ -745,28 +744,6 @@ export class MockRendererAdapter implements RendererAdapter {
   physicsBodies = new Map<string, PhysicsBodySnapshot>();
   physicsPaused = false;
 
-  /**
-   * Scripted scene queries. Null (the default) reports no query support, the
-   * way an adapter without a physics engine does; a test that wants a hit sets
-   * the functions it needs and `physicsCanQuery` turns true.
-   */
-  physicsQueries: {
-    raycast?: (from: Vec3, to: Vec3) => PhysicsQueryHit | null;
-    sphereCast?: (from: Vec3, to: Vec3, radius: number) => PhysicsQueryHit | null;
-  } | null = null;
-
-  physicsCanQuery(): boolean {
-    return this.physicsQueries !== null;
-  }
-  physicsRaycast(from: Vec3, to: Vec3): PhysicsQueryHit | null {
-    this.record('physicsRaycast', from, to);
-    return this.physicsQueries?.raycast?.(from, to) ?? null;
-  }
-  physicsSphereCast(from: Vec3, to: Vec3, radius: number): PhysicsQueryHit | null {
-    this.record('physicsSphereCast', from, to, radius);
-    return this.physicsQueries?.sphereCast?.(from, to, radius) ?? null;
-  }
-
   physicsCreateBody(meshId: string, opts: PhysicsBodyOpts): boolean {
     this.record('physicsCreateBody', meshId, opts);
     if (!this.physicsBodies.has(meshId)) {
@@ -809,18 +786,8 @@ export class MockRendererAdapter implements RendererAdapter {
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void {
     this.record('physicsSetBodyVelocity', meshId, vx, vy, vz);
   }
-  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void {
-    this.record('physicsSetBodyAngularVelocity', meshId, vx, vy, vz);
-  }
-  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
-    this.record('physicsSetBodyDrivenByMesh', meshId, drivenByMesh);
-  }
   physicsSetGravity(x: number, y: number, z: number): void {
     this.record('physicsSetGravity', x, y, z);
-  }
-
-  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void {
-    this.record('physicsResizeBoxBody', meshId, halfExtents);
   }
   physicsSetTimeStep(hz: number): void {
     this.record('physicsSetTimeStep', hz);

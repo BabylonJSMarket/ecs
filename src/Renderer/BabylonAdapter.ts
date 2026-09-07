@@ -86,7 +86,6 @@ import type {
   LoadModelTemplateOptions,
   ModelInstantiateSpec,
   PhysicsBodyOpts,
-  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PickOptions,
   PickResult,
@@ -1002,6 +1001,26 @@ export class BabylonAdapter implements RendererAdapter {
    */
   getSunDisc(): Mesh | null {
     return this.sunDisc;
+  }
+  /**
+   * Host accessors for the Physics component's adapter plugin, which owns every
+   * capability only that component (and the ones that query it) needs: scene
+   * casts, a box-shape hot-swap, angular velocity, pre-step ownership.
+   *
+   * They hand out engine types on purpose. A plugin is the sanctioned place to
+   * hold a `PhysicsBody` or a `HavokPlugin`; the free interface is not, which is
+   * why those six methods left it.
+   */
+  getPhysicsBody(meshId: string): PhysicsBody | null {
+    return this.physicsAggregates.get(meshId)?.body ?? null;
+  }
+  /** The live Havok plugin, or null until the WASM has landed. */
+  getHavokPlugin(): HavokPlugin | null {
+    return this.havokReady ? this.havokPlugin : null;
+  }
+  /** Which mesh a cast result's body belongs to — casts report bodies, not ids. */
+  getMeshIdForBody(body: PhysicsBody): string | undefined {
+    return this.bodyMeshIds.get(body);
   }
   /** Merge animation groups into a mesh's clip registry so `playAnimation(meshId,
    *  clip)` finds them. Used by plugins that produce clips (e.g. retargeting). */
@@ -2450,96 +2469,14 @@ export class BabylonAdapter implements RendererAdapter {
     this.physicsAggregates.delete(meshId);
   }
 
-  physicsCanQuery(): boolean {
-    return this.havokReady && this.havokPlugin !== null;
-  }
-
-  physicsRaycast(from: Vec3, to: Vec3): PhysicsQueryHit | null {
-    const plugin = this.havokPlugin;
-    if (!plugin || !this.havokReady) return null;
-    this._qFrom.set(from[0], from[1], from[2]);
-    this._qTo.set(to[0], to[1], to[2]);
-    plugin.raycast(this._qFrom, this._qTo, this.raycastResult, { shouldHitTriggers: false });
-    return this.queryHit(this.raycastResult, this.raycastResult.hitDistance);
-  }
-
-  physicsSphereCast(from: Vec3, to: Vec3, radius: number): PhysicsQueryHit | null {
-    const plugin = this.havokPlugin;
-    if (!plugin || !this.havokReady || !this.scene) return null;
-    this._qFrom.set(from[0], from[1], from[2]);
-    this._qTo.set(to[0], to[1], to[2]);
-    const key = Math.round(radius * 100) / 100;
-    let shape = this.sphereCastShapes.get(key);
-    if (!shape) {
-      shape = new PhysicsShapeSphere(Vector3.Zero(), key, this.scene);
-      this.sphereCastShapes.set(key, shape);
-    }
-    plugin.shapeCast(
-      { shape, rotation: this._qRot, startPosition: this._qFrom, endPosition: this._qTo, shouldHitTriggers: false },
-      this.shapeCastInput,
-      this.shapeCastHit,
-    );
-    return this.queryHit(
-      this.shapeCastHit,
-      this.shapeCastHit.hitFraction * Vector3.Distance(this._qFrom, this._qTo),
-    );
-  }
-
-  /** A Babylon cast result as the adapter's hit, or null when it hit nothing of ours. */
-  private queryHit(
-    res: PhysicsRaycastResult | ShapeCastResult,
-    distance: number,
-  ): PhysicsQueryHit | null {
-    if (!res.hasHit || !res.body) return null;
-    const meshId = this.bodyMeshIds.get(res.body);
-    if (meshId === undefined) return null;
-    const p = res.hitPoint;
-    const n = res.hitNormal;
-    return { meshId, point: [p.x, p.y, p.z], normal: [n.x, n.y, n.z], distance };
-  }
-
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void {
     const aggregate = this.physicsAggregates.get(meshId);
     if (!aggregate) return;
     aggregate.body.setLinearVelocity(new Vector3(vx, vy, vz));
   }
 
-  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void {
-    const aggregate = this.physicsAggregates.get(meshId);
-    if (!aggregate) return;
-    aggregate.body.setAngularVelocity(new Vector3(vx, vy, vz));
-  }
-
-  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
-    const aggregate = this.physicsAggregates.get(meshId);
-    if (!aggregate) return;
-    // drivenByMesh=true → Babylon reads the mesh transform each step
-    // (disablePreStep = false). drivenByMesh=false → physics owns the
-    // transform; useful for teleports that shouldn't be overwritten.
-    aggregate.body.disablePreStep = !drivenByMesh;
-  }
-
   physicsSetGravity(x: number, y: number, z: number): void {
     this.scene?.getPhysicsEngine()?.setGravity(new Vector3(x, y, z));
-  }
-
-  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void {
-    if (!this.scene) return;
-    const aggregate = this.physicsAggregates.get(meshId);
-    if (!aggregate) return;
-    // Build a new BOX shape at the requested dimensions, hot-swap it onto
-    // the body, then dispose the old shape. The body keeps motion type,
-    // mass, restitution, friction, pose, and velocity.
-    const dims = new Vector3(halfExtents[0] * 2, halfExtents[1] * 2, halfExtents[2] * 2);
-    const newShape = new PhysicsShapeBox(
-      new Vector3(0, 0, 0),
-      new Quaternion(0, 0, 0, 1),
-      dims,
-      this.scene,
-    );
-    const oldShape = aggregate.body.shape;
-    aggregate.body.shape = newShape;
-    oldShape?.dispose();
   }
 
   physicsSetRestitution(meshId: string, restitution: number): void {

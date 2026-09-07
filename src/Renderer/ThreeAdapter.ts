@@ -37,7 +37,6 @@ import type {
   LoadModelTemplateOptions,
   ModelInstantiateSpec,
   PhysicsBodyOpts,
-  PhysicsQueryHit,
   PhysicsBodySnapshot,
   PhysicsFactory,
   PickOptions,
@@ -1031,23 +1030,6 @@ export class ThreeAdapter implements RendererAdapter {
     return true;
   }
 
-  /**
-   * Neither the injected integrator nor the Rapier path exposes scene queries
-   * here; callers keep their own geometry test. A `'mesh'` shape lands as the
-   * body's bounding box on the integrator path.
-   */
-  physicsCanQuery(): boolean {
-    return false;
-  }
-
-  physicsRaycast(_from: Vec3, _to: Vec3): PhysicsQueryHit | null {
-    return null;
-  }
-
-  physicsSphereCast(_from: Vec3, _to: Vec3, _radius: number): PhysicsQueryHit | null {
-    return null;
-  }
-
   physicsDestroyBody(meshId: string): void {
     if (this.usesRapier) this.rapier?.destroyBody(meshId);
     else this.physicsCore?.destroyBody(meshId);
@@ -1058,24 +1040,8 @@ export class ThreeAdapter implements RendererAdapter {
     else this.physicsCore?.setBodyVelocity(meshId, vx, vy, vz);
   }
 
-  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void {
-    // The injected pure-core integrator doesn't track angular velocity; the
-    // default Rapier backend does.
-    this.rapier?.setAngularVelocity(meshId, vx, vy, vz);
-  }
-
-  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void {
-    // drivenByMesh=true → the mesh transform is pushed into the body each step
-    // (Rapier kinematic target); false → physics owns the transform.
-    this.rapier?.setDrivenByMesh(meshId, drivenByMesh);
-  }
-
   physicsSetGravity(x: number, y: number, z: number): void {
     this.rapier?.setGravity(x, y, z);
-  }
-
-  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void {
-    this.rapier?.resizeBoxBody(meshId, halfExtents[0], halfExtents[1], halfExtents[2]);
   }
 
   physicsSetTimeStep(hz: number): void {
@@ -1324,6 +1290,14 @@ export class ThreeAdapter implements RendererAdapter {
    *  MoneyField's instanced coin field). Undefined before `init()`. */
   getSceneObject(): THREE.Scene | undefined {
     return this.scene ?? undefined;
+  }
+  /**
+   * The Rapier backend, for the Physics component's adapter plugin. Null when
+   * the adapter was given a pure-core integrator instead (which tracks neither
+   * angular velocity nor body reshaping), or before Rapier has loaded.
+   */
+  getRapierBackend(): RapierPhysics | null {
+    return this.usesRapier ? this.rapier : null;
   }
   /** The adapter's shared Draco-capable glTF loader, so a plugin that loads its
    *  own GLB decodes the same compressed marketplace assets the adapter does. */

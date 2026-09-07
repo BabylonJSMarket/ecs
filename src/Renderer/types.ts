@@ -1651,34 +1651,11 @@ export interface RendererAdapter {
   physicsDestroyBody(meshId: string): void;
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void;
   /**
-   * Set the angular velocity of a kinematic/dynamic body. Used by Plunger
-   * to zero the ball's spin on teleport. Adapters without per-body
-   * angular control may no-op.
-   */
-  physicsSetBodyAngularVelocity(meshId: string, vx: number, vy: number, vz: number): void;
-  /**
-   * Switch a body between "driven by the mesh's transform" (true — the
-   * usual mode for kinematic objects; Babylon's `disablePreStep = false`)
-   * and "the body drives the mesh" (false — `disablePreStep = true`).
-   * Plunger flips this off briefly so it can teleport the ball without
-   * the physics step writing the ball back to its current pose.
-   */
-  physicsSetBodyDrivenByMesh(meshId: string, drivenByMesh: boolean): void;
-  /**
    * Set the global gravity vector. Pinball uses this to install a tilted
    * gravity simulating a slanted playfield ([0, -12, 14] = -Y down, +Z
    * down-table). Adapters without a global gravity setting no-op.
    */
   physicsSetGravity(x: number, y: number, z: number): void;
-  /**
-   * Resize a BOX-type body's collider in place. Swaps just the shape on the
-   * existing body — the body keeps its motion type / mass / restitution /
-   * pose / velocity. Used to live-tune flipper colliders from a debug
-   * panel without destroy+recreate cycles. `halfExtents` are world-space
-   * half-dimensions of the box. No-op for non-box bodies / mockless
-   * adapters.
-   */
-  physicsResizeBoxBody(meshId: string, halfExtents: Vec3): void;
   physicsStep(dt: number): void;
   /**
    * Pause/resume the physics simulation independently of the render loop.
@@ -1717,26 +1694,6 @@ export interface RendererAdapter {
    * control may no-op. Keyed by the same id passed to `physicsCreateBody`.
    */
   physicsSetRestitution(meshId: string, restitution: number): void;
-  /**
-   * Whether {@link physicsRaycast} / {@link physicsSphereCast} can answer.
-   * False until the physics engine is up, and always false for adapters whose
-   * physics layer has no scene queries — a caller keeps its own geometry test
-   * for that case rather than reading a null as "nothing there".
-   */
-  physicsCanQuery(): boolean;
-  /**
-   * Nearest body along the segment `from → to`, or null for no hit (or no
-   * query support — check {@link physicsCanQuery}). Only bodies created through
-   * {@link physicsCreateBody} are candidates; the hit names the mesh id the
-   * body was created for.
-   */
-  physicsRaycast(from: Vec3, to: Vec3): PhysicsQueryHit | null;
-  /**
-   * A sphere of `radius` swept along `from → to`: the nearest body it touches,
-   * or null. The moving-hull test — a ship is a sphere, a rock is a mesh, and
-   * the sweep catches a contact that happened between two frames.
-   */
-  physicsSphereCast(from: Vec3, to: Vec3, radius: number): PhysicsQueryHit | null;
   /**
    * Toggle wireframe outlines of every physics collider in the scene. Babylon
    * drives this with its built-in `PhysicsViewer` over all aggregates; other
@@ -2047,16 +2004,6 @@ export interface PhysicsBodyOpts {
  * receives a factory via its constructor so the package itself never imports
  * any physics implementation.
  */
-/** What a physics query hit. */
-export interface PhysicsQueryHit {
-  /** The mesh id the hit body was created for — usually the entity id. */
-  meshId: string;
-  point: Vec3;
-  normal: Vec3;
-  /** From the cast's start to the hit, world units. */
-  distance: number;
-}
-
 export interface IPhysicsInstance {
   createBody(meshId: string, opts: PhysicsBodyOpts & { posX?: number; posY?: number; posZ?: number }): unknown;
   destroyBody(meshId: string): void;

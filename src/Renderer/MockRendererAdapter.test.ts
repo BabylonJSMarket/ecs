@@ -888,26 +888,9 @@ describe('MockRendererAdapter', () => {
       expect(renderer.calls.some((c) => c.method === 'physicsSetBodyState')).toBe(true);
     });
 
-    it('physicsSetBodyAngularVelocity records the call with the velocity args', () => {
-      renderer.physicsSetBodyAngularVelocity('cube', 0.1, 0.2, 0.3);
-      const last = renderer.calls[0];
-      expect(last.method).toBe('physicsSetBodyAngularVelocity');
-      expect(last.args).toEqual(['cube', 0.1, 0.2, 0.3]);
-    });
-
-    it('physicsSetBodyDrivenByMesh records the call with the flag', () => {
-      renderer.physicsSetBodyDrivenByMesh('cube', true);
-      expect(renderer.calls[0]).toMatchObject({ method: 'physicsSetBodyDrivenByMesh', args: ['cube', true] });
-    });
-
     it('physicsSetGravity records the call with x y z', () => {
       renderer.physicsSetGravity(0, -9.8, 0);
       expect(renderer.calls[0]).toMatchObject({ method: 'physicsSetGravity', args: [0, -9.8, 0] });
-    });
-
-    it('physicsResizeBoxBody records the call with meshId and halfExtents', () => {
-      renderer.physicsResizeBoxBody('cube', [0.5, 0.5, 0.5]);
-      expect(renderer.calls[0]).toMatchObject({ method: 'physicsResizeBoxBody', args: ['cube', [0.5, 0.5, 0.5]] });
     });
 
     it('physicsSetTimeStep records the call with the hz value', () => {
