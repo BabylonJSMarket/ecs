@@ -71,7 +71,6 @@ import type {
   CameraHandle,
   PerspectiveCameraSpec,
   Quaternion as QuaternionSpec,
-  LargeWorldSpec,
   ScreenPoint,
   DirectionalLightSpec,
   HemisphericLightSpec,
@@ -1023,12 +1022,6 @@ export class BabylonAdapter implements RendererAdapter {
     card.material.opacityTexture = card.cornerMask;
   }
 
-  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
-    const mesh = this.meshes.get(h);
-    const mat = mesh?.material;
-    if (mat instanceof PBRMaterial) mat.albedoColor = new Color3(r, g, b);
-  }
-
   disposeTexture(h: TextureHandle): void {
     const tex = this.textures.get(h);
     if (!tex) return;
@@ -1040,12 +1033,6 @@ export class BabylonAdapter implements RendererAdapter {
         break;
       }
     }
-  }
-
-  getAspectRatio(): number {
-    if (!this.engine) return 1;
-    const h = this.engine.getRenderHeight();
-    return h > 0 ? this.engine.getRenderWidth() / h : 1;
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
@@ -1411,11 +1398,6 @@ export class BabylonAdapter implements RendererAdapter {
     this.meshes.delete(h);
     this.loadedAnimationGroups.delete(id);
     this.bonesByMeshId.delete(id);
-  }
-
-  listBones(meshId: string): string[] {
-    const bones = this.bonesByMeshId.get(meshId);
-    return bones ? Array.from(bones.keys()) : [];
   }
 
   getBoneWorldPose(
@@ -2117,14 +2099,6 @@ export class BabylonAdapter implements RendererAdapter {
     this.originOffset[0] = x;
     this.originOffset[1] = y;
     this.originOffset[2] = z;
-  }
-
-  configureLargeWorld(spec: LargeWorldSpec): void {
-    this.largeWorldEnabled = spec.enabled;
-    // We may widen the far plane on the active camera, but do NOT rebase.
-    if (spec.farPlane !== undefined && this.scene?.activeCamera) {
-      this.scene.activeCamera.maxZ = spec.farPlane;
-    }
   }
 
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
@@ -2914,11 +2888,6 @@ export class BabylonAdapter implements RendererAdapter {
     this.textures.set(handle, tex);
     this.dynamicTexturesByKey.set(key, handle);
     return handle;
-  }
-
-  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
-    const tex = this.textures.get(h);
-    if (tex instanceof RawTexture) tex.update(pixels);
   }
 
   // ─── Phase-3: particle systems ───

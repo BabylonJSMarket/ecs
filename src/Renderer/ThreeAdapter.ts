@@ -58,7 +58,6 @@ import type {
   TextureLoadOpts,
   CardMeshSpec,
   PerspectiveCameraSpec,
-  LargeWorldSpec,
   Quaternion,
   ScreenPoint,
   Vec3,
@@ -1040,13 +1039,6 @@ export class ThreeAdapter implements RendererAdapter {
     card.material.needsUpdate = true;
   }
 
-  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
-    const T = this.THREE;
-    const mesh = this.meshes.get(h);
-    const mat = mesh?.material as THREE.MeshStandardMaterial | THREE.MeshPhongMaterial | undefined;
-    if (mat?.color && T) mat.color.setRGB(r, g, b, T.SRGBColorSpace);
-  }
-
   disposeTexture(h: TextureHandle): void {
     const tex = this.textures.get(h);
     if (!tex) return;
@@ -1058,10 +1050,6 @@ export class ThreeAdapter implements RendererAdapter {
         break;
       }
     }
-  }
-
-  getAspectRatio(): number {
-    return this.canvasAspect();
   }
 
   /**
@@ -1605,11 +1593,6 @@ export class ThreeAdapter implements RendererAdapter {
     }
     this.meshes.delete(h);
     this.bonesByMeshId.delete(id);
-  }
-
-  listBones(meshId: string): string[] {
-    const bones = this.bonesByMeshId.get(meshId);
-    return bones ? Array.from(bones.keys()) : [];
   }
 
   getBoneWorldPose(
@@ -2255,19 +2238,6 @@ export class ThreeAdapter implements RendererAdapter {
     this.originOffset[1] = y;
     this.originOffset[2] = z;
   }
-  configureLargeWorld(spec: LargeWorldSpec): void {
-    this.largeWorld = { enabled: spec.enabled, farPlane: spec.farPlane };
-    // Widen the active perspective camera's far plane if asked (~200000 for a
-    // space sim). No active rebasing in Phase 1.
-    if (spec.farPlane !== undefined) {
-      const handle = this.activePerspectiveCamera;
-      const entry = handle ? this.cameras.get(handle) : undefined;
-      if (entry) {
-        entry.camera.far = spec.farPlane;
-        entry.camera.updateProjectionMatrix();
-      }
-    }
-  }
 
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
     const T = this.THREE;
@@ -2725,13 +2695,6 @@ export class ThreeAdapter implements RendererAdapter {
     this.textures.set(handle, tex);
     this.dynamicTexturesByKey.set(key, handle);
     return handle;
-  }
-
-  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
-    const tex = this.textures.get(h) as THREE.DataTexture | undefined;
-    if (!tex || !tex.image) return;
-    (tex.image as { data: Uint8ClampedArray | Uint8Array }).data = pixels;
-    tex.needsUpdate = true;
   }
 
   // ─── Particle systems (THREE.Points pool + CPU integrator) ───

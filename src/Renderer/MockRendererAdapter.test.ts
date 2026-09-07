@@ -317,13 +317,11 @@ describe('MockRendererAdapter', () => {
   });
 
   describe('skeleton stub', () => {
-    it('setMockBones seeds a rig that listBones/getBoneWorldPose answer from', () => {
+    it('setMockBones seeds a rig that getBoneWorldPose answers from', () => {
       renderer.setMockBones('hero', [
         { name: 'Hips' },
         { name: 'LeftHand', position: [0.4, 1.2, 0.1], orientation: { x: 0, y: 1, z: 0, w: 0 } },
       ]);
-
-      expect(renderer.listBones('hero')).toEqual(['Hips', 'LeftHand']);
 
       const outPos: Vec3 = [0, 0, 0];
       const outQ = { x: 0, y: 0, z: 0, w: 1 };

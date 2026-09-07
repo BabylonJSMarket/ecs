@@ -997,13 +997,6 @@ export function runRendererAdapterContract(
         expect(out[1]).toBeCloseTo(-2000, 4);
         expect(out[2]).toBeCloseTo(3000, 4);
       });
-
-      it('configureLargeWorld records config without throwing (no active rebase in Phase 1)', () => {
-        expect(() => {
-          adapter.configureLargeWorld({ enabled: true, farPlane: 200000 });
-          adapter.configureLargeWorld({ enabled: false });
-        }).not.toThrow();
-      });
     });
 
     // ---------------------------------------------------------------------
@@ -1122,11 +1115,6 @@ export function runRendererAdapterContract(
     // each engine's browser path and the Mock's own seeded-rig unit tests)
     // ---------------------------------------------------------------------
     describe('skeleton', () => {
-      it('listBones returns [] for an unknown or boneless mesh id', () => {
-        expect(adapter.listBones('ghost')).toEqual([]);
-        adapter.createMesh('prop', { kind: 'box' });
-        expect(adapter.listBones('prop')).toEqual([]);
-      });
 
       it('getBoneWorldPose returns false and LEAVES the outs untouched on a miss', () => {
         // Systems poll this every frame while a host model is still loading —
@@ -1264,15 +1252,6 @@ export function runRendererAdapterContract(
         bow: 0.06,
       };
 
-      it('setMeshAlbedoColor tints a mesh without throwing', () => {
-        const floor = adapter.createMesh('felt', { kind: 'ground', width: 10, depth: 10 });
-        expect(() => adapter.setMeshAlbedoColor(floor, 0.02, 0.5, 0.06)).not.toThrow();
-        // An unknown handle is a safe no-op too.
-        const ghost = adapter.createMesh('ghost', { kind: 'box' });
-        adapter.disposeMesh(ghost);
-        expect(() => adapter.setMeshAlbedoColor(ghost, 1, 1, 1)).not.toThrow();
-      });
-
       it('disposeTexture is idempotent on an unknown handle', () => {
         // Releasing a handle that was never minted (or already released) must not
         // throw — exercised here without a real load so every adapter runs it.
@@ -1281,12 +1260,6 @@ export function runRendererAdapterContract(
           adapter.disposeTexture(bogus);
           adapter.disposeTexture(bogus);
         }).not.toThrow();
-      });
-
-      it('getAspectRatio returns a positive finite number', () => {
-        const a = adapter.getAspectRatio();
-        expect(Number.isFinite(a)).toBe(true);
-        expect(a).toBeGreaterThan(0);
       });
 
       // Card-mesh creation generates an alpha mask on a real 2D canvas, and
@@ -1504,20 +1477,19 @@ export function runRendererAdapterContract(
 
     // ---------------------------------------------------------------------
     // Phase-3: runtime dynamic textures (CPU pixel buffer → GPU texture). The
-    // dedupe-by-key + update round-trip is bookkeeping (a raw RGBA upload needs
-    // no canvas/fetch), so it runs on every adapter.
+    // dedupe-by-key bookkeeping needs no canvas or fetch, so it runs on every
+    // adapter.
     // ---------------------------------------------------------------------
     describe('dynamic textures', () => {
       const px = (n: number) => new Uint8ClampedArray(n * n * 4).fill(180);
       const spec: DynamicTextureSpec = { width: 4, height: 4, pixels: px(4), hasAlpha: true };
 
-      it('createDynamicTexture dedupes by key; update + new key are safe', () => {
+      it('createDynamicTexture dedupes by key; a new key mints a new handle', () => {
         const a = adapter.createDynamicTexture('rock-albedo', spec);
         const again = adapter.createDynamicTexture('rock-albedo', spec);
         const other = adapter.createDynamicTexture('rock-normal', spec);
-        expect(again).toBe(a); // same key → same handle
-        expect(other).not.toBe(a); // distinct key → distinct handle
-        expect(() => adapter.updateDynamicTexture(a, px(4))).not.toThrow();
+        expect(again).toBe(a); // same key -> same handle
+        expect(other).not.toBe(a); // distinct key -> distinct handle
       });
     });
 

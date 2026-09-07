@@ -245,28 +245,13 @@ export interface PerspectiveCameraSpec {
   near: number;
   /**
    * Far clip-plane distance in world units. A large-world / space scene pushes
-   * this far out (~200000); see {@link LargeWorldSpec.farPlane}, which can widen
-   * it on the active camera after creation.
+   * this far out (~200000).
    */
   far: number;
   /** Optional initial world-space position. Default `[0, 0, 0]`. */
   position?: Vec3;
   /** Optional initial orientation quaternion. Default identity `{ x:0, y:0, z:0, w:1 }`. */
   orientation?: Quaternion;
-}
-
-/**
- * Config for {@link RendererAdapter.configureLargeWorld}: the floating-origin /
- * large-world enable flag plus an optional far-plane override applied to the
- * active perspective camera. Phase-1 is CONTRACT-ONLY — the adapter records the
- * config (and may widen the far plane) but performs NO active per-frame
- * rebasing; the pure game keeps passing real world coordinates.
- */
-export interface LargeWorldSpec {
-  /** Enable large-world / floating-origin bookkeeping. */
-  enabled: boolean;
-  /** Far clip plane for the active perspective camera (~200000 for a space sim). */
-  farPlane?: number;
 }
 
 export interface MeshLoadSpec {
@@ -1317,20 +1302,8 @@ export interface RendererAdapter {
    * an unknown mesh handle. Adapters without per-face material control no-op.
    */
   setMeshFaceTexture(h: MeshHandle, side: 'front' | 'back', tex: TextureHandle): void;
-  /**
-   * Tint a mesh's albedo/base color (the table-felt hue-shift). Distinct from
-   * `setMeshColor`, which drives the flat `StandardMaterial` diffuse path;
-   * this addresses the PBR albedo so a textured surface re-tints correctly.
-   * No-op on an unknown handle.
-   */
-  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void;
   /** Release a loaded texture and drop it from the dedupe cache. Idempotent. */
   disposeTexture(h: TextureHandle): void;
-  /**
-   * Aspect ratio (width / height) of the rendering surface, for responsive
-   * camera framing. Returns 1 when no canvas/engine is available yet.
-   */
-  getAspectRatio(): number;
 
   createDirectionalLight(id: string, spec: DirectionalLightSpec): LightHandle;
   createHemisphericLight(id: string, spec: HemisphericLightSpec): LightHandle;
@@ -1515,14 +1488,6 @@ export interface RendererAdapter {
    * per-frame rebasing is out of scope for Phase 1.
    */
   setOriginOffset(x: number, y: number, z: number): void;
-  /**
-   * Configure large-world / floating-origin behavior: the `enabled` flag plus an
-   * optional `farPlane` (~200000 for a space sim) applied to the active
-   * perspective camera. Phase-1 records the config and may widen the far plane,
-   * but performs NO active rebasing. Adapters without a far-plane knob record the
-   * flag and no-op the plane.
-   */
-  configureLargeWorld(spec: LargeWorldSpec): void;
 
   /**
    * Cast a ray from a screen-space point and return the first world
@@ -1612,19 +1577,6 @@ export interface RendererAdapter {
   setAnimationWeight(meshId: string, clipName: string, weight: number): void;
   /** Playback rate multiplier for the named clip. 1 = normal. */
   setAnimationSpeed(meshId: string, clipName: string, speed: number): void;
-
-  /**
-   * Skeleton introspection for a mesh loaded under `meshId` (via `loadMesh`).
-   * The generic "attach something to a character" primitive: a system reads a
-   * bone's live world pose each frame and pins its own mesh there — a weapon in
-   * a palm, a hat on a head, a snap-on articulated hand on a wrist — without
-   * ever seeing an engine bone type.
-   *
-   * `listBones` returns the skeleton's bone names in hierarchy order, `[]` when
-   * the mesh is unknown or carries no skeleton (a prop GLB, a primitive, an
-   * adapter without skeletal support).
-   */
-  listBones(meshId: string): string[];
   /**
    * Read the CURRENT world-space pose of one bone: position into `outPosition`,
    * unit orientation quaternion into `outOrientation` (out-params, same shape
@@ -1873,12 +1825,6 @@ export interface RendererAdapter {
    * key-deduped handle.
    */
   createDynamicTexture(key: string, spec: DynamicTextureSpec): TextureHandle;
-  /**
-   * Re-upload new pixels into a texture made by {@link createDynamicTexture}
-   * (animated procedural maps). `pixels` must match the original width*height*4.
-   * No-op on an unknown handle.
-   */
-  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void;
 
   // ─── Phase-3: particle systems ───
   /**

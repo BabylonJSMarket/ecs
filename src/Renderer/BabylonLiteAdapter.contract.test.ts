@@ -74,14 +74,6 @@ describe('BabylonLiteAdapter (pre-device contract subset)', () => {
     expect(out[2]).toBeCloseTo(3000, 4);
   });
 
-  it('configureLargeWorld records config without throwing (no active rebase in Phase 1)', () => {
-    const adapter = new BabylonLiteAdapter();
-    expect(() => {
-      adapter.configureLargeWorld({ enabled: true, farPlane: 200000 });
-      adapter.configureLargeWorld({ enabled: false });
-    }).not.toThrow();
-  });
-
   it('worldToScreen returns false (no active perspective camera) without a device', () => {
     const adapter = new BabylonLiteAdapter();
     const out = { x: 123, y: 456 };

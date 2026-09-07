@@ -65,7 +65,6 @@ import type {
   TextureHandle,
   TextureLoadOpts,
   CardMeshSpec,
-  LargeWorldSpec,
   PerspectiveCameraSpec,
   Quaternion,
   ScreenPoint,
@@ -793,14 +792,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     else card.back = tex;
   }
 
-  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
-    const mesh = this.meshes.get(h);
-    if (!mesh) return;
-    const m = mesh.material as Partial<BLNS.StandardMaterialProps & BLNS.PbrMaterialProps>;
-    if (m.baseColorFactor) m.baseColorFactor = [r, g, b, m.baseColorFactor[3] ?? 1];
-    else if (m.diffuseColor) m.diffuseColor = [r, g, b];
-  }
-
   disposeTexture(h: TextureHandle): void {
     // Lite exposes no per-texture dispose; drop the dedupe entry that minted it.
     for (const [key, handle] of this.texturesByKey) {
@@ -809,14 +800,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
         break;
       }
     }
-  }
-
-  getAspectRatio(): number {
-    const c = this.canvas;
-    if (!c) return 1;
-    const w = c.clientWidth || c.width || 0;
-    const hgt = c.clientHeight || c.height || 0;
-    return hgt > 0 ? w / hgt : 1;
   }
 
   // ─── Fog ───
@@ -1259,16 +1242,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.originOffset[2] = -z;
   }
 
-  configureLargeWorld(spec: LargeWorldSpec): void {
-    this.largeWorldEnabled = spec.enabled;
-    // Optionally widen the active perspective camera's far plane (~200000 for a
-    // space sim). Phase-1 records the config and may push the plane out, but
-    // performs NO active rebasing.
-    if (spec.farPlane !== undefined && this.activePerspective) {
-      this.activePerspective.camera.farPlane = spec.farPlane;
-    }
-  }
-
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
     // Babylon Lite only offers GPU-async picking (`createGpuPicker` + async
     // `pickAsync`), which cannot satisfy this SYNCHRONOUS contract. Documented
@@ -1501,9 +1474,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
 
   // Lite's glTF loader carries no skeletons, so every mesh honestly reports
   // "no bones" — the same answer the full adapters give for an unrigged prop.
-  listBones(_meshId: string): string[] {
-    return [];
-  }
   getBoneWorldPose(
     _meshId: string,
     _boneName: string,
@@ -1966,13 +1936,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.dynamicTextures.set(key, handle);
     this.dynamicTextureObjects.set(handle, tex);
     return handle;
-  }
-
-  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
-    const tex = this.dynamicTextureObjects.get(h);
-    if (!tex || !this.engine) return;
-    const data = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
-    BL.updateTexture2DFromPixels(this.engine, tex, data);
   }
 
   // ─── Phase-3: particle systems ───

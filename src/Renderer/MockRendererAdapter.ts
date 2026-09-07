@@ -43,7 +43,6 @@ import type {
   TextureLoadOpts,
   CardMeshSpec,
   PerspectiveCameraSpec,
-  LargeWorldSpec,
   Quaternion,
   ScreenPoint,
   Vec3,
@@ -318,10 +317,6 @@ export class MockRendererAdapter implements RendererAdapter {
     if (side === 'front') faces.front = tex;
     else faces.back = tex;
   }
-  setMeshAlbedoColor(h: MeshHandle, r: number, g: number, b: number): void {
-    this.meshAlbedoColors.set(h, [r, g, b]);
-    this.record('setMeshAlbedoColor', h, r, g, b);
-  }
   disposeTexture(h: TextureHandle): void {
     this.record('disposeTexture', h);
     // Idempotent: drop whichever cache entry minted this handle (if any still does).
@@ -331,10 +326,6 @@ export class MockRendererAdapter implements RendererAdapter {
         break;
       }
     }
-  }
-  getAspectRatio(): number {
-    this.record('getAspectRatio');
-    return this.aspectRatio;
   }
 
   async loadMesh(id: string, spec: MeshLoadSpec): Promise<MeshLoadResult> {
@@ -600,10 +591,6 @@ export class MockRendererAdapter implements RendererAdapter {
     this.originOffset = [x, y, z];
     this.record('setOriginOffset', x, y, z);
   }
-  configureLargeWorld(spec: LargeWorldSpec): void {
-    this.largeWorld = { enabled: spec.enabled, farPlane: spec.farPlane };
-    this.record('configureLargeWorld', spec);
-  }
 
   pickAtScreenPoint(x: number, y: number, opts?: PickOptions): PickResult | null {
     this.record('pickAtScreenPoint', x, y, opts);
@@ -653,11 +640,6 @@ export class MockRendererAdapter implements RendererAdapter {
       });
     }
     this.mockBones.set(meshId, byName);
-  }
-  listBones(meshId: string): string[] {
-    this.record('listBones', meshId);
-    const bones = this.mockBones.get(meshId);
-    return bones ? Array.from(bones.keys()) : [];
   }
   getBoneWorldPose(
     meshId: string,
@@ -930,9 +912,6 @@ export class MockRendererAdapter implements RendererAdapter {
     const h = makeHandle<TextureHandle>('dynTex', key);
     this.dynamicTextures.set(key, h);
     return h;
-  }
-  updateDynamicTexture(h: TextureHandle, pixels: Uint8ClampedArray | Uint8Array): void {
-    this.record('updateDynamicTexture', h, pixels);
   }
 
   // ─── Phase-3: particle systems ───
