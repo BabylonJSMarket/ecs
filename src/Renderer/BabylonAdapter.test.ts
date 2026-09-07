@@ -407,27 +407,6 @@ describe('BabylonAdapter procedural missile — the nose points where it is goin
   });
 });
 
-describe('BabylonAdapter mesh bounds — where the art actually is', () => {
-  it('reports the world box of a procedural hull, centred on its geometry', () => {
-    const adapter = new BabylonAdapter();
-    adapter.engine = new NullEngine();
-    adapter.scene = new Scene(adapter.engine);
-    adapter.scene.useRightHandedSystem = true;
-    adapter.createProceduralMesh('hull', { shape: 'missile', size: [1, 1, 10] });
-
-    const min: [number, number, number] = [0, 0, 0];
-    const max: [number, number, number] = [0, 0, 0];
-    expect(adapter.getMeshWorldBounds('hull', min, max)).toBe(true);
-
-    // A 10-long missile: the box must span roughly that along Z and be about a
-    // unit across. The point is that it reflects the GEOMETRY under the root —
-    // the root node's own bounds are empty, which is the trap this guards.
-    expect(max[2] - min[2]).toBeGreaterThan(5);
-    expect(max[0] - min[0]).toBeGreaterThan(0.5);
-    expect(max[0] - min[0]).toBeLessThan(4);
-  });
-})
-
 // The bug this guards is invisible at devicePixelRatio 1 — which is every
 // headless browser and every other test in this file — so it has to set the
 // hardware scaling level by hand to reproduce a retina panel.

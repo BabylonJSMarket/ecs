@@ -1701,17 +1701,6 @@ export class BabylonAdapter implements RendererAdapter {
     return out;
   }
 
-  getMeshWorldBounds(meshId: string, outMin: Vec3, outMax: Vec3): boolean {
-    const root = this.meshesByMeshId.get(meshId);
-    if (!root) return false;
-    // Include descendants: a GLB ship is a root TransformNode with the actual
-    // geometry hanging off it, so the root's own bounds are empty.
-    const { min, max } = root.getHierarchyBoundingVectors(true);
-    outMin[0] = min.x; outMin[1] = min.y; outMin[2] = min.z;
-    outMax[0] = max.x; outMax[1] = max.y; outMax[2] = max.z;
-    return true;
-  }
-
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
     // With scene.useRightHandedSystem = true, Babylon uses the same cross
     // convention as Three: right = forward × up. The cross of two unit
