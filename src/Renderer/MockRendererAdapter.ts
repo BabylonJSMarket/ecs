@@ -43,7 +43,6 @@ import type {
   Vec3,
   ProceduralMeshSpec,
   DynamicTextureSpec,
-  ParticleBurstSpec,
   ParticleEmitterSpec,
   ParticleEmitterHandle,
   GlowSpec,
@@ -57,17 +56,6 @@ import type {
   RenderPassInfo,
 } from './types';
 import type { Color } from './types';
-
-/**
- * Deterministic [0,1) hash of three integers — the Mock's reference noise
- * source for {@link MockRendererAdapter.sampleProceduralSurface}. Mirrors the
- * asteroid hash so seeded geometry is reproducible without an engine.
- */
-function mockHash3(a: number, b: number, c: number): number {
-  let n = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
-  n = Math.imul(n ^ (n >>> 13), 1274126177);
-  return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
-}
 
 /**
  * Rotate a Vec3 by a unit quaternion: v' = v + 2·w·(q×v) + 2·(q×(q×v)).
@@ -710,9 +698,6 @@ export class MockRendererAdapter implements RendererAdapter {
   /** Live continuous emitters, so create/setPosition/dispose round-trips. */
   particleEmitters = new Map<ParticleEmitterHandle, { spec: ParticleEmitterSpec; position: Vec3 }>();
 
-  createParticleBurst(spec: ParticleBurstSpec): void {
-    this.record('createParticleBurst', spec);
-  }
   createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
     const h = makeHandle<ParticleEmitterHandle>('emitter', id);
     this.particleEmitters.set(h, {

@@ -97,7 +97,7 @@ interface LiteTemplate {
 // a test. Kept at module scope (no `this`) so it can't drift per-instance.
 // ─────────────────────────────────────────────────────────────────────────
 
-/** Deterministic [0,1) hash of three integers — mirrors MockRendererAdapter.mockHash3. */
+/** Deterministic [0,1) hash of three integers — the same hash the asteroid kernel uses. */
 function liteHash3(a: number, b: number, c: number): number {
   let n = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1274126177)) | 0;
   n = Math.imul(n ^ (n >>> 13), 1274126177);
