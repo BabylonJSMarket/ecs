@@ -398,6 +398,38 @@ describe('BabylonAdapter worldToScreen — CSS pixels, not backing-store pixels'
     expect(p.x).toBeCloseTo(engine.getRenderWidth() / 2, 0);
     expect(p.y).toBeCloseTo(engine.getRenderHeight() / 2, 0);
   });
+
+  // The inverse direction had the same bug the other way round: the ray was
+  // built from buffer pixels and Babylon scaled them up AGAIN, so on a 2x
+  // display a ray through the middle of the screen came out through its
+  // bottom-right corner. A drag tool tracked the pointer at double speed.
+  it('screenToWorldPoint aims the middle of the screen down the camera nose on a 2x display', () => {
+    for (const scaling of [0.5, 1]) {
+      const adapter = retina(scaling);
+      const cam = adapter.createPerspectiveCamera('c', { fov: 1.05, near: 0.1, far: 1000 });
+      adapter.setCameraPose(cam, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+      const out: [number, number, number] = [0, 0, 0];
+      adapter.screenToWorldPoint(cam, 0.5, 0.5, 50, out);
+      expect(out[0]).toBeCloseTo(0, 3);
+      expect(out[1]).toBeCloseTo(0, 3);
+      expect(out[2]).toBeGreaterThan(49);
+    }
+  });
+
+  it('screenToWorldPoint round-trips with worldToScreen on a 2x display', () => {
+    const adapter = retina(0.5);
+    const engine = adapter.engine!;
+    const cam = adapter.createPerspectiveCamera('c', { fov: 1.05, near: 0.1, far: 1000 });
+    adapter.setCameraPose(cam, [0, 0, 0], { x: 0, y: 0, z: 0, w: 1 });
+    const cssW = engine.getRenderWidth() * 0.5;
+    const cssH = engine.getRenderHeight() * 0.5;
+    const world: [number, number, number] = [0, 0, 0];
+    adapter.screenToWorldPoint(cam, 0.25, 0.75, 40, world);
+    const back = { x: 0, y: 0 };
+    expect(adapter.worldToScreen(world[0], world[1], world[2], back)).toBe(true);
+    expect(back.x / cssW).toBeCloseTo(0.25, 3);
+    expect(back.y / cssH).toBeCloseTo(0.75, 3);
+  });
 });
 
 /**

@@ -679,8 +679,16 @@ export class BabylonAdapter implements RendererAdapter {
       out[0] = out[1] = out[2] = 0;
       return out;
     }
-    const sx = this.engine.getRenderWidth() * nx;
-    const sy = this.engine.getRenderHeight() * ny;
+    // CSS pixels, not buffer pixels. `createPickingRayToRef` takes the same
+    // coordinates `scene.pick` does — the CSS box — and multiplies them by
+    // 1/hardwareScalingLevel itself. Handing it `getRenderWidth() * nx` (the
+    // physical buffer, already 2x on a retina panel) scaled twice, so on a 2x
+    // display a ray asked for at nx landed at 2·nx: a drag tool tracked the
+    // pointer at double speed from the top-left corner. The same disease
+    // worldToScreen had, and invisible at dpr 1 for the same reason.
+    const cssScale = this.engine.getHardwareScalingLevel();
+    const sx = this.engine.getRenderWidth() * cssScale * nx;
+    const sy = this.engine.getRenderHeight() * cssScale * ny;
     this.scene.createPickingRayToRef(sx, sy, this._tfIdentity, this._tfRay, cam);
     out[0] = this._tfRay.origin.x + this._tfRay.direction.x * distance;
     out[1] = this._tfRay.origin.y + this._tfRay.direction.y * distance;
