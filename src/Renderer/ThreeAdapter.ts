@@ -1525,8 +1525,9 @@ export class ThreeAdapter implements RendererAdapter {
       light.shadow.mapSize.height = spec.shadow.mapSize;
       light.shadow.camera.near = Math.max(0.1, spec.shadow.minZ);
       light.shadow.camera.far = spec.shadow.maxZ;
-      // Tune the orthographic camera extent for the scene size
-      const extent = spec.shadow.maxZ / 3;
+      // The orthographic box: the scene's own size when it gives one, else a
+      // guess from the depth range.
+      const extent = spec.shadow.extent ?? spec.shadow.maxZ / 3;
       light.shadow.camera.left = -extent;
       light.shadow.camera.right = extent;
       light.shadow.camera.top = extent;

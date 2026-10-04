@@ -1498,12 +1498,13 @@ export class BabylonAdapter implements RendererAdapter {
       // caster bounding box + 10% — fine with many casters, but for a lone
       // capsule the frustum is only a few units across and the shadow on the
       // ground is clipped to a tiny square. Disable auto and set explicit
-      // bounds big enough for a ~40-unit demo scene.
+      // bounds: the scene's `extent`, else ±25, enough for a ~40-unit demo.
       light.autoUpdateExtends = false;
-      light.orthoLeft = -25;
-      light.orthoRight = 25;
-      light.orthoTop = 25;
-      light.orthoBottom = -25;
+      const extent = spec.shadow.extent ?? 25;
+      light.orthoLeft = -extent;
+      light.orthoRight = extent;
+      light.orthoTop = extent;
+      light.orthoBottom = -extent;
       const gen = new ShadowGenerator(spec.shadow.mapSize, light);
       gen.usePercentageCloserFiltering = true;
       gen.filteringQuality = ShadowGenerator.QUALITY_HIGH;

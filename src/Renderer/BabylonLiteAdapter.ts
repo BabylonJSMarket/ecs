@@ -731,7 +731,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.lights.set(handle, light);
 
     if (spec.shadow?.enabled) {
-      // The ortho X/Y bounds auto-fit the caster AABBs; orthoMinZ/maxZ are the
+      // The ortho X/Y bounds auto-fit the caster AABBs, so `shadow.extent` has
+      // nothing to set here; orthoMinZ/maxZ are the
       // DEPTH range measured from the light position along its direction. With the
       // light placed outside the scene, a positive near + a far that reaches past
       // the scene captures all casters (matches the working scene207 setup).

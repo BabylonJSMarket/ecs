@@ -136,6 +136,15 @@ export interface DirectionalLightSpec {
     mapSize: number;
     minZ: number;
     maxZ: number;
+    /**
+     * Half-width, world units, of the square the shadow map covers, centred on
+     * the light's axis. The whole map is spread over 2·extent, so this sets the
+     * shadow's sharpness: a 2.5 m pool table under the 50 m default box gets
+     * about 1 cm per texel and soft, faint shadows. Omit it for each adapter's
+     * old fit (Babylon ±25, Three maxZ / 3). Babylon Lite fits its box to the
+     * casters and ignores it.
+     */
+    extent?: number;
   };
 }
 

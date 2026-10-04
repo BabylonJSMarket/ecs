@@ -944,6 +944,21 @@ export function runRendererAdapterContract(
         expect(() => adapter.detachShadowCaster(caster)).not.toThrow();
         expect(() => adapter.setMeshReceiveShadows(mesh, true)).not.toThrow();
       });
+
+      it('accepts a shadow extent sized to the scene', () => {
+        // A pool table is 2.5 m across; the old fixed 50 m box made its
+        // shadows a texel or two wide. Every adapter must take the field.
+        const light = adapter.createDirectionalLight('lamp', {
+          direction: [0, -1, 0],
+          position: [0, 4, 0],
+          intensity: 1,
+          diffuse: [1, 1, 1],
+          specular: [1, 1, 1],
+          shadow: { enabled: true, mapSize: 512, minZ: 1, maxZ: 8, extent: 1.8 },
+        });
+        const mesh = adapter.createMesh('ball', { kind: 'sphere' });
+        expect(() => adapter.detachShadowCaster(adapter.attachShadowCaster(light, mesh))).not.toThrow();
+      });
     });
 
     // ---------------------------------------------------------------------

@@ -591,3 +591,45 @@ describe('BabylonAdapter frame timings', () => {
     expect(engine.onEndFrameObservable.hasObservers()).toBe(false);
   });
 });
+
+/**
+ * The shadow map covers a square 2·extent wide around the light's axis, so the
+ * extent decides how sharp a shadow is. Absent, the old ±25 box stays, so no
+ * existing scene changes.
+ */
+describe('BabylonAdapter directional shadow extent', () => {
+  function headless(): BabylonAdapter {
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    return adapter;
+  }
+  const light = (adapter: BabylonAdapter, id: string) =>
+    adapter.scene!.lights.find((l) => l.name === `DirectionalLight_${id}`) as unknown as {
+      orthoLeft: number;
+      orthoRight: number;
+      orthoTop: number;
+      orthoBottom: number;
+    };
+  const spec = (extent?: number) => ({
+    direction: [0, -1, 0] as [number, number, number],
+    intensity: 1,
+    diffuse: [1, 1, 1] as [number, number, number],
+    specular: [1, 1, 1] as [number, number, number],
+    shadow: { enabled: true, mapSize: 512, minZ: 0, maxZ: 10, ...(extent === undefined ? {} : { extent }) },
+  });
+
+  it('defaults to the old ±25 box', () => {
+    const adapter = headless();
+    adapter.createDirectionalLight('sun', spec());
+    const l = light(adapter, 'sun');
+    expect([l.orthoLeft, l.orthoRight, l.orthoTop, l.orthoBottom]).toEqual([-25, 25, 25, -25]);
+  });
+
+  it('honours the extent', () => {
+    const adapter = headless();
+    adapter.createDirectionalLight('lamp', spec(1.8));
+    const l = light(adapter, 'lamp');
+    expect([l.orthoLeft, l.orthoRight, l.orthoTop, l.orthoBottom]).toEqual([-1.8, 1.8, 1.8, -1.8]);
+  });
+});
