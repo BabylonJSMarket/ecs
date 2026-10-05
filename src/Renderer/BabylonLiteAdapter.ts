@@ -26,6 +26,7 @@
 
 import type * as BLNS from '@babylonjs/lite';
 import * as BL from '@babylonjs/lite';
+import { mirrorZ } from './meshGeometry';
 
 import type {
   ArcCameraSpec,
@@ -42,6 +43,7 @@ import type {
   LoadModelTemplateOptions,
   MaterialSpec,
   MeshHandle,
+  MeshGeometry,
   MeshLoadResult,
   MeshLoadSpec,
   ModelInstantiateSpec,
@@ -484,6 +486,16 @@ export class BabylonLiteAdapter implements RendererAdapter {
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.visible = visible;
+  }
+  setMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
+    const mesh = this.meshes.get(h);
+    const engine = this.engine;
+    if (!mesh || !engine) return;
+    // Lite runs left-handed (it negates z everywhere), so mirror the data, and
+    // drop the scale a non-uniform box was faked with: the data is to size.
+    const m = mirrorZ(geom);
+    BL.resizeMeshGeometry(engine, mesh, m.positions, m.normals, m.indices, m.uvs);
+    mesh.scaling.set(1, 1, 1);
   }
   getMeshWorldPosition(h: MeshHandle, out: Vec3): Vec3 {
     const mesh = this.meshes.get(h);

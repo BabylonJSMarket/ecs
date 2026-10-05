@@ -241,6 +241,24 @@ export function runRendererAdapterContract(
         }).not.toThrow();
       });
 
+      it('setMeshGeometry swaps the shape and keeps the handle; an unknown handle is a no-op', () => {
+        const h = adapter.createMesh('shape', { kind: 'box', width: 4, height: 1, depth: 2 }, mat);
+        // A 2 × 3 × 1 wedge: one triangle on each end and the three faces between.
+        const geom = {
+          positions: [0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 1, 2, 0, 1, 0, 3, 1],
+          indices: [0, 2, 1, 3, 4, 5, 0, 1, 4, 0, 4, 3, 0, 3, 5, 0, 5, 2, 1, 2, 5, 1, 5, 4],
+        };
+        expect(() => adapter.setMeshGeometry(h, geom)).not.toThrow();
+        expect(() => adapter.setMeshPosition(h, 1, 2, 3)).not.toThrow();
+        const box = adapter.getMeshBoundingBoxExtents(h);
+        if (box) {
+          expect(box.max[0] - box.min[0]).toBeCloseTo(2, 3);
+          expect(box.max[1] - box.min[1]).toBeCloseTo(3, 3);
+          expect(box.max[2] - box.min[2]).toBeCloseTo(1, 3);
+        }
+        expect(() => adapter.setMeshGeometry({} as never, geom)).not.toThrow();
+      });
+
       it('disposeMesh does not throw, and adapter remains usable afterward', () => {
         const h = adapter.createMesh('hero', prim, mat);
         expect(() => adapter.disposeMesh(h)).not.toThrow();

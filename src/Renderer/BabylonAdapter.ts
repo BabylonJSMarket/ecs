@@ -46,6 +46,7 @@ import {
   PhysicsMotionType,
   PhysicsViewer,
   HavokPlugin,
+  PhysicsPrestepType,
   BoundingInfo,
   VertexData,
   VertexBuffer,
@@ -56,6 +57,7 @@ import {
   SceneInstrumentation,
   EngineInstrumentation,
 } from '@babylonjs/core';
+import { computeNormals } from './meshGeometry';
 import type { AssetContainer, AudioEngineV2, Bone, Camera as BabylonCamera, InstancedMesh, InstantiatedEntries, Node, PostProcess, RenderTargetTexture, StaticSound, TransformNode } from '@babylonjs/core';
 import type { Observer, PhysicsBody } from '@babylonjs/core';
 import '@babylonjs/loaders';
@@ -80,6 +82,7 @@ import type {
   LightHandle,
   MaterialSpec,
   MeshHandle,
+  MeshGeometry,
   MeshLoadResult,
   MeshLoadSpec,
   LoadModelTemplateOptions,
@@ -208,6 +211,15 @@ export class BabylonAdapter implements RendererAdapter {
   private havokPlugin: HavokPlugin | null = null;
   /** Timestep saved while physics is paused via `physicsSetPaused`. */
   private savedTimeStep: number | null = null;
+  /**
+   * Physics substep rate (Hz); 0 = one Havok step per frame. Babylon's own
+   * engine steps once per frame whatever `setTimeStep` says (the plugin runs
+   * with `useDeltaForWorldStep`), so substeps are done here, in `stepPhysics`.
+   */
+  private physicsHz = 0;
+  private physicsPaused = false;
+  /** Each kinematic body's pose at the end of the last step, to sweep from. */
+  private kinematicPrev = new Map<PhysicsBody, { p: Vector3; q: Quaternion }>();
   private havokReady = false;
   private havokInitPromise: Promise<void> | null = null;
   /** Pending create requests queued while Havok is still initializing. */
@@ -566,6 +578,25 @@ export class BabylonAdapter implements RendererAdapter {
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.isVisible = visible;
+  }
+  setMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
+    const mesh = this.meshes.get(h) as Mesh | undefined;
+    if (!mesh || typeof (mesh as Mesh).setVerticesData !== 'function') return;
+    const vd = new VertexData();
+    vd.positions = Array.from(geom.positions);
+    // Babylon's front face is clockwise seen from outside (its own builders
+    // wind that way, right-handed scene or not); the data is counter-clockwise.
+    const idx = Array.from(geom.indices);
+    for (let i = 0; i + 2 < idx.length; i += 3) {
+      const t = idx[i + 1]!;
+      idx[i + 1] = idx[i + 2]!;
+      idx[i + 2] = t;
+    }
+    vd.indices = idx;
+    vd.normals = Array.from(geom.normals ?? computeNormals(geom.positions, geom.indices));
+    if (geom.uvs) vd.uvs = Array.from(geom.uvs);
+    vd.applyToMesh(mesh, true);
+    mesh.refreshBoundingInfo();
   }
   getMeshWorldPosition(h: MeshHandle, out: Vec3): Vec3 {
     const mesh = this.meshes.get(h);
@@ -2281,6 +2312,8 @@ export class BabylonAdapter implements RendererAdapter {
         // adapters only simulate rigid-body contacts. Start Havok with a
         // standard downward gravity; pure-core side overrides per scene.
         scene.enablePhysics(new Vector3(0, -30, 0), this.havokPlugin);
+        const engine = scene.getPhysicsEngine() as unknown as { _step(delta: number): void } | null;
+        if (engine) engine._step = (delta: number) => this.stepPhysics(delta);
         this.havokReady = true;
         // Drain queued creates now that the engine is live.
         const pending = this.pendingPhysicsCreates;
@@ -2352,6 +2385,10 @@ export class BabylonAdapter implements RendererAdapter {
     if (opts.motionType === 'kinematic') {
       aggregate.body.setMotionType(PhysicsMotionType.ANIMATED);
       aggregate.body.disablePreStep = false;
+      // ACTION, not the default TELEPORT: Havok gives the body the velocity
+      // that carries it to its new pose, so it HITS what it meets. A teleported
+      // flipper arrives with zero speed and only shoves the ball out of the way.
+      aggregate.body.setPrestepType(PhysicsPrestepType.ACTION);
     }
 
     if (opts.lockRotation) {
@@ -2374,6 +2411,7 @@ export class BabylonAdapter implements RendererAdapter {
     const aggregate = this.physicsAggregates.get(meshId);
     if (!aggregate) return;
     this.bodyMeshIds.delete(aggregate.body);
+    this.kinematicPrev.delete(aggregate.body);
     aggregate.dispose();
     this.physicsAggregates.delete(meshId);
   }
@@ -2411,6 +2449,44 @@ export class BabylonAdapter implements RendererAdapter {
     }
   }
 
+  /**
+   * One frame of physics, split into substeps at `physicsHz`. Each kinematic
+   * body (a flipper) is moved the same share of the way on every substep, so
+   * Havok sees it travel at one steady speed and hits the ball with it. Moved
+   * all at once, it would cover the whole frame's swing in the first substep,
+   * at n times the speed, and sit still for the rest.
+   */
+  private stepPhysics(delta: number): void {
+    const plugin = this.havokPlugin;
+    const engine = this.scene?.getPhysicsEngine();
+    if (!plugin || !engine || this.physicsPaused) return;
+    if (delta > 0.1) delta = 0.1;
+    else if (delta <= 0) delta = 1 / 60;
+    const n = this.physicsHz > 0 ? Math.min(16, Math.max(1, Math.ceil(delta * this.physicsHz - 1e-6))) : 1;
+    const bodies = (engine as unknown as { getBodies(): PhysicsBody[] }).getBodies();
+    const kinematic: Array<{ body: PhysicsBody; node: TransformNode; from: { p: Vector3; q: Quaternion }; p: Vector3; q: Quaternion }> = [];
+    for (const body of bodies) {
+      if (body.getMotionType() !== PhysicsMotionType.ANIMATED) continue;
+      const node = body.transformNode;
+      const q = node.rotationQuaternion ?? Quaternion.FromEulerVector(node.rotation);
+      const now = { p: node.position.clone(), q: q.clone() };
+      const from = this.kinematicPrev.get(body) ?? now;
+      kinematic.push({ body, node, from, p: now.p, q: now.q });
+      this.kinematicPrev.set(body, now);
+    }
+    for (let i = 1; i <= n; i++) {
+      if (n > 1) {
+        const t = i / n;
+        for (const k of kinematic) {
+          Vector3.LerpToRef(k.from.p, k.p, t, k.node.position);
+          if (k.node.rotationQuaternion) Quaternion.SlerpToRef(k.from.q, k.q, t, k.node.rotationQuaternion);
+          k.node.computeWorldMatrix(true);
+        }
+      }
+      plugin.executeStep(delta / n, bodies);
+    }
+  }
+
   physicsStep(_dt: number): void {
     // Havok advances during `scene.render`. Exposed as a no-op so the System
     // can call it uniformly across adapters.
@@ -2418,6 +2494,7 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   physicsSetPaused(paused: boolean): void {
+    this.physicsPaused = paused;
     if (!this.havokPlugin) return;
     if (paused) {
       // Save the live rate once and freeze the sim. `scene.render` still runs
@@ -2502,6 +2579,7 @@ export class BabylonAdapter implements RendererAdapter {
       return;
     }
     this.havokPlugin.setTimeStep(1 / hz);
+    this.physicsHz = hz;
   }
 
   // ─── Phase-3: procedural seeded geometry ───

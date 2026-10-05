@@ -50,6 +50,19 @@ export type TextureHandle = { readonly __texture: unique symbol };
  */
 export type SoundHandle = { readonly __sound: unique symbol };
 
+/**
+ * Raw triangle data for {@link RendererAdapter.setMeshGeometry}, in the
+ * mesh's local space: three numbers per vertex, three indices per triangle,
+ * counter-clockwise seen from outside (+Y up, +Z toward the camera's rest).
+ * Omit `normals` and the adapter computes smooth ones from the triangles.
+ */
+export interface MeshGeometry {
+  positions: ArrayLike<number>;
+  indices: ArrayLike<number>;
+  normals?: ArrayLike<number>;
+  uvs?: ArrayLike<number>;
+}
+
 export interface PrimitiveSpec {
   kind: 'box' | 'sphere' | 'cylinder' | 'capsule' | 'ground' | 'torus' | 'disc' | 'plane' | 'tube';
   width?: number;
@@ -1109,6 +1122,17 @@ export interface RendererAdapter {
   setMeshBillboardMode(h: MeshHandle, mode: BillboardMode): void;
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void;
   setMeshVisible(h: MeshHandle, visible: boolean): void;
+  /**
+   * Replace a mesh's geometry with vertex data in its own local space. The
+   * mesh keeps its handle, transform, material, shadows and physics body; only
+   * the shape changes. This is how a component draws a shape no primitive
+   * has (a lathed pop bumper, a slingshot's rubber ring, a wall with round
+   * joints): it builds the vertices in pure code it can test, then hands them
+   * over. Callers: Flipper, Slingshot, Bumper, PinballWall. A non-uniform
+   * primitive scale the adapter applied at creation is reset to 1, so the
+   * data is drawn at the size it describes. Unknown handle: no-op.
+   */
+  setMeshGeometry(h: MeshHandle, geom: MeshGeometry): void;
   getMeshWorldPosition(h: MeshHandle, out: Vec3): Vec3;
   /**
    * Force the local-space bounding box reported by the mesh to the given

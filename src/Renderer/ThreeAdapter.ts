@@ -31,6 +31,7 @@ import type {
   LightHandle,
   MaterialSpec,
   MeshHandle,
+  MeshGeometry,
   MeshLoadResult,
   MeshLoadSpec,
   LoadModelTemplateOptions,
@@ -600,6 +601,21 @@ export class ThreeAdapter implements RendererAdapter {
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
     if (mesh) mesh.visible = visible;
+  }
+  setMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
+    const mesh = this.meshes.get(h) as THREE.Mesh | undefined;
+    const T = this.THREE;
+    if (!mesh || !T || !(mesh as THREE.Mesh).geometry) return;
+    const next = new T.BufferGeometry();
+    next.setAttribute('position', new T.Float32BufferAttribute(Array.from(geom.positions), 3));
+    next.setIndex(Array.from(geom.indices));
+    if (geom.normals) next.setAttribute('normal', new T.Float32BufferAttribute(Array.from(geom.normals), 3));
+    else next.computeVertexNormals();
+    if (geom.uvs) next.setAttribute('uv', new T.Float32BufferAttribute(Array.from(geom.uvs), 2));
+    next.computeBoundingBox();
+    next.computeBoundingSphere();
+    mesh.geometry.dispose();
+    mesh.geometry = next;
   }
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
     const m = this.meshes.get(h);

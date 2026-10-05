@@ -17,6 +17,7 @@ import type {
   LightHandle,
   MaterialSpec,
   MeshHandle,
+  MeshGeometry,
   MeshLoadResult,
   MeshLoadSpec,
   LoadModelTemplateOptions,
@@ -151,6 +152,9 @@ export class MockRendererAdapter implements RendererAdapter {
   }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     this.record('setMeshVisible', h, visible);
+  }
+  setMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
+    this.record('setMeshGeometry', h, geom);
   }
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
     this.record('setMeshScale', h, sx, sy, sz);
