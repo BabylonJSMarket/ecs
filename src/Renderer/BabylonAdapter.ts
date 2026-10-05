@@ -222,6 +222,8 @@ export class BabylonAdapter implements RendererAdapter {
   private kinematicPrev = new Map<PhysicsBody, { p: Vector3; q: Quaternion }>();
   private havokReady = false;
   private havokInitPromise: Promise<void> | null = null;
+  /** The scene's gravity, held so Havok boots with it however early it was set. */
+  private gravity = new Vector3(0, -30, 0);
   /** Pending create requests queued while Havok is still initializing. */
   private pendingPhysicsCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
   /** Body → the mesh id it was created for, so a query hit can name an entity. */
@@ -2308,10 +2310,9 @@ export class BabylonAdapter implements RendererAdapter {
     this.havokInitPromise = HavokPhysics()
       .then((havokInstance) => {
         this.havokPlugin = new HavokPlugin(true, havokInstance);
-        // Gravity comes from the world-level params on the Physics core —
-        // adapters only simulate rigid-body contacts. Start Havok with a
-        // standard downward gravity; pure-core side overrides per scene.
-        scene.enablePhysics(new Vector3(0, -30, 0), this.havokPlugin);
+        // Standard downward gravity, unless physicsSetGravity asked for
+        // another before the engine was up.
+        scene.enablePhysics(this.gravity.clone(), this.havokPlugin);
         const engine = scene.getPhysicsEngine() as unknown as { _step(delta: number): void } | null;
         if (engine) engine._step = (delta: number) => this.stepPhysics(delta);
         this.havokReady = true;
@@ -2423,7 +2424,12 @@ export class BabylonAdapter implements RendererAdapter {
   }
 
   physicsSetGravity(x: number, y: number, z: number): void {
-    this.scene?.getPhysicsEngine()?.setGravity(new Vector3(x, y, z));
+    // Kept, not just forwarded: a call made while the Havok WASM is still
+    // loading has no engine to land on, and Havok then booted with plain
+    // downward gravity. A pinball table set its tilt on its first tick, lost
+    // it, and the ball rolled up the table. ensureHavok starts from this.
+    this.gravity.set(x, y, z);
+    this.scene?.getPhysicsEngine()?.setGravity(this.gravity.clone());
   }
 
   physicsSetRestitution(meshId: string, restitution: number): void {
@@ -3300,6 +3306,7 @@ export class BabylonAdapter implements RendererAdapter {
     this.havokPlugin = null;
     this.havokReady = false;
     this.havokInitPromise = null;
+    this.gravity.set(0, -30, 0);
     this.scene?.dispose();
     this.engine?.dispose();
     this.scene = undefined;
