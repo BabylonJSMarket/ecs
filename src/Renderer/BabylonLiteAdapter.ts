@@ -207,6 +207,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private havokWorld: BLNS.PhysicsWorld | null = null;
   private havokReady = false;
   private havokInitPromise: Promise<void> | null = null;
+  /** The scene's gravity, held so the world is created with it however early it was set. */
+  private gravity: BLNS.Vec3 = { x: 0, y: -30, z: 0 };
   private pendingPhysicsCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
   private aggregates = new Map<string, BLNS.PhysicsAggregate>();
   private physicsViewer: BLNS.PhysicsViewer | null = null;
@@ -1392,7 +1394,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.havokInitPromise = import('@babylonjs/havok')
       .then((mod) => (mod.default ?? (mod as unknown as () => Promise<unknown>))())
       .then((hk) => {
-        this.havokWorld = BL.createHavokWorld(scene, hk, { x: 0, y: -30, z: 0 });
+        this.havokWorld = BL.createHavokWorld(scene, hk, { ...this.gravity });
         this.havokReady = true;
         const pending = this.pendingPhysicsCreates;
         this.pendingPhysicsCreates = [];
@@ -1452,8 +1454,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   physicsSetGravity(x: number, y: number, z: number): void {
-    // Gravity is set at world creation; Lite exposes no runtime gravity setter.
-    void x; void y; void z;
+    // Kept as well as applied, so a call made while the WASM is still loading
+    // becomes the gravity the world is created with (see BabylonAdapter).
+    this.gravity = { x, y, z };
+    if (this.havokWorld) BL.setPhysicsGravity(this.havokWorld, { ...this.gravity });
   }
 
   physicsStep(dt: number): void {
@@ -1853,6 +1857,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.havokWorld = null;
     this.havokReady = false;
     this.havokInitPromise = null;
+    this.gravity = { x: 0, y: -30, z: 0 };
     this.savedTimestep = null;
     this.aggregates.clear();
     this.pendingPhysicsCreates = [];
