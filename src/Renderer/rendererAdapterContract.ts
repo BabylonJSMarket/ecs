@@ -687,6 +687,21 @@ export function runRendererAdapterContract(
         expect(out[2]).toBeCloseTo(9, 5);
       });
 
+      // An orbit camera keeps its angles and distance when its target moves: it
+      // carries the camera along. Babylon's `setTarget` and Three's OrbitControls
+      // instead hold the camera's POSITION and re-aim it, so a scrolling or
+      // following target swung the view round (a pinball camera sliding up a
+      // tall table ended up looking back down it).
+      it('setCameraTarget moves the camera with its target: alpha, beta and radius hold', () => {
+        const h = adapter.createArcCamera('main', camSpec);
+        const before = adapter.getCameraAngles(h);
+        adapter.setCameraTarget(h, 1, 2, 23);
+        const after = adapter.getCameraAngles(h);
+        expect(after.alpha).toBeCloseTo(before.alpha, 5);
+        expect(after.beta).toBeCloseTo(before.beta, 5);
+        expect(after.radius).toBeCloseTo(before.radius, 5);
+      });
+
       it('nudgeCameraAlpha increases alpha by the delta', () => {
         const h = adapter.createArcCamera('main', camSpec);
         const before = adapter.getCameraAngles(h).alpha;

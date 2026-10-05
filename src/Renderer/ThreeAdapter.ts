@@ -1685,8 +1685,14 @@ export class ThreeAdapter implements RendererAdapter {
   setCameraTarget(h: CameraHandle, x: number, y: number, z: number): void {
     const entry = this.cameras.get(h);
     if (!entry) return;
-    const ctrl = entry.controls as { target: { set(x: number, y: number, z: number): void }; update(): void } | undefined;
+    const ctrl = entry.controls as { target: THREE.Vector3; update(): void } | undefined;
     if (ctrl) {
+      // Carry the camera by the same step as its target, so the orbit (alpha,
+      // beta, radius) holds. OrbitControls on its own keeps the camera where it
+      // is and re-aims it.
+      entry.camera.position.x += x - ctrl.target.x;
+      entry.camera.position.y += y - ctrl.target.y;
+      entry.camera.position.z += z - ctrl.target.z;
       ctrl.target.set(x, y, z);
       ctrl.update();
     } else {

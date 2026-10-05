@@ -1642,7 +1642,10 @@ export class BabylonAdapter implements RendererAdapter {
   }
   setCameraTarget(h: CameraHandle, x: number, y: number, z: number): void {
     const cam = this.cameras.get(h);
-    if (cam) cam.setTarget(new Vector3(x, y, z));
+    // cloneAlphaBetaRadius: keep the orbit and carry the camera with the
+    // target. The default rebuilds the angles from where the camera already
+    // is, which re-aims a fixed camera instead of moving it.
+    if (cam) cam.setTarget(new Vector3(x, y, z), false, false, true);
   }
   getCameraTarget(h: CameraHandle, out: Vec3): Vec3 {
     const cam = this.cameras.get(h);
