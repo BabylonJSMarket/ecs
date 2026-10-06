@@ -680,10 +680,15 @@ export class ThreeAdapter implements RendererAdapter {
     }
     mesh.geometry.dispose();
     const mat = mesh.material;
-    if (Array.isArray(mat)) {
-      mat.forEach((m) => m.dispose());
-    } else {
-      (mat as THREE.Material | undefined)?.dispose();
+    const mats = (Array.isArray(mat) ? mat : mat ? [mat] : []) as THREE.Material[];
+    // Material.dispose() leaves its maps alive. The ones a material loaded for
+    // itself die with it (or every repainted floor leaks its texture); the
+    // adapter's own handles (this.textures) are shared and stay.
+    const shared = new Set(this.textures.values());
+    for (const m of mats) {
+      const s = m as THREE.MeshStandardMaterial;
+      for (const t of [s.map, s.normalMap, s.roughnessMap, s.aoMap]) if (t && !shared.has(t)) t.dispose();
+      m.dispose();
     }
     this.scene?.remove(mesh);
     this.meshes.delete(h);

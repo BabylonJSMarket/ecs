@@ -59,7 +59,7 @@ import {
 } from '@babylonjs/core';
 import { computeNormals } from './meshGeometry';
 import type { AssetContainer, AudioEngineV2, Bone, Camera as BabylonCamera, InstancedMesh, InstantiatedEntries, Node, PostProcess, RenderTargetTexture, StaticSound, TransformNode } from '@babylonjs/core';
-import type { Observer, PhysicsBody } from '@babylonjs/core';
+import type { BaseTexture, Observer, PhysicsBody } from '@babylonjs/core';
 import '@babylonjs/loaders';
 // GPU particle backends — registered as side effects so GPUParticleSystem can
 // auto-select on a WebGL2/WebGPU device. Inert (and unused) under NullEngine,
@@ -649,7 +649,13 @@ export class BabylonAdapter implements RendererAdapter {
       // A SHARED material outlives the mesh wearing it — see sharedRockMaterial.
       // Disposing it with the first rock to die would strip the whole field.
       if (mesh.material && !sharedMaterialRegistry.has(mesh.material)) {
+        // Material.dispose() leaves its textures alive. The ones a material
+        // built for itself (buildTexturedPbrMaterial) die with it, or every
+        // repainted floor leaks its whole texture; the adapter's own handles
+        // (this.textures) are shared and stay.
+        const own = mesh.material.getActiveTextures().filter((t) => !this.isRegisteredTexture(t));
         mesh.material.dispose();
+        for (const t of own) t.dispose();
       }
       mesh.dispose();
       this.meshes.delete(h);
@@ -1317,6 +1323,11 @@ export class BabylonAdapter implements RendererAdapter {
    */
   getTextureObject(h: TextureHandle): Texture | undefined {
     return this.textures.get(h);
+  }
+  /** Is this one of the adapter's own texture handles (shared, disposed with the adapter)? */
+  private isRegisteredTexture(t: BaseTexture): boolean {
+    for (const own of this.textures.values()) if (own === t) return true;
+    return false;
   }
   /**
    * The billboarded plane behind a label handle, for a plugin that needs a

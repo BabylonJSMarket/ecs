@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { MeshBuilder, NullEngine, Scene, Vector3 } from '@babylonjs/core';
+import { MeshBuilder, NullEngine, PBRMaterial, Scene, Vector3 } from '@babylonjs/core';
 import { GPUParticleSystem } from '@babylonjs/core';
 import type { ParticleSystem } from '@babylonjs/core';
 import type { AbstractMesh, DeepImmutable, GlowLayer } from '@babylonjs/core';
@@ -633,3 +633,42 @@ describe('BabylonAdapter directional shadow extent', () => {
     expect([l.orthoLeft, l.orthoRight, l.orthoTop, l.orthoBottom]).toEqual([-1.8, 1.8, 1.8, -1.8]);
   });
 });
+
+/**
+ * A repainted pinball floor makes a new textured ground and disposes the old
+ * one. Material.dispose() leaves the material's textures alive, so every
+ * repaint leaked a whole floor texture (15 MB of GPU memory at 768 × 3744).
+ */
+describe('BabylonAdapter disposeMesh — a textured material takes its own textures with it', () => {
+  function headless(): BabylonAdapter {
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    return adapter;
+  }
+  const PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+
+  it('leaves no texture behind after a create/dispose cycle', () => {
+    const adapter = headless()
+    // The first PBR material makes the scene's shared BRDF lookup texture; count after it.
+    adapter.disposeMesh(adapter.createMesh('warm', { kind: 'ground', width: 2, depth: 2 }, { albedoTexture: PIXEL }))
+    const before = adapter.scene!.textures.length
+    for (let i = 0; i < 3; i++) {
+      const h = adapter.createMesh(`floor${i}`, { kind: 'ground', width: 2, depth: 2 }, { albedoTexture: PIXEL })
+      adapter.disposeMesh(h)
+    }
+    expect(adapter.scene!.textures.length).toBe(before)
+  })
+
+  it('keeps a texture the adapter hands out as a shared handle', () => {
+    const adapter = headless()
+    const t = adapter.loadTexture('shared', PIXEL)
+    const h = adapter.createMesh('wearer', { kind: 'box' })
+    const own = adapter.getTextureObject(t)!
+    const mesh = (adapter as unknown as { meshes: Map<unknown, { material: { albedoTexture?: unknown } | null }> }).meshes.get(h)!
+    mesh.material = new PBRMaterial('m', adapter.scene!) as never
+    ;(mesh.material as unknown as PBRMaterial).albedoTexture = own
+    adapter.disposeMesh(h)
+    expect(adapter.scene!.textures).toContain(own)
+  })
+})
