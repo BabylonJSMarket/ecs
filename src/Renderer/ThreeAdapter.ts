@@ -523,7 +523,7 @@ export class ThreeAdapter implements RendererAdapter {
       !!mat?.albedoTexture || !!mat?.normalTexture || !!mat?.roughnessTexture || !!mat?.ambientTexture;
 
     let material: THREE.Material;
-    if (hasTextures && mat) {
+    if ((hasTextures || mat?.pbr) && mat) {
       // Textured PBR path — mirrors the Babylon `PBRMaterial` branch. A
       // MeshStandardMaterial carries map/normalMap/roughnessMap/aoMap, each
       // tiled by uScale/vScale via RepeatWrapping.
@@ -595,7 +595,8 @@ export class ThreeAdapter implements RendererAdapter {
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     const T = this.THREE;
     const mesh = this.meshes.get(h);
-    const mat = mesh?.material as THREE.MeshPhongMaterial | undefined;
+    // Phong and Standard (PBR) both carry `color`.
+    const mat = mesh?.material as THREE.MeshPhongMaterial | THREE.MeshStandardMaterial | undefined;
     if (mat?.color && T) mat.color.setRGB(r, g, b, T.SRGBColorSpace);
   }
   setMeshVisible(h: MeshHandle, visible: boolean): void {

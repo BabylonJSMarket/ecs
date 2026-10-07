@@ -514,7 +514,7 @@ export class BabylonAdapter implements RendererAdapter {
     if (mat) {
       const hasTextures =
         !!mat.albedoTexture || !!mat.normalTexture || !!mat.roughnessTexture || !!mat.ambientTexture;
-      if (hasTextures) {
+      if (hasTextures || mat.pbr) {
         mesh.material = this.buildTexturedPbrMaterial(`${id}_material`, mat, scene);
       } else {
         const material = new StandardMaterial(`${id}_material`, scene);
@@ -574,8 +574,9 @@ export class BabylonAdapter implements RendererAdapter {
   }
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     const mesh = this.meshes.get(h);
-    const material = mesh?.material as StandardMaterial | null;
-    if (material) material.diffuseColor = new Color3(r, g, b);
+    const material = mesh?.material;
+    if (material instanceof PBRMaterial) material.albedoColor = new Color3(r, g, b);
+    else if (material) (material as StandardMaterial).diffuseColor = new Color3(r, g, b);
   }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
@@ -1445,8 +1446,9 @@ export class BabylonAdapter implements RendererAdapter {
    * Build a `PBRMaterial` from a textured {@link MaterialSpec}. Mirrors how the
    * raw-Babylon arcade room wires its carpet floor: albedo + normal (bump) +
    * roughness (as the green channel of the metallic texture) + AO (ambient),
-   * each tiled by `uScale`/`vScale`. Called only when at least one texture URL
-   * is present; the flat-color path stays on `StandardMaterial`.
+   * each tiled by `uScale`/`vScale`. Called when at least one texture URL is
+   * present or the spec asks for `pbr`; the flat-color path stays on
+   * `StandardMaterial`.
    */
   private buildTexturedPbrMaterial(name: string, mat: MaterialSpec, scene: Scene): PBRMaterial {
     const pbr = new PBRMaterial(name, scene);

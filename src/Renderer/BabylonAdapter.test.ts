@@ -672,3 +672,39 @@ describe('BabylonAdapter disposeMesh — a textured material takes its own textu
     expect(adapter.scene!.textures).toContain(own)
   })
 })
+
+describe('BabylonAdapter createMesh — pbr: true without textures', () => {
+  function headless(): BabylonAdapter {
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    return adapter;
+  }
+  const materialOf = (adapter: BabylonAdapter, h: unknown) =>
+    (adapter as unknown as { meshes: Map<unknown, { material: unknown }> }).meshes.get(h)!.material
+
+  it('builds a PBRMaterial from the colour and scalars', () => {
+    const adapter = headless()
+    const h = adapter.createMesh('heli', { kind: 'box' }, { pbr: true, diffuse: [0.2, 0.3, 0.4], metallic: 0.5, roughness: 0.35, emissive: [1, 0, 0] })
+    const m = materialOf(adapter, h) as PBRMaterial
+    expect(m).toBeInstanceOf(PBRMaterial)
+    expect(m.albedoColor.asArray()).toEqual([0.2, 0.3, 0.4])
+    expect(m.metallic).toBe(0.5)
+    expect(m.roughness).toBe(0.35)
+    expect(m.emissiveColor.asArray()).toEqual([1, 0, 0])
+  })
+
+  it('keeps an untextured spec without the flag on the classic material', () => {
+    const adapter = headless()
+    const h = adapter.createMesh('box', { kind: 'box' }, { diffuse: [1, 1, 1], metallic: 0.5 })
+    expect(materialOf(adapter, h)).not.toBeInstanceOf(PBRMaterial)
+  })
+
+  it('setMeshColor recolours a PBR surface', () => {
+    const adapter = headless()
+    const h = adapter.createMesh('heli', { kind: 'box' }, { pbr: true, diffuse: [1, 1, 1] })
+    adapter.setMeshColor(h, 0.1, 0.6, 0.2)
+    expect((materialOf(adapter, h) as PBRMaterial).albedoColor.asArray()).toEqual([0.1, 0.6, 0.2])
+  })
+})
+

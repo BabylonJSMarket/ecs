@@ -119,6 +119,14 @@ export interface MaterialSpec {
   /** PBR scalars, applied only on the textured/PBR path. */
   metallic?: number;
   roughness?: number;
+  /**
+   * Build the physically-based material even with no texture: `diffuse` becomes
+   * the base colour, `metallic`/`roughness` apply, and the surface takes its
+   * light from the scene's HDR environment like a loaded glTF model does.
+   * Without it an untextured surface stays on the classic flat-colour material,
+   * which lights differently and looks out of place beside PBR models.
+   */
+  pbr?: boolean;
   /** Texture tiling repeated across the surface (UV scale). Applied to every map. */
   uScale?: number;
   vScale?: number;

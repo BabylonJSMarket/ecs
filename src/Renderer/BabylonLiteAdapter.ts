@@ -408,7 +408,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private applyMaterialSpec(mesh: LiteMesh, prim: PrimitiveSpec, mat: MaterialSpec): void {
     const hasTextures =
       !!mat.albedoTexture || !!mat.normalTexture || !!mat.roughnessTexture || !!mat.ambientTexture;
-    if (hasTextures) {
+    if (hasTextures || mat.pbr) {
       // Textured → PBR path. Texture *loading* (URL → Texture2D) needs Lite's
       // async texture loader, which isn't wired in this provisional adapter, so
       // we set scalar PBR factors only and leave the texture slots null. The

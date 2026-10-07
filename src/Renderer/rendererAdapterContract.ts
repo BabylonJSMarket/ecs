@@ -332,6 +332,17 @@ export function runRendererAdapterContract(
         }).not.toThrow();
       });
 
+      it('createMesh accepts an untextured PBR MaterialSpec and recolours it', () => {
+        // `pbr: true` builds the physically-based material from scalars alone,
+        // and setMeshColor must still reach its base colour.
+        let h: ReturnType<RendererAdapter['createMesh']> | undefined;
+        expect(() => {
+          h = adapter.createMesh('paint', { kind: 'box' }, { pbr: true, diffuse: [0.8, 0.1, 0.1], metallic: 0.3, roughness: 0.4 });
+        }).not.toThrow();
+        expect(() => adapter.setMeshColor(h!, 0.1, 0.2, 0.9)).not.toThrow();
+        expect(() => adapter.disposeMesh(h!)).not.toThrow();
+      });
+
       it('createMesh accepts a textured (PBR) MaterialSpec', () => {
         // A textured material (albedo + normal + roughness + AO, tiled) must
         // build the PBR path without throwing and yield a usable handle — this
