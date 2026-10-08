@@ -438,16 +438,15 @@ describe('EventBus', () => {
       const callback = vi.fn();
       eventBus.on('test', callback);
 
-      // emitChanged with objects filters out primitives in getDataKey
-      // This means objects with numeric/string properties serialize to {}
-      // and are all considered the same, so only the first emission goes through
+      // Each value differs from the last, so each one goes through. (It used
+      // to drop primitives, key all three as {}, and send only the first.)
       eventBus.emitChanged('test', { value: 1 });
-      eventBus.emitChanged('test', { value: 2 }); // Duplicate key {} - skipped
-      eventBus.emitChanged('test', { value: 3 }); // Duplicate key {} - skipped
+      eventBus.emitChanged('test', { value: 2 });
+      eventBus.emitChanged('test', { value: 2 }); // same as last: skipped
+      eventBus.emitChanged('test', { value: 3 });
 
-      // Only first emission goes through
-      expect(callback).toHaveBeenCalledTimes(1);
-      expect(callback).toHaveBeenCalledWith({ value: 1 });
+      expect(callback).toHaveBeenCalledTimes(3);
+      expect(callback).toHaveBeenLastCalledWith({ value: 3 });
     });
 
     it('should handle null and undefined data', () => {
@@ -494,30 +493,25 @@ describe('EventBus', () => {
       const callback = vi.fn();
       eventBus.on('test', callback);
 
-      // Primitive string values return undefined from getDataKey (JSON.stringify filters them)
-      // The first call sets lastEventData to undefined
-      // All subsequent calls with primitives also return undefined and match, so they're skipped
-      // This is a limitation: emitChanged doesn't work with primitive values
       eventBus.emitChanged('test', 'hello');
-      eventBus.emitChanged('test', 'hello');
+      eventBus.emitChanged('test', 'hello'); // same: skipped
       eventBus.emitChanged('test', 'world');
 
-      // No emissions go through because all primitives have the same dataKey (undefined)
-      expect(callback).toHaveBeenCalledTimes(0);
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(callback).toHaveBeenLastCalledWith('world');
     });
 
     it('should handle numbers as data', () => {
       const callback = vi.fn();
       eventBus.on('test', callback);
 
-      // Numbers return undefined from getDataKey (JSON.stringify filters them)
-      // This is a limitation: emitChanged doesn't work with primitive number values
       eventBus.emitChanged('test', 42);
-      eventBus.emitChanged('test', 42);
+      eventBus.emitChanged('test', 42); // same: skipped
       eventBus.emitChanged('test', 100);
+      eventBus.emitChanged('test', true);
+      eventBus.emitChanged('test', false);
 
-      // No emissions go through because all numbers have the same dataKey (undefined)
-      expect(callback).toHaveBeenCalledTimes(0);
+      expect(callback).toHaveBeenCalledTimes(4);
     });
 
     it('should reset deduplication cache on clear', () => {

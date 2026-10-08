@@ -406,7 +406,7 @@ export class EventBus {
     try {
       // Track seen objects to handle circular references
       const seen = new WeakSet();
-      return JSON.stringify(data, (key, value) => {
+      const key = JSON.stringify(data, (_key, value) => {
         // Detect circular references
         if (typeof value === "object" && value !== null) {
           if (seen.has(value)) {
@@ -416,12 +416,22 @@ export class EventBus {
         }
         // Skip functions - they can't be compared
         if (typeof value === "function") return undefined;
-        // Skip class instances (keep only plain objects and arrays)
-        if (value?.constructor?.name && !["Object", "Array"].includes(value.constructor.name)) {
+        // Skip class instances (keep only plain objects and arrays). Only
+        // objects: a number's constructor is Number, and testing primitives
+        // here dropped every number, string and boolean, so { value: 1 } and
+        // { value: 2 } both keyed as "{}" and only the first ever emitted.
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          value.constructor?.name &&
+          !["Object", "Array"].includes(value.constructor.name)
+        ) {
           return undefined;
         }
         return value;
       });
+      // A bare function (or anything JSON can't express) has no key: always emit.
+      return key === undefined ? null : key;
     } catch {
       return null; // Return null if stringification fails
     }
