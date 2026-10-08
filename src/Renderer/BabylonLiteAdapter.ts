@@ -211,6 +211,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private gravity: BLNS.Vec3 = { x: 0, y: -30, z: 0 };
   private pendingPhysicsCreates: Array<{ meshId: string; opts: PhysicsBodyOpts }> = [];
   private aggregates = new Map<string, BLNS.PhysicsAggregate>();
+  /** Reverse of `aggregates`: casts report a body, plugins need its meshId. */
+  private bodyMeshIds = new Map<BLNS.PhysicsBody, string>();
   private physicsViewer: BLNS.PhysicsViewer | null = null;
   private savedTimestep: number | null = null;
   /** Animation groups keyed by `${meshId}/${clipName}`, registered at load time. */
@@ -1226,6 +1228,37 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return this.extensions.get(name) as T | undefined;
   }
 
+  // Engine-typed host accessors for adapter plugins — the Lite twins of
+  // BabylonAdapter's. They live on the CLASS, not the RendererAdapter
+  // interface: holding a SceneContext or a PhysicsBody is a plugin's business.
+  // Every value they hand out is in Lite's LEFT-handed frame; a plugin that
+  // writes positions negates Z itself, as this adapter does.
+
+  /** The live Lite SceneContext, or null before init(). The engine is `scene.surface.engine`, or {@link getEngine}. */
+  getScene(): BLNS.SceneContext | null {
+    return this.scene ?? null;
+  }
+  /** The Lite EngineContext (GPU device, texture uploads), or null before init(). */
+  getEngine(): BLNS.EngineContext | null {
+    return this.engine ?? null;
+  }
+  /** The ArcRotateCamera behind a handle, for the ArcCamera plugin's pitch. */
+  getOrbitCamera(h: CameraHandle): BLNS.ArcRotateCamera | null {
+    return this.cameras.get(h)?.camera ?? null;
+  }
+  /** The Havok body on a mesh, for the Physics plugin's body controls. */
+  getPhysicsBody(meshId: string): BLNS.PhysicsBody | null {
+    return this.aggregates.get(meshId)?.body ?? null;
+  }
+  /** The Havok world, or null until the WASM has landed — Lite's twin of BabylonAdapter.getHavokPlugin. */
+  getHavokWorld(): BLNS.PhysicsWorld | null {
+    return this.havokReady ? this.havokWorld : null;
+  }
+  /** Which mesh a cast result's body belongs to — casts report bodies, not ids. */
+  getMeshIdForBody(body: BLNS.PhysicsBody): string | undefined {
+    return this.bodyMeshIds.get(body);
+  }
+
   async loadModelTemplate(
     url: string,
     opts?: LoadModelTemplateOptions,
@@ -1439,12 +1472,15 @@ export class BabylonLiteAdapter implements RendererAdapter {
       BL.setPhysicsBodyPreStep(agg.body, false);
     }
     this.aggregates.set(meshId, agg);
+    this.bodyMeshIds.set(agg.body, meshId);
     return true;
   }
 
   physicsDestroyBody(meshId: string): void {
     // Lite exposes no per-body removal; drop our handle (the body is reclaimed
     // when the world is disposed). Acceptable for entity churn in a single scene.
+    const agg = this.aggregates.get(meshId);
+    if (agg) this.bodyMeshIds.delete(agg.body);
     this.aggregates.delete(meshId);
   }
 
@@ -1860,6 +1896,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.gravity = { x: 0, y: -30, z: 0 };
     this.savedTimestep = null;
     this.aggregates.clear();
+    this.bodyMeshIds.clear();
     this.pendingPhysicsCreates = [];
     if (this.scene) BL.disposeScene(this.scene);
     if (this.engine) BL.disposeEngine(this.engine);
