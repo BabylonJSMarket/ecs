@@ -25,7 +25,7 @@ function fakeRenderer() {
     setClearColor: vi.fn(),
     setRenderTarget: vi.fn((t: unknown) => calls.push(t === null ? 'screen' : 'target')),
     clear: vi.fn(),
-    render: vi.fn((s: THREE.Object3D) => calls.push(s.type)),
+    render: vi.fn((s: THREE.Object3D): void => void calls.push(s.type)),
   };
   return { r, calls };
 }
@@ -91,13 +91,13 @@ describe('SelectiveBloomPass', () => {
     for (const m of [glowing, multi, empty]) m.layers.enable(GLOW_LAYER_INDEX);
     scene.add(glowing, multi, empty);
     pass.prepareScene();
-    expect((glowing.material as THREE.MeshBasicMaterial).map).toBe(map);
+    expect((glowing.material as unknown as THREE.MeshBasicMaterial).map).toBe(map);
     expect(Array.isArray(multi.material)).toBe(true);
     pass.restoreScene();
     // Second frame reuses the same stand-in.
     lit.emissiveIntensity = undefined as unknown as number;
     pass.prepareScene();
-    expect((glowing.material as THREE.MeshBasicMaterial).map).toBe(map);
+    expect((glowing.material as unknown as THREE.MeshBasicMaterial).map).toBe(map);
     pass.restoreScene();
     expect(glowing.material).toBe(lit);
   });
