@@ -9,7 +9,7 @@
  * touched (see BabylonLiteAdapter.gravity.test for the same pattern).
  */
 import { describe, it, expect, vi } from 'vitest';
-import type { CameraHandle, MeshHandle, ParticleEmitterSpec, TextureHandle } from './types';
+import type { CameraHandle, LightHandle, MeshHandle, ParticleEmitterSpec, TextureHandle } from './types';
 
 vi.hoisted(() => {
   // Lite's bundle reads these at module init (see BabylonLiteAdapter.contract.test).
@@ -40,6 +40,7 @@ vi.mock('@babylonjs/lite', async (importOriginal) => ({
     Object.assign(sys.sprites[i]!, patch);
   }),
   updateTexture2DFromPixels: vi.fn(),
+  setShadowTaskCasterMeshes: vi.fn(),
 }));
 
 const { BabylonLiteAdapter } = await import('./BabylonLiteAdapter');
@@ -150,6 +151,96 @@ describe('BabylonLiteAdapter plugin host accessors', () => {
     build(scene);
     await new Promise((r) => setTimeout(r, 0));
     expect(rebuilt).toBe(1);
+  });
+
+  it('drops a queued mesh\'s old renderable before Lite rebuilds it (Lite\'s swap drain keeps it, on destroyed buffers)', () => {
+    const a = new BabylonLiteAdapter();
+    const builtGroup = Object.assign(async () => ({ renderables: [] }), { _rebuildSingle: () => ({}) });
+    const swapped = { material: { _buildGroup: builtGroup } };
+    const other = { material: { _buildGroup: builtGroup } };
+    const scene = {
+      _materialSwapQueue: [swapped] as unknown[],
+      _renderables: [{ mesh: swapped, order: 100 }, { mesh: other, order: 100 }],
+      _renderableVersion: 0,
+      _deferredBuilders: [],
+      _groups: new Map(),
+      _builtGroups: new Set([builtGroup]),
+    };
+    (a as unknown as { dropSwappedRenderables(s: unknown): void }).dropSwappedRenderables(scene);
+    expect(scene._renderables.map((r) => r.mesh)).toEqual([other]);
+    expect(scene._materialSwapQueue).toEqual([swapped]); // Lite still rebuilds it
+  });
+
+  it('a swap to a material family the scene never built joins that family\'s late build instead of vanishing', async () => {
+    const a = new BabylonLiteAdapter();
+    const destroyed: string[] = [];
+    const pbrGroup = Object.assign(
+      async (_s: unknown, meshes: unknown[]) => ({ renderables: meshes.map((m) => ({ mesh: m, order: 100 })) }),
+      { _rebuildSingle: undefined },
+    );
+    const ball = { material: { _buildGroup: pbrGroup } };
+    const scene = {
+      _built: true,
+      _materialSwapQueue: [ball] as unknown[],
+      _renderables: [{ mesh: ball, order: 100 }] as { mesh: unknown; order: number }[],
+      _renderableVersion: 0,
+      _deferredBuilders: [] as (() => Promise<void>)[],
+      _groups: new Map<unknown, unknown[]>(),
+      _builtGroups: new Set<unknown>(),
+      _uniformUpdaters: [] as unknown[],
+      _meshDisposables: new Map([[ball, [() => destroyed.push('old ubo')]]]),
+      _frameGraph: { build: () => {} },
+    };
+    internals(a).scene = scene;
+    (a as unknown as { dropSwappedRenderables(s: unknown): void }).dropSwappedRenderables(scene);
+    expect(scene._materialSwapQueue).toEqual([]);
+    expect(scene._renderables).toEqual([]);
+    expect(scene._groups.get(pbrGroup)).toEqual([ball]);
+    expect(scene._deferredBuilders).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(destroyed).toEqual(['old ubo']); // once the GPU is done with it
+    (a as unknown as { buildLateMaterialGroups(s: unknown): void }).buildLateMaterialGroups(scene);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(scene._renderables.map((r) => r.mesh)).toEqual([ball]);
+    expect(scene._builtGroups.has(pbrGroup)).toBe(true);
+  });
+
+  it('detaching one shadow caster keeps the others, and a caster about to swap material gets a fresh list', async () => {
+    const BL = await import('@babylonjs/lite');
+    const set = BL.setShadowTaskCasterMeshes as unknown as ReturnType<typeof vi.fn>;
+    const a = new BabylonLiteAdapter();
+    const ia = a as unknown as {
+      shadowGenerators: Map<unknown, unknown>; shadowCasterMeshes: Map<unknown, unknown[]>; meshes: Map<unknown, unknown>;
+      rekeyShadowCasters(q: unknown[]): void;
+    };
+    const gen = { gen: 1 };
+    const light = 'light' as unknown as LightHandle;
+    const ball = { name: 'ball' }, rail = { name: 'rail' };
+    ia.shadowGenerators.set(light, gen);
+    ia.meshes.set('h-ball', ball);
+    ia.meshes.set('h-rail', rail);
+    const hb = a.attachShadowCaster(light, 'h-ball' as unknown as MeshHandle);
+    a.attachShadowCaster(light, 'h-rail' as unknown as MeshHandle);
+    a.detachShadowCaster(hb);
+    expect(set.mock.calls.at(-1)).toEqual([gen, [rail]]);
+    const before = ia.shadowCasterMeshes.get(light);
+    ia.rekeyShadowCasters([rail]);
+    const after = ia.shadowCasterMeshes.get(light);
+    expect(after).not.toBe(before);
+    expect(after).toEqual([rail]);
+    expect(set.mock.calls.at(-1)![1]).toBe(after);
+  });
+
+  it('stopLoop from inside a frame leaves Lite a callable frame callback (a round reset stops mid-frame)', () => {
+    const a = new BabylonLiteAdapter();
+    const engine = { _renderFn: (() => {}) as unknown, _animFrameId: 0 };
+    internals(a).engine = engine;
+    (a as unknown as { inFrame: boolean }).inFrame = true;
+    a.stopLoop();
+    expect(typeof engine._renderFn).toBe('function');
+    (a as unknown as { inFrame: boolean }).inFrame = false;
+    a.stopLoop();
+    expect(engine._renderFn).toBeNull();
   });
 
   it('leaves a scene that is not yet registered, or has nothing queued, alone', () => {

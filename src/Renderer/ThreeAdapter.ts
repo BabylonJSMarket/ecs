@@ -73,6 +73,7 @@ import type {
   SoundHandle,
 } from './types';
 import type { Color, FrameTimings, RenderPassInfo, RenderStats } from './types';
+import { createSelectiveBloomPass, GLOW_LAYER_INDEX, type SelectiveBloomPass, type UnrealBloomCtor } from './threeSelectiveBloom';
 
 export interface ThreeAdapterOptions {
   /**
@@ -162,6 +163,22 @@ function sampleRockSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number,
  * audio surface must degrade to silence instead of letting Three's
  * `AudioListener` throw on a missing `AudioContext`.
  */
+/**
+ * GlowLayer intensity → UnrealBloom strength. UnrealBloom sums five blur
+ * levels (weights 1.0 … 0.2, about 3× one blur) and spreads far wider than
+ * Babylon's one 32-px kernel; with the glow now fed only the enrolled
+ * emissive at threshold 0, intensity as strength glowed ~3× too hot.
+ * Tuned by eye against Babylon on SpaceGolf's wormholes and plant ring.
+ */
+const GLOW_TO_BLOOM = 0.4;
+const GLOW_BLOOM_RADIUS = 0;
+
+/** Babylon's mesh.rotation order (yaw·pitch·roll); the canonical meaning of a scene Euler. */
+const EULER_ORDER = 'YXZ';
+
+/** Babylon's `Scene.clearColor` default, the canonical clear when a scene names none. */
+const DEFAULT_CLEAR_COLOR: readonly [number, number, number, number] = [0.2, 0.2, 0.3, 1];
+
 /** Where a plugin's post pass sits: before the bloom pass, or after it (before the OutputPass). */
 export type ThreePostPassSlot = 'bloom' | 'output';
 
@@ -182,8 +199,7 @@ interface ThreeComposerLike {
 interface ThreePostModules {
   EffectComposer: new (r: unknown) => ThreeComposerLike;
   RenderPass: new (s: unknown, c: unknown) => ThreePassLike & { camera: unknown };
-  UnrealBloomPass: new (res: unknown, strength: number, radius: number, threshold: number) =>
-    ThreePassLike & { strength: number; threshold: number; radius: number };
+  UnrealBloomPass: UnrealBloomCtor;
   OutputPass: new () => ThreePassLike;
 }
 
@@ -202,7 +218,7 @@ async function loadThreePostModules(): Promise<ThreePostModules> {
   return {
     EffectComposer: (ec as { EffectComposer: ThreePostModules['EffectComposer'] }).EffectComposer,
     RenderPass: (rp as { RenderPass: ThreePostModules['RenderPass'] }).RenderPass,
-    UnrealBloomPass: (ub as { UnrealBloomPass: ThreePostModules['UnrealBloomPass'] }).UnrealBloomPass,
+    UnrealBloomPass: (ub as { UnrealBloomPass: UnrealBloomCtor }).UnrealBloomPass,
     OutputPass: (op as { OutputPass: ThreePostModules['OutputPass'] }).OutputPass,
   };
 }
@@ -387,7 +403,7 @@ export class ThreeAdapter implements RendererAdapter {
    * bookkeeping there.
    */
   private composer?: ThreeComposerLike;
-  private bloomPass?: ThreePassLike & { strength: number; threshold: number; radius: number };
+  private bloomPass?: SelectiveBloomPass;
   private scenePass?: ThreePassLike & { camera: unknown };
   private outputPass?: ThreePassLike;
   private postModules?: ThreePostModules;
@@ -422,10 +438,11 @@ export class ThreeAdapter implements RendererAdapter {
     this.resize();
 
     this.scene = new this.THREE.Scene();
-    if (opts.clearColor) {
-      const [r, g, b, a] = opts.clearColor;
-      this.renderer.setClearColor(new this.THREE.Color(r, g, b), a);
-    }
+    // Babylon's default clear colour when the scene names none (Babylon and
+    // Lite both start there); Three's own default is black, which hid every
+    // dark object against the sky and made the same scene look different.
+    const [cr, cg, cb, ca] = opts.clearColor ?? DEFAULT_CLEAR_COLOR;
+    this.setClearColor(cr, cg, cb, ca);
 
     // Fallback camera so scenes without an ArcCamera can still render something.
     // Scene-provided ArcCameras take precedence (the first one registered is
@@ -466,7 +483,10 @@ export class ThreeAdapter implements RendererAdapter {
 
   setClearColor(r: number, g: number, b: number, a = 1): void {
     if (this.renderer && this.THREE) {
-      this.renderer.setClearColor(new this.THREE.Color(r, g, b), a);
+      // sRGB, like every material colour here: Babylon writes its clear colour
+      // straight to the screen, so (0.2, 0.2, 0.3) means those display values.
+      // Read as linear, Three showed it a stop and a half brighter.
+      this.renderer.setClearColor(new this.THREE.Color().setRGB(r, g, b, this.THREE.SRGBColorSpace), a);
     }
   }
 
@@ -529,6 +549,9 @@ export class ThreeAdapter implements RendererAdapter {
           16,
           prim.tessellation ?? 24,
         );
+        // Babylon's torus lies flat in XZ, round the +Y axis; three's stands in
+        // XY. A ring seen from above drew edge-on (SpaceGolf's plant).
+        geometry.rotateX(Math.PI / 2);
         break;
       case 'disc':
         // Match Babylon's disc, which is baked horizontal (XZ plane).
@@ -592,9 +615,14 @@ export class ThreeAdapter implements RendererAdapter {
         if (srgb) tex.colorSpace = T.SRGBColorSpace;
         return tex;
       };
+      // LINEAR colours here, unlike the Phong branch: Babylon's PBRMaterial
+      // reads albedoColor/emissiveColor as linear (only its albedo TEXTURE is
+      // gamma), and so does Lite's baseColorFactor. Read as sRGB, a felt
+      // authored as diffuse (0.01, 7, 0.75) over a dark velvet map turned
+      // 7 into 53 and washed the billiard table out to lime.
       const std = new T.MeshStandardMaterial({
-        color: mat.diffuse ? toColor(mat.diffuse) : new T.Color(1, 1, 1),
-        emissive: mat.emissive ? toColor(mat.emissive) : new T.Color(0, 0, 0),
+        color: mat.diffuse ? new T.Color(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2]) : new T.Color(1, 1, 1),
+        emissive: mat.emissive ? new T.Color(mat.emissive[0], mat.emissive[1], mat.emissive[2]) : new T.Color(0, 0, 0),
         metalness: mat.metallic ?? 0,
         roughness: mat.roughness ?? 1,
         transparent: (mat.alpha ?? 1) < 1,
@@ -640,7 +668,11 @@ export class ThreeAdapter implements RendererAdapter {
   }
   setMeshRotation(h: MeshHandle, x: number, y: number, z: number): void {
     const mesh = this.meshes.get(h);
-    if (mesh) mesh.rotation.set(x, y, z);
+    // Babylon's Euler order (yaw Y, then pitch X, then roll Z — what every
+    // other adapter applies and every scene's rotation means). Three's default
+    // is XYZ: identical for a single axis, so it hid until a mesh turned about
+    // two at once (SpaceGolf's spinning plant ring drew tilted).
+    if (mesh) mesh.rotation.set(x, y, z, EULER_ORDER);
   }
   setMeshOrientation(h: MeshHandle, orientation: Quaternion): void {
     const mesh = this.meshes.get(h);
@@ -649,9 +681,12 @@ export class ThreeAdapter implements RendererAdapter {
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     const T = this.THREE;
     const mesh = this.meshes.get(h);
-    // Phong and Standard (PBR) both carry `color`.
+    // Phong and Standard (PBR) both carry `color`. Phong's is sRGB (Babylon's
+    // StandardMaterial diffuse); Standard's is linear (Babylon's PBR albedo).
     const mat = mesh?.material as THREE.MeshPhongMaterial | THREE.MeshStandardMaterial | undefined;
-    if (mat?.color && T) mat.color.setRGB(r, g, b, T.SRGBColorSpace);
+    if (!mat?.color || !T) return;
+    if ((mat as THREE.MeshStandardMaterial).isMeshStandardMaterial) mat.color.setRGB(r, g, b);
+    else mat.color.setRGB(r, g, b, T.SRGBColorSpace);
   }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
@@ -971,6 +1006,8 @@ export class ThreeAdapter implements RendererAdapter {
         const R = (mod.default ?? mod) as RapierModule;
         await R.init();
         this.rapier = new RapierPhysics(R);
+        if (this.pendingGravity) this.rapier.setGravity(...this.pendingGravity);
+        if (this.pendingTimeStepHz > 0) this.rapier.setTimeStep(this.pendingTimeStepHz);
         this.rapierReady = true;
         const pending = this.pendingRapierCreates;
         this.pendingRapierCreates = [];
@@ -1063,12 +1100,20 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
   physicsSetGravity(x: number, y: number, z: number): void {
+    // Rapier boots asynchronously on the first body; a gravity (or timestep)
+    // set before it is live is kept and applied when it lands, as the Babylon
+    // adapters keep theirs for Havok. Dropping it ran Plunger's tilted table
+    // at the default straight-down -30 and drained every launch at once.
+    this.pendingGravity = [x, y, z];
     this.rapier?.setGravity(x, y, z);
   }
+  private pendingGravity: [number, number, number] | null = null;
+  private pendingTimeStepHz = 0;
 
   physicsSetTimeStep(hz: number): void {
     // The injected pure-core integrator steps with whatever dt the loop hands
     // it; the Rapier backend honors a fixed timestep via an accumulator.
+    this.pendingTimeStepHz = hz;
     this.rapier?.setTimeStep(hz);
   }
 
@@ -1252,7 +1297,7 @@ export class ThreeAdapter implements RendererAdapter {
     root.name = id;
 
     if (spec.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
-    if (spec.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+    if (spec.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2], EULER_ORDER);
     if (spec.scale !== undefined) root.scale.setScalar(spec.scale);
     this.scene.add(root);
 
@@ -1402,7 +1447,7 @@ export class ThreeAdapter implements RendererAdapter {
       this.applyModelFit(root, spec.fit, spec);
     } else {
       if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
-      if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+      if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2], EULER_ORDER);
       if (spec?.scale !== undefined) root.scale.setScalar(spec.scale);
     }
     root.visible = false; // start parked; setModelVisible reveals it
@@ -1460,7 +1505,7 @@ export class ThreeAdapter implements RendererAdapter {
           ? fit.fitLength / longest
           : (spec?.scale ?? 1);
     root.scale.setScalar(scale);
-    root.rotation.set(fit.pitch ?? 0, fit.yaw ?? 0, 0);
+    root.rotation.set(fit.pitch ?? 0, fit.yaw ?? 0, 0, EULER_ORDER);
     const p = spec?.position ?? [0, 0, 0];
     root.position.set(p[0], p[1], p[2]);
     if (fit.seatOnGround) {
@@ -2680,9 +2725,8 @@ export class ThreeAdapter implements RendererAdapter {
 
   /**
    * Reconcile the post-process composer with what wants it: the glow layer
-   * (bloom) and any plugin passes. Selective glow is APPROXIMATED by the one
-   * UnrealBloom pass (the whitelist is tracked via {@link BLOOM_LAYER} for a
-   * future selective-bloom mask). Building the composer is lazy +
+   * (bloom) and any plugin passes. The glow is selective: only meshes on
+   * {@link BLOOM_LAYER} bloom (threeSelectiveBloom.ts). Building the composer is lazy +
    * capability-guarded, so headless callers (the contract) just bookkeep.
    * Resolves true when the composer is live with the current chain.
    */
@@ -2740,12 +2784,15 @@ export class ThreeAdapter implements RendererAdapter {
     const T = this.THREE!;
     if (this.glowSpec && !this.bloomPass) {
       const size = (this.renderer as unknown as { getSize(v: THREE.Vector2): THREE.Vector2 }).getSize(new T.Vector2());
-      this.bloomPass = new mods.UnrealBloomPass(new T.Vector2(size.x || 1, size.y || 1), this.glowSpec.intensity ?? 0.8, 0.4, 0.85);
+      // Include-only, like Babylon's GlowLayer: only what addGlowMesh (or a
+      // plugin, on BLOOM_LAYER) enrolled glows. See threeSelectiveBloom.ts.
+      const ratio = (this.renderer as unknown as { getPixelRatio(): number }).getPixelRatio();
+      this.bloomPass = createSelectiveBloomPass(T, mods.UnrealBloomPass, this.scene!, { x: (size.x || 1) * ratio, y: (size.y || 1) * ratio }, (this.glowSpec.intensity ?? 0.8) * GLOW_TO_BLOOM, GLOW_BLOOM_RADIUS);
     } else if (!this.glowSpec && this.bloomPass) {
       this.bloomPass.dispose?.();
       this.bloomPass = undefined;
     }
-    if (this.bloomPass) this.bloomPass.strength = this.glowSpec?.intensity ?? 0.8;
+    if (this.bloomPass) this.bloomPass.strength = (this.glowSpec?.intensity ?? 0.8) * GLOW_TO_BLOOM;
     const order: ThreePassLike[] = [this.scenePass];
     for (const p of this.postPasses) if (p.before === 'bloom') order.push(p.pass);
     if (this.bloomPass) order.push(this.bloomPass);
@@ -2768,6 +2815,7 @@ export class ThreeAdapter implements RendererAdapter {
   /** Point the scene pass, and any plugin pass that carries a camera, at the camera this frame draws through. */
   private syncPostCameras(camera: THREE.PerspectiveCamera): void {
     if (this.scenePass) this.scenePass.camera = camera;
+    if (this.bloomPass) this.bloomPass.camera = camera;
     for (const { pass } of this.postPasses) {
       const p = pass as { camera?: unknown };
       if ('camera' in p && p.camera !== camera) p.camera = camera;
@@ -3086,7 +3134,7 @@ export class ThreeAdapter implements RendererAdapter {
         if (this.particleRuntimes.size > 0) this.updateParticles(dt, camera);
         if (this.composer) {
           this.syncPostCameras(camera);
-          this.composer.render();
+          this.renderComposer(this.composer);
         }
         else this.renderer!.render(this.scene!, camera);
       }
@@ -3097,6 +3145,30 @@ export class ThreeAdapter implements RendererAdapter {
       this.rafId = requestAnimationFrame(tick);
     };
     this.rafId = requestAnimationFrame(tick);
+  }
+
+  /**
+   * Run the composer with the clear colour in the right space.
+   *
+   * three applies a clear colour to GL state when it is SET, converted for
+   * whatever render target is current at that moment — sRGB for the canvas,
+   * linear for an offscreen target. The composer's RenderPass clears its
+   * linear target with whatever the state holds, and the frame before ended
+   * on the OutputPass drawing to the canvas, so the clear went in as sRGB and
+   * came out of the OutputPass encoded twice: the default (0.2, 0.2, 0.3) sky
+   * drew as (0.49, 0.49, 0.58) in every scene with a post pass or bloom.
+   * Re-applying it with the composer's target current puts it in linear.
+   */
+  private _clearScratch?: THREE.Color;
+  private renderComposer(composer: ThreeComposerLike): void {
+    const r = this.renderer;
+    const target = (composer as ThreeComposerLike & { readBuffer?: THREE.WebGLRenderTarget }).readBuffer;
+    if (r && target && this.THREE) {
+      const col = r.getClearColor((this._clearScratch ??= new this.THREE.Color()));
+      r.setRenderTarget(target);
+      r.setClearColor(col, r.getClearAlpha());
+    }
+    composer.render();
   }
 
   stopLoop(): void {
@@ -3133,7 +3205,7 @@ export class ThreeAdapter implements RendererAdapter {
       if (camera) {
         if (this.composer) {
           this.syncPostCameras(camera);
-          this.composer.render();
+          this.renderComposer(this.composer);
         }
         else this.renderer.render(this.scene, camera);
       }
@@ -3245,7 +3317,7 @@ function flattenSegments(lines: Vec3[][]): number[] {
 // ─────────────────────────────────────────────────────────────────────────
 
 /** Three layer index used to mark glow-whitelisted meshes (selective-bloom mask). */
-export const BLOOM_LAYER = 1;
+export const BLOOM_LAYER = GLOW_LAYER_INDEX;
 
 /** Clamp a scalar to [0,1]. */
 function clamp01(v: number): number {

@@ -204,10 +204,21 @@ export function softDotPixels(size: number): Uint8Array {
 interface LiteSceneInternals {
   _built?: boolean;
   _deferredBuilders?: (() => Promise<void>)[];
-  _renderables: { order?: number }[];
+  _renderables: { order?: number; mesh?: unknown }[];
   _renderableVersion: number;
+  _materialSwapQueue?: unknown[];
+  _groups?: Map<LiteGroupBuilder, unknown[]>;
+  _builtGroups?: Set<LiteGroupBuilder>;
+  _meshDisposables?: Map<unknown, (() => void)[]>;
+  _uniformUpdaters?: unknown[];
+  surface?: { engine?: { _device?: { queue?: { onSubmittedWorkDone?(): Promise<unknown> } } } };
   _frameGraph?: { build(): void };
 }
+
+/** A Lite material family's group builder (`material._buildGroup`, 1.8.0). */
+type LiteGroupBuilder = ((scene: unknown, meshes: unknown[]) => Promise<{ renderables: { order?: number; mesh?: unknown }[]; updater?: unknown }>) & {
+  _rebuildSingle?: unknown;
+};
 
 /** Negate a coordinate across the RH↔LH Z mirror without minting −0 (0 stays 0). */
 const flipZ = (v: number): number => (v === 0 ? 0 : -v);
@@ -547,8 +558,16 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const pivotOffsetY = (prim.pivotAtBottom || prim.kind === 'tube')
       ? (prim.kind === 'sphere' ? (prim.diameter ?? 1) / 2 : (prim.height ?? 1) / 2)
       : 0;
-    // Place the base at the current y (0) so an un-moved pivoted mesh sits on origin.
-    if (pivotOffsetY) mesh.position.set(mesh.position.x, mesh.position.y + pivotOffsetY, mesh.position.z);
+    // Bake it into the vertices, as Babylon and Three do, so the base stays the
+    // origin under any rotation and scale. (A position offset in world Y only
+    // works for an upright, unscaled mesh: EngineFlame's plume, a cone turned
+    // to point back along a ship and scaled to the throttle, drew as a dot
+    // floating beside the nozzle.) In local units: a box carries its size as
+    // scale.
+    const baked = pivotOffsetY !== 0 && this.bakePivot(engine, mesh, pivotOffsetY / (mesh.scaling.y || 1));
+    // Fallback, for a mesh whose CPU copy Lite did not keep: place the base at
+    // the current y (0) so an un-moved pivoted mesh sits on origin.
+    if (pivotOffsetY && !baked) mesh.position.set(mesh.position.x, mesh.position.y + pivotOffsetY, mesh.position.z);
 
     if (mat) this.applyMaterialSpec(mesh, prim, mat);
 
@@ -557,8 +576,25 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const handle = this.makeHandle<MeshHandle>('mesh', id);
     this.meshes.set(handle, mesh);
     this.meshesByMeshId.set(id, mesh);
-    if (pivotOffsetY) this.pivotOffsets.set(handle, pivotOffsetY);
+    if (pivotOffsetY && !baked) this.pivotOffsets.set(handle, pivotOffsetY);
     return handle;
+  }
+
+  /**
+   * Lift a fresh primitive's vertices by `dy` (local units) so its base sits on
+   * its origin. Reads the CPU copy Lite keeps of what it uploaded (internal
+   * `_cpu*` fields, checked); false when there is none, and the caller falls
+   * back to the position offset.
+   */
+  private bakePivot(engine: BLNS.EngineContext, mesh: LiteMesh, dy: number): boolean {
+    const cpu = mesh as unknown as {
+      _cpuPositions?: Float32Array; _cpuNormals?: Float32Array; _cpuIndices?: Uint32Array; _cpuUvs?: Float32Array;
+    };
+    if (!cpu._cpuPositions || !cpu._cpuNormals || !cpu._cpuIndices) return false;
+    const positions = Float32Array.from(cpu._cpuPositions);
+    for (let k = 1; k < positions.length; k += 3) positions[k] = positions[k]! + dy;
+    BL.resizeMeshGeometry(engine, mesh, positions, cpu._cpuNormals, cpu._cpuIndices, cpu._cpuUvs);
+    return true;
   }
 
   /** Build and assign a Lite material from a renderer-agnostic MaterialSpec. */
@@ -566,11 +602,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const hasTextures =
       !!mat.albedoTexture || !!mat.normalTexture || !!mat.roughnessTexture || !!mat.ambientTexture;
     if (hasTextures || mat.pbr) {
-      // Textured → PBR path. Texture *loading* (URL → Texture2D) needs Lite's
-      // async texture loader, which isn't wired in this provisional adapter, so
-      // we set scalar PBR factors only and leave the texture slots null. The
-      // base color still tints the surface. Provisional: add texture loads once
-      // Lite's loader surface is confirmed.
+      // Textured → PBR path. The factors go on now so the surface draws on
+      // its first frame; the maps follow (loadTextureMaps) as a second
+      // material once they have all loaded.
       const pbr = BL.createPbrMaterial({
         baseColorFactor: mat.diffuse
           ? [mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.alpha ?? 1]
@@ -581,6 +615,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
         alpha: mat.alpha ?? 1,
       });
       mesh.material = pbr;
+      if (hasTextures) this.loadTextureMaps(mesh, pbr, mat);
       return;
     }
     const std = BL.createStandardMaterial();
@@ -590,6 +625,68 @@ export class BabylonLiteAdapter implements RendererAdapter {
     if (mat.alpha !== undefined) std.alpha = mat.alpha;
     mesh.material = std;
     void prim;
+  }
+
+  /**
+   * Put a MaterialSpec's maps on a Lite PBR mesh, the way BabylonAdapter's
+   * PBRMaterial branch does: albedo (sRGB), normal, roughness from the GREEN
+   * channel (Lite's ORM slot reads roughness there, and `metallicFactor`
+   * already zeroes its blue), ambient occlusion as its own texture, each tiled
+   * by uScale/vScale.
+   *
+   * Without this the factors drew alone, and a factor tuned to tint a dark map
+   * (the billiard felt's diffuse (0.01, 7, 0.75) over a velvet map) drew as
+   * flat lime.
+   *
+   * A texture slot is part of the pipeline, so the maps go on a NEW material
+   * assigned once every load has settled — Lite's material setter queues the
+   * swap that rebuilds the drawing. A failed load just leaves its slot empty.
+   * Nothing happens if the mesh has had another material put on it meanwhile.
+   * The UV transform needs Lite's internal `_hasUvTx` material flag (what its
+   * glTF loader sets for KHR_texture_transform); without it the maps draw
+   * untiled.
+   */
+  private loadTextureMaps(mesh: LiteMesh, base: BLNS.PbrMaterialProps, mat: MaterialSpec): void {
+    const engine = this.engine;
+    if (!engine) return;
+    const uScale = mat.uScale ?? 1;
+    const vScale = mat.vScale ?? 1;
+    const tiled = uScale !== 1 || vScale !== 1;
+    const load = (url: string | undefined, srgb: boolean): Promise<BLNS.Texture2D | undefined> => {
+      if (!url) return Promise.resolve(undefined);
+      return BL.loadTexture2D(engine, url, { srgb }).then(
+        // loadTexture2D caches one wrapper per URL; the tiling goes on a clone.
+        (t) => (tiled ? BL.cloneTexture2D(t, { uScale, vScale }) : t),
+        (err: unknown) => {
+          console.warn(`[BabylonLiteAdapter] could not load texture ${url}`, err);
+          return undefined;
+        },
+      );
+    };
+    void Promise.all([
+      load(mat.albedoTexture, true),
+      load(mat.normalTexture, false),
+      load(mat.roughnessTexture, false),
+      load(mat.ambientTexture, false),
+    ]).then(([albedo, normal, rough, ao]) => {
+      if (this.engine !== engine || mesh.material !== base) return;
+      if (!albedo && !normal && !rough && !ao) return;
+      const textured = BL.createPbrMaterial({
+        baseColorFactor: base.baseColorFactor,
+        metallicFactor: base.metallicFactor,
+        roughnessFactor: base.roughnessFactor,
+        emissiveColor: base.emissiveColor,
+        alpha: base.alpha,
+        ...(albedo ? { baseColorTexture: albedo } : {}),
+        ...(normal ? { normalTexture: normal } : {}),
+        ...(rough ? { ormTexture: rough } : {}),
+        // A separate AO map means ORM red is not read for occlusion; without
+        // one, the roughness map's red would darken the surface as AO.
+        ...(ao ? { occlusionTexture: ao, occlusionStrength: 1 } : rough ? { occlusionStrength: 0 } : {}),
+      });
+      if (tiled) (textured as { _hasUvTx?: boolean })._hasUvTx = true;
+      mesh.material = textured;
+    });
   }
 
   setMeshPosition(h: MeshHandle, x: number, y: number, z: number): void {
@@ -1318,8 +1415,20 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const pair = this.shadowCasters.get(h);
     if (!pair) return;
     const gen = this.shadowGenerators.get(pair.light);
-    // Re-set with an empty caster list to clear this generator's casters.
-    if (gen) BL.setShadowTaskCasterMeshes(gen, []);
+    // Take out THIS caster's meshes and hand the generator the rest. (It used to
+    // hand it an empty list: one detach — a pooled ball re-seated, a Shadow
+    // removed — dropped every caster. Lite then fits its ortho box to a ±1 m
+    // default round the light and draws an empty map, so everything inside
+    // that box read as shadowed: the billiard felt and balls went dark with
+    // lit triangles at the rail corners.)
+    const list = this.shadowCasterMeshes.get(pair.light);
+    if (list) {
+      for (const m of pair.meshes) {
+        const i = list.indexOf(m);
+        if (i >= 0) list.splice(i, 1);
+      }
+    }
+    if (gen) BL.setShadowTaskCasterMeshes(gen, list ?? []);
     this.shadowCasters.delete(h);
   }
   setMeshReceiveShadows(h: MeshHandle, receive: boolean): void {
@@ -1347,15 +1456,25 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   setEnvironmentTexture(url: string, opts?: EnvironmentTextureOpts): void {
-    // Fire-and-forget the async HDR load so the sync contract is honored; we
-    // don't await it. Errors are logged, not thrown. Provisional: Lite's IBL
-    // strength/level wiring (opts.level) is left to the loader defaults.
+    // Fire-and-forget the async load so the sync contract is honored; we
+    // don't await it. Errors are logged, not thrown. Lite has no scene-wide IBL
+    // strength, so opts.level is not applied.
+    //
+    // By file type, as Babylon's own loader decides: a Babylon .env goes to
+    // Lite's loadEnvironment (it used to be handed to the .hdr parser, which
+    // rejected every one with "Invalid HDR: missing #? signature"), anything
+    // else to loadHdrEnvironment. Neither adds a skybox or ground: Babylon's
+    // scene.environmentTexture lights the scene and draws nothing.
     const scene = this.scene;
     if (!scene) return;
     void opts;
-    void Promise.resolve(BL.loadHdrEnvironment(scene, url)).catch((err) =>
-      console.error('[BabylonLiteAdapter] setEnvironmentTexture failed', url, err),
-    );
+    const isEnv = /\.env($|[?#])/i.test(url);
+    const load = isEnv
+      ? import('./liteEnvironmentBrdf').then(({ LITE_ENVIRONMENT_BRDF_URL }) =>
+          BL.loadEnvironment(scene, url, { brdfUrl: LITE_ENVIRONMENT_BRDF_URL, skipSkybox: true, skipGround: true }),
+        )
+      : Promise.resolve(BL.loadHdrEnvironment(scene, url, { skipGround: true }));
+    void load.catch((err: unknown) => console.error('[BabylonLiteAdapter] setEnvironmentTexture failed', url, err));
   }
   clearEnvironmentTexture(): void {
     // Lite exposes no "clear environment" call in this preview; no-op.
@@ -2396,16 +2515,22 @@ export class BabylonLiteAdapter implements RendererAdapter {
       // other panes regardless of Lite's frame pacing. Clamp big stalls.
       let last = performance.now();
       BL.onBeforeRender(scene, () => {
-        this.buildLateMaterialGroups(scene);
-        const now = performance.now();
-        const interval = now - last;
-        const dt = Math.min(0.1, interval / 1000);
-        last = now;
-        if (this.timedFrames > 0) this.frameMs = this.frameMs * 0.9 + interval * 0.1;
-        this.timedFrames++;
-        this.onFrame?.(dt);
-        this.stepParticles(dt);
-        this.tickMs = this.tickMs * 0.9 + (performance.now() - now) * 0.1;
+        this.inFrame = true;
+        try {
+          this.buildLateMaterialGroups(scene);
+          const now = performance.now();
+          const interval = now - last;
+          const dt = Math.min(0.1, interval / 1000);
+          last = now;
+          if (this.timedFrames > 0) this.frameMs = this.frameMs * 0.9 + interval * 0.1;
+          this.timedFrames++;
+          this.onFrame?.(dt);
+          this.stepParticles(dt);
+          this.dropSwappedRenderables(scene);
+          this.tickMs = this.tickMs * 0.9 + (performance.now() - now) * 0.1;
+        } finally {
+          this.inFrame = false;
+        }
       });
     }
 
@@ -2474,10 +2599,150 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
   private lateBuilding = false;
 
+  /**
+   * Take a queued mesh's OLD renderable out of the scene before Lite rebuilds it.
+   *
+   * Lite (1.8.0) answers a material change, and a mesh added after the scene
+   * registered, through its material-swap queue, which it drains right after
+   * the onBeforeRender callbacks. The drain builds the mesh a new renderable and
+   * destroys the old one's uniform buffers once the GPU is done with them — but
+   * unlike `rebuildMaterial` it never removes the old renderable from
+   * `_renderables`. The scene pass keeps updating it, writes land in a
+   * destroyed buffer, and every frame's command buffer is rejected: a black
+   * canvas and a flood of "used in submit while destroyed" warnings. A pooled
+   * entity that is built once and then re-shown is enough to do it.
+   *
+   * Runs as the last thing in our onBeforeRender hook, so it sees every swap the
+   * ECS tick queued. Does exactly what `rebuildMaterial` does before its rebuild;
+   * internal fields, each checked, so a Lite that renames them leaves it a no-op.
+   */
+  private dropSwappedRenderables(scene: BLNS.SceneContext): void {
+    const s = scene as unknown as LiteSceneInternals;
+    const q = s._materialSwapQueue;
+    if (!Array.isArray(q) || !Array.isArray(s._renderables)) return;
+    // Swaps held back last frame while a late group was building.
+    if (this.heldSwaps.size > 0) {
+      for (const m of this.heldSwaps) if (!q.includes(m)) q.push(m);
+      this.heldSwaps.clear();
+    }
+    if (q.length === 0) return;
+    this.rekeyShadowCasters(q);
+    this.adoptNewFamilySwaps(s, q);
+    // Only meshes Lite WILL rebuild (it skips one whose material has no
+    // single-mesh builder), so nothing loses its only renderable.
+    const queued = new Set(
+      q.filter((m) => typeof (m as { material?: { _buildGroup?: { _rebuildSingle?: unknown } } }).material?._buildGroup?._rebuildSingle === 'function'),
+    );
+    if (queued.size === 0) return;
+    for (let i = s._renderables.length - 1; i >= 0; i--) {
+      const m = s._renderables[i]!.mesh;
+      if (m !== undefined && queued.has(m)) s._renderables.splice(i, 1);
+    }
+  }
+  /**
+   * A shadow caster whose material is about to change: hand its generator a
+   * NEW caster array, so Lite rebuilds the shadow pass's drawings for it.
+   *
+   * Lite keys a generator's shadow-pass state on the caster ARRAY's identity
+   * and builds each caster's depth drawing once, from the material it had
+   * then. A swap destroys that drawing's uniform buffers (they are the ones
+   * registered for the mesh) and nothing tells the shadow pass, so every frame
+   * after drew on destroyed buffers and was rejected — the billiard table went
+   * black the moment its balls were dressed. Same list, new array: the state
+   * is rebuilt on the next shadow pass, after the swap has run.
+   */
+  private rekeyShadowCasters(queued: readonly unknown[]): void {
+    for (const [light, list] of this.shadowCasterMeshes) {
+      if (!list.some((m) => queued.includes(m))) continue;
+      const copy = list.slice();
+      this.shadowCasterMeshes.set(light, copy);
+      const gen = this.shadowGenerators.get(light);
+      if (gen) BL.setShadowTaskCasterMeshes(gen, copy);
+    }
+  }
+
+  /** Swaps waiting for a late group build to finish (see adoptNewFamilySwaps). */
+  private heldSwaps = new Set<unknown>();
+
+  /**
+   * A mesh that SWAPS to a material family this scene has never built.
+   *
+   * Lite's swap drain rebuilds a mesh through its family's `_rebuildSingle`,
+   * which exists only once that family's group has been built in a scene — so
+   * a plugin that turns a Standard mesh into a PBR one (Plunger's chrome ball,
+   * in a scene with no other PBR mesh) is silently dropped: the old drawing is
+   * thrown away and nothing replaces it. (After a round reset it is worse: the
+   * builder still carries the previous scene's `_rebuildSingle`.)
+   *
+   * The answer is what `addToScene` does for a mesh of a new family: put it in
+   * that family's group and queue the group's builder, which
+   * {@link buildLateMaterialGroups} runs on the next frame. Its old drawing goes
+   * now, its old GPU buffers once the GPU is done with them, as Lite's own swap
+   * would. Internal fields, each checked; a Lite without them leaves this a
+   * no-op.
+   */
+  private adoptNewFamilySwaps(s: LiteSceneInternals, q: unknown[]): void {
+    const groups = s._groups;
+    const built = s._builtGroups;
+    if (!(groups instanceof Map) || !(built instanceof Set) || !Array.isArray(s._deferredBuilders)) return;
+    let changed = false;
+    for (let i = q.length - 1; i >= 0; i--) {
+      const mesh = q[i];
+      const build = (mesh as { material?: { _buildGroup?: LiteGroupBuilder } }).material?._buildGroup;
+      if (typeof build !== 'function' || built.has(build)) continue;
+      q.splice(i, 1);
+      let group = groups.get(build);
+      if (group && this.lateBuilding) {
+        // Its builder may be walking the group right now; try next frame.
+        this.heldSwaps.add(mesh);
+        continue;
+      }
+      if (!group) {
+        const g: unknown[] = [];
+        group = g;
+        groups.set(build, g);
+        s._deferredBuilders.push(async () => {
+          const result = await build(s, g);
+          s._renderables.push(...result.renderables);
+          if (result.updater) s._uniformUpdaters?.push(result.updater);
+          built.add(build);
+        });
+      }
+      if (!group.includes(mesh)) group.push(mesh);
+      for (let j = s._renderables.length - 1; j >= 0; j--) {
+        if (s._renderables[j]!.mesh === mesh) s._renderables.splice(j, 1);
+      }
+      const old = s._meshDisposables?.get(mesh);
+      if (old) {
+        s._meshDisposables!.delete(mesh);
+        const done = s.surface?.engine?._device?.queue?.onSubmittedWorkDone?.();
+        void (done ?? Promise.resolve()).then(() => {
+          try {
+            for (const fn of old) fn();
+          } catch {
+            // Already gone with its scene.
+          }
+        });
+      }
+      changed = true;
+    }
+    if (changed) s._renderableVersion++;
+  }
+
   stopLoop(): void {
-    if (this.engine) BL.stopEngine(this.engine);
+    if (this.engine) {
+      BL.stopEngine(this.engine);
+      // Stopped from inside a frame (a round reset tears the game down from
+      // the ECS tick): Lite's frame callback reschedules itself with
+      // `requestAnimationFrame(engine._renderFn)` AFTER the frame, and
+      // stopEngine has just nulled that — a TypeError on every reset. A no-op
+      // in its place is scheduled once and does nothing.
+      if (this.inFrame) (this.engine as unknown as { _renderFn: unknown })._renderFn = () => {};
+    }
     this.onFrame = undefined;
   }
+  /** True while our onBeforeRender hook runs (see stopLoop). */
+  private inFrame = false;
   resize(): void {
     // Babylon Lite has no resize entry point in this preview build; the
     // swapchain follows the canvas backing store automatically. No-op.

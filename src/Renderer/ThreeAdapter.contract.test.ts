@@ -248,7 +248,7 @@ describe('ThreeAdapter post-pass plugin hook', () => {
     expect(pass.sizes.at(-1)).toEqual([640, 360]); // sized by the composer
   });
 
-  it("with bloom on, 'bloom' sits before UnrealBloomPass and 'output' after it; OutputPass stays last", async () => {
+  it("with bloom on, 'bloom' sits before the (selective) bloom pass and 'output' after it; OutputPass stays last", async () => {
     const adapter = live();
     adapter.setGlowLayer({ intensity: 0.5 } as never);
     const ao = new FakePass();
@@ -256,7 +256,7 @@ describe('ThreeAdapter post-pass plugin hook', () => {
     await adapter.addPostPass(grade, { before: 'output' });
     await adapter.addPostPass(ao, { before: 'bloom' });
     const chain = adapter.getComposerPasses();
-    expect(names(adapter)).toEqual(['RenderPass', 'FakePass', 'UnrealBloomPass', 'FakePass', 'OutputPass']);
+    expect(names(adapter)).toEqual(['RenderPass', 'FakePass', 'SelectiveBloomPass', 'FakePass', 'OutputPass']);
     expect(chain[1]).toBe(ao);
     expect(chain[3]).toBe(grade);
     expect(adapter.getPostPasses()).toEqual([ao, grade]);
@@ -274,7 +274,7 @@ describe('ThreeAdapter post-pass plugin hook', () => {
     await adapter.addPostPass(pass);
     adapter.removePostPass(pass);
     await new Promise((r) => setTimeout(r, 0));
-    expect(names(adapter)).toEqual(['RenderPass', 'UnrealBloomPass', 'OutputPass']);
+    expect(names(adapter)).toEqual(['RenderPass', 'SelectiveBloomPass', 'OutputPass']);
   });
 
   it('turning glow off keeps the plugin pass and takes bloom out', async () => {
@@ -298,10 +298,82 @@ describe('ThreeAdapter post-pass plugin hook', () => {
     expect(scenePass.camera).toBe(cam);
   });
 
+  it('the glow is include-only, as Babylon\'s GlowLayer: only meshes on BLOOM_LAYER give light to it', async () => {
+    const adapter = live();
+    adapter.setGlowLayer({ intensity: 0.5 } as never);
+    // The composer builds behind a lazy import; wait for it, not for a tick.
+    await (adapter as unknown as { ensureComposer(): Promise<boolean> }).ensureComposer();
+    const scene = (adapter as unknown as { scene: THREE.Scene }).scene;
+    const lit = new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0xff0000, emissiveIntensity: 2 });
+    const glowing = new THREE.Mesh(new THREE.BoxGeometry(), lit);
+    glowing.layers.enable(BLOOM_LAYER);
+    const wallMat = new THREE.MeshPhongMaterial({ color: 0xffffff, emissive: 0x00ff00 });
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(), wallMat);
+    const haze = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.5 }));
+    const stars = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial());
+    scene.add(glowing, wall, haze, stars);
+    const bloom = adapter.getComposerPasses()[1] as unknown as { prepareScene(): void; restoreScene(): void };
+    bloom.prepareScene();
+    // Enrolled: drawn as its EMISSIVE only, at its intensity.
+    const g = glowing.material as unknown as THREE.MeshBasicMaterial;
+    expect(g.isMeshBasicMaterial).toBe(true);
+    expect(g.color.r).toBeCloseTo(2);
+    expect(g.color.g).toBeCloseTo(0);
+    // Not enrolled: black where opaque (it still hides what is behind it), gone otherwise.
+    expect((wall.material as unknown as THREE.MeshBasicMaterial).color.getHex()).toBe(0x000000);
+    expect(haze.visible).toBe(false);
+    expect(stars.visible).toBe(false);
+    bloom.restoreScene();
+    expect(glowing.material).toBe(lit);
+    expect(wall.material).toBe(wallMat);
+    expect(haze.visible && stars.visible).toBe(true);
+  });
+
   it('headless (no real WebGLRenderer) resolves false but keeps the pass for when one exists', async () => {
     const adapter = new ThreeAdapter();
     const pass = new FakePass();
     expect(await adapter.addPostPass(pass)).toBe(false);
     expect(adapter.getPostPasses()).toEqual([pass]);
+  });
+});
+
+/** Geometry, orientation and colour conventions Three must share with Babylon. */
+describe('ThreeAdapter matches Babylon conventions', () => {
+  function bare(): ThreeAdapter {
+    const adapter = new ThreeAdapter();
+    const ta = adapter as unknown as { THREE: typeof THREE; scene: THREE.Scene };
+    ta.THREE = THREE;
+    ta.scene = new THREE.Scene();
+    return adapter;
+  }
+  const obj = (a: ThreeAdapter, h: MeshHandle) => a.getMeshObject(h) as unknown as THREE.Mesh;
+
+  it("a torus lies flat in XZ round +Y, like Babylon's (three's stands in XY)", () => {
+    const a = bare();
+    const h = a.createMesh('ring', { kind: 'torus', diameter: 4, thickness: 0.5 });
+    const geo = obj(a, h).geometry;
+    geo.computeBoundingBox();
+    const size = geo.boundingBox!.getSize(new THREE.Vector3());
+    expect(size.x).toBeCloseTo(4.5, 1);
+    expect(size.z).toBeCloseTo(4.5, 1);
+    expect(size.y).toBeCloseTo(0.5, 1);
+  });
+
+  it("applies a scene Euler in Babylon's order (yaw, pitch, roll), not three's XYZ", () => {
+    const a = bare();
+    const h = a.createMesh('box', { kind: 'box', width: 1, height: 1, depth: 1 });
+    a.setMeshRotation(h, 0.8, 0.6, 0.3);
+    const m = obj(a, h);
+    expect(m.rotation.order).toBe('YXZ');
+    const expected = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.8, 0.6, 0.3, 'YXZ'));
+    expect(m.quaternion.angleTo(expected)).toBeCloseTo(0, 6);
+  });
+
+  it("a PBR material's colours are linear, as Babylon's PBRMaterial reads them; a Phong one's are sRGB", () => {
+    const a = bare();
+    const pbr = obj(a, a.createMesh('felt', { kind: 'box', width: 1, height: 1, depth: 1 }, { pbr: true, diffuse: [0.01, 7, 0.75] }));
+    expect((pbr.material as THREE.MeshStandardMaterial).color.g).toBeCloseTo(7);
+    const phong = obj(a, a.createMesh('wall', { kind: 'box', width: 1, height: 1, depth: 1 }, { diffuse: [0.5, 0.5, 0.5] }));
+    expect((phong.material as THREE.MeshPhongMaterial).color.r).toBeCloseTo(new THREE.Color().setRGB(0.5, 0.5, 0.5, THREE.SRGBColorSpace).r);
   });
 });
