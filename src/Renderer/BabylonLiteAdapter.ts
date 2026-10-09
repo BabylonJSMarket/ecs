@@ -47,6 +47,7 @@ import type {
   MeshLoadResult,
   MeshLoadSpec,
   ModelInstantiateSpec,
+  ModelFitSpec,
   PointLightSpec,
   MeshSkinSpec,
   PhysicsBodyOpts,
@@ -85,6 +86,128 @@ import type {
 
 /** Babylon Lite mesh-like node (Mesh extends SceneNode; both carry transforms). */
 type LiteMesh = BLNS.Mesh;
+
+/**
+ * Hide or show what a handle stands for, the way BabylonAdapter does.
+ *
+ * A node that draws (it has geometry) is hidden ALONE, like Babylon's
+ * `isVisible`: a Pool blueprint hides its MeshPrimitive proxy while the GLB
+ * parented under it keeps drawing. A node that draws nothing itself — a glTF
+ * root, a plugin-built car from `adoptMesh` — stands for its parts, so the
+ * whole subtree goes (Lite's `setMeshVisible`); hiding only the empty root
+ * would leave every part on screen.
+ */
+function setNodeVisible(node: LiteMesh, visible: boolean): void {
+  if ((node as { _gpu?: unknown })._gpu !== undefined) node.visible = visible;
+  else BL.setMeshVisible(node, visible);
+}
+
+/** Label texture size, the same as ThreeAdapter's. */
+const LABEL_TEX_W = 512;
+const LABEL_TEX_H = 256;
+
+interface LiteLabel {
+  slot: { texture: BLNS.Texture2D; system: BLNS.FacingBillboardSpriteSystem | null };
+  plane?: LiteMesh;
+  canvas: HTMLCanvasElement;
+  fontSize: number;
+  fontWeight: 'normal' | 'bold';
+  background?: string;
+  borderColor?: string;
+  /** World size at scale 1. */
+  size: [number, number];
+  color: [number, number, number, number];
+  /** Canonical (right-handed). */
+  position: [number, number, number];
+  visible: boolean;
+  alpha: number;
+  scale?: number;
+}
+
+/** Draw label text the way ThreeAdapter does and return its RGBA pixels (null without a 2-D context). */
+function drawLabelPixels(
+  canvas: HTMLCanvasElement, text: string, fontSize: number, fontWeight: 'normal' | 'bold', background?: string, borderColor?: string,
+  flipRows = false,
+): Uint8Array | null {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (background) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (borderColor) {
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+    }
+  }
+  ctx.font = `${fontWeight} ${fontSize}px system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = Math.max(4, fontSize * 0.14);
+  ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  if (!flipRows) return new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
+  // Lite's createPlane maps v the other way up from a 2-D canvas: a world-fixed
+  // sign gets its rows reversed, or the text draws upside down (seen on
+  // screen: "∀ЯCADE" on the NeonSign wall).
+  const row = canvas.width * 4;
+  const out = new Uint8Array(d.length);
+  for (let y = 0; y < canvas.height; y++) out.set(d.subarray(y * row, (y + 1) * row), (canvas.height - 1 - y) * row);
+  return out;
+}
+
+/** The live Lite engine for each canvas — see BabylonLiteAdapter.init. */
+const LITE_ENGINES = new WeakMap<HTMLCanvasElement, BLNS.EngineContext>();
+
+/** Sprites one shared particle layer holds; past that a frame drops the rest. */
+const PARTICLE_LAYER_CAPACITY = 16384;
+
+/** One continuous emitter's live state: canonical positions, ring-buffered particles. */
+interface LiteEmitter {
+  position: Vec3;
+  followCamera: boolean;
+  spec: ParticleEmitterSpec;
+  layerKey: string;
+  texture: TextureHandle;
+  cap: number;
+  pos: Float32Array;
+  vel: Float32Array;
+  age: Float32Array;
+  life: Float32Array;
+  size: Float32Array;
+  tint: Float32Array;
+  /** Ring index of the next particle to (re)use. */
+  next: number;
+  /** Fractional particles the rate has owed so far. */
+  owed: number;
+}
+
+/** A white RGBA dot fading to transparent at its rim — the default particle sprite. */
+export function softDotPixels(size: number): Uint8Array {
+  const px = new Uint8Array(size * size * 4);
+  const c = (size - 1) / 2;
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const d = Math.hypot(x - c, y - c) / c;
+    const a = Math.max(0, 1 - d);
+    const o = (y * size + x) * 4;
+    px[o] = 255; px[o + 1] = 255; px[o + 2] = 255;
+    px[o + 3] = Math.round(255 * a * a);
+  }
+  return px;
+}
+
+/** The SceneContext internals {@link BabylonLiteAdapter.buildLateMaterialGroups} reads (Lite 1.8.0, unexported). */
+interface LiteSceneInternals {
+  _built?: boolean;
+  _deferredBuilders?: (() => Promise<void>)[];
+  _renderables: { order?: number }[];
+  _renderableVersion: number;
+  _frameGraph?: { build(): void };
+}
 
 /** Negate a coordinate across the RH↔LH Z mirror without minting −0 (0 stays 0). */
 const flipZ = (v: number): number => (v === 0 ? 0 : -v);
@@ -267,13 +390,14 @@ export class BabylonLiteAdapter implements RendererAdapter {
   /** Handle → live Texture2D, so updateDynamicTexture can re-upload pixels. */
   private dynamicTextureObjects = new Map<TextureHandle, BLNS.Texture2D>();
   /**
-   * Continuous particle emitters (space dust, trails). Lite's preview build has
-   * no ParticleSystem function (only the billboard-sprite / node-block-emitter
-   * surface), so — matching this adapter's other documented stubs — the emitter
-   * tracks position/follow state and round-trips create→setPosition→dispose
-   * without yet streaming GPU particles. See createParticleEmitter.
+   * Continuous particle emitters (space dust, smoke, trails), simulated on the
+   * CPU and drawn as camera-facing billboard sprites — Lite 1.8.0 has no
+   * ParticleSystem. See createParticleEmitter.
    */
-  private particleEmitters = new Map<ParticleEmitterHandle, { position: Vec3; followCamera: boolean }>();
+  private particleEmitters = new Map<ParticleEmitterHandle, LiteEmitter>();
+  /** One billboard system per (blend, texture), shared by every emitter that draws with it. */
+  private particleLayers = new Map<string, BLNS.FacingBillboardSpriteSystem>();
+  private particleDot: BLNS.SpriteAtlas | null = null;
   /** Selective-glow config + whitelist (empty until addGlowMesh). Null = disabled. */
   private glowSpec: GlowSpec | null = null;
   private glowMeshes = new Set<MeshHandle>();
@@ -298,7 +422,17 @@ export class BabylonLiteAdapter implements RendererAdapter {
     // antialias from RendererInitOptions are forwarded only where Lite's
     // EngineOptions accept them; the preview engine derives most defaults, so we
     // keep the call minimal and let provisional callers extend it.
-    this.engine = await BL.createEngine(canvas);
+    // One engine per canvas for the life of the page: Lite 1.8.0 keeps GPU
+    // objects (bind-group layouts, pipelines) in module-level caches, so a
+    // SECOND device on the same page is handed layouts made on the first and
+    // every frame fails validation. A round reset builds a new adapter on the
+    // same canvas; it reuses the engine and gets a fresh scene.
+    let engine = LITE_ENGINES.get(canvas);
+    if (!engine) {
+      engine = await BL.createEngine(canvas);
+      LITE_ENGINES.set(canvas, engine);
+    }
+    this.engine = engine;
     this.scene = BL.createSceneContext(this.engine.surfaces[0]);
     void _opts;
   }
@@ -504,7 +638,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
     return 0;
   }
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
-    this.meshes.get(h)?.scaling.set(sx, sy, sz);
+    const mesh = this.meshes.get(h);
+    // A glTF root keeps its handedness flip under any scale (see seatGltfRoot).
+    if (mesh && this.gltfRoots.has(mesh)) mesh.scaling.set(sx, sy, -sz);
+    else mesh?.scaling.set(sx, sy, sz);
   }
   setMeshColor(h: MeshHandle, r: number, g: number, b: number): void {
     const mesh = this.meshes.get(h);
@@ -515,7 +652,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
   setMeshVisible(h: MeshHandle, visible: boolean): void {
     const mesh = this.meshes.get(h);
-    if (mesh) mesh.visible = visible;
+    if (mesh) setNodeVisible(mesh, visible);
   }
   setMeshGeometry(h: MeshHandle, geom: MeshGeometry): void {
     const mesh = this.meshes.get(h);
@@ -568,7 +705,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     // Babylon Lite exposes no per-mesh dispose function; hide it and drop our
     // references (and any physics body) so the slot is reclaimable. The GPU
     // geometry is freed when the scene/engine is disposed.
-    mesh.visible = false;
+    setNodeVisible(mesh, false);
     for (const [id, m] of this.meshesByMeshId) {
       if (m === mesh) {
         this.physicsDestroyBody(id);
@@ -1080,6 +1217,17 @@ export class BabylonLiteAdapter implements RendererAdapter {
     // Aim the LH camera by deriving a look target from the orientation: forward =
     // q · (+Z) in RH, mapped into LH by negating its Z, added to the LH position.
     const f = this.rotateVecByQuat(orientation, 0, 0, 1);
+    // Straight up or down, a position+target camera has no defined roll — Lite's
+    // look-at against world +Y degenerates and the frame draws NOTHING (a top
+    // view: SpaceGolf, the axis-view cameras). Lean the target a hair toward
+    // the orientation's own up, which pins the roll to the one asked for.
+    if (Math.abs(f[1]) > 0.999) {
+      const u = this.rotateVecByQuat(orientation, 0, 1, 0);
+      const k = 1e-3;
+      f[0] += u[0] * k;
+      f[1] += u[1] * k;
+      f[2] += u[2] * k;
+    }
     entry.camera.target.set(position[0] + f[0], position[1] + f[1], -position[2] - f[2]);
   }
 
@@ -1238,7 +1386,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       // helper, same as setMeshPosition/setMeshRotation (see createArcCamera).
       if (spec.position) root.position.set(spec.position[0], spec.position[1], -spec.position[2]);
       if (spec.rotation) this.applyEulerQuat(root, spec.rotation[0], spec.rotation[1], spec.rotation[2]);
-      if (spec.scale !== undefined) root.scaling.set(spec.scale, spec.scale, spec.scale);
+      this.seatGltfRoot(root, spec.scale ?? 1);
       this.meshes.set(handle, root);
       this.meshesByMeshId.set(id, root);
     }
@@ -1249,6 +1397,94 @@ export class BabylonLiteAdapter implements RendererAdapter {
       animationNames.push(g.name);
     }
     return { meshId: id, handle, animationNames };
+  }
+
+  /**
+   * Put a loaded glTF's root into the canonical frame.
+   *
+   * glTF is right-handed, like the canonical frame, and Lite is left-handed.
+   * Lite's loader converts by mirroring X on the root (`__root__` scaling
+   * (−1, 1, 1)); this adapter converts every canonical position by mirroring
+   * Z. The two differ by a half turn about Y, so a model kept on the loader's
+   * mirror faces 180° away from where the frame says — and one whose root
+   * scale was simply overwritten (`spec.scale`, setMeshScale) lost its mirror
+   * and drew as its own mirror image. The root is given the adapter's mirror
+   * instead, (s, s, −s), and setMeshScale keeps it for every glTF root.
+   * Verified on screen against BabylonAdapter: the spaceshooter ship's tail
+   * now faces the chase camera on both.
+   */
+  private seatGltfRoot(root: LiteMesh, scale: number): void {
+    root.scaling.set(scale, scale, -scale);
+    this.gltfRoots.add(root);
+  }
+  private gltfRoots = new WeakSet<object>();
+
+  /** World-space AABB (Lite frame) of every mesh under `root` that carries a local box. */
+  private hierarchyBounds(root: LiteMesh): { min: [number, number, number]; max: [number, number, number] } | null {
+    const lo: [number, number, number] = [Infinity, Infinity, Infinity];
+    const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    const walk = (n: LiteMesh): void => {
+      if (n.visible !== false && n.boundMin && n.boundMax) {
+        const m = n.worldMatrix;
+        for (let c = 0; c < 8; c++) {
+          const x = c & 1 ? n.boundMax[0] : n.boundMin[0];
+          const y = c & 2 ? n.boundMax[1] : n.boundMin[1];
+          const z = c & 4 ? n.boundMax[2] : n.boundMin[2];
+          const w = [x * m[0]! + y * m[4]! + z * m[8]! + m[12]!, x * m[1]! + y * m[5]! + z * m[9]! + m[13]!, x * m[2]! + y * m[6]! + z * m[10]! + m[14]!];
+          for (let k = 0; k < 3; k++) {
+            if (w[k]! < lo[k]!) lo[k] = w[k]!;
+            if (w[k]! > hi[k]!) hi[k] = w[k]!;
+          }
+        }
+      }
+      for (const ch of n.children ?? []) walk(ch as LiteMesh);
+    };
+    walk(root);
+    return Number.isFinite(lo[0]) ? { min: lo, max: hi } : null;
+  }
+
+  /**
+   * ModelInstantiateSpec.fit, as BabylonAdapter and ThreeAdapter apply it:
+   * measure the hierarchy at rest, scale its longest horizontal extent to
+   * `fitLength` (or its height to `fitHeight`), turn it by the fit's
+   * yaw/pitch, seat it, lift it by `yOffset`. Without this a fitted ship drew
+   * at its authored size — the spaceshooter fighters came out a third of the
+   * size they are on the other two engines.
+   */
+  private applyModelFit(root: LiteMesh, fit: ModelFitSpec, spec?: ModelInstantiateSpec): void {
+    if (fit.meshNameFilter) {
+      const filter = fit.meshNameFilter;
+      const meshes: LiteMesh[] = [];
+      const walk = (n: LiteMesh): void => {
+        if ((n as { _gpu?: unknown })._gpu !== undefined) meshes.push(n);
+        for (const ch of n.children ?? []) walk(ch as LiteMesh);
+      };
+      walk(root);
+      if (meshes.some((m) => m.name.includes(filter))) for (const m of meshes) if (!m.name.includes(filter)) m.visible = false;
+    }
+    // Measure at rest: no turn, no offset, unit scale (the mirror kept).
+    root.position.set(0, 0, 0);
+    root.rotationQuaternion.set(0, 0, 0, 1);
+    this.seatGltfRoot(root, 1);
+    const b = this.hierarchyBounds(root);
+    const sx = b ? b.max[0] - b.min[0] : 1;
+    const sy = b ? b.max[1] - b.min[1] : 1;
+    const sz = b ? b.max[2] - b.min[2] : 1;
+    const scale =
+      fit.fitHeight !== undefined
+        ? fit.fitHeight / Math.max(sy, 1e-4)
+        : fit.fitLength !== undefined
+          ? fit.fitLength / Math.max(sx, sz, 1e-4)
+          : (spec?.scale ?? 1);
+    this.seatGltfRoot(root, scale);
+    this.applyEulerQuat(root, fit.pitch ?? 0, fit.yaw ?? 0, 0);
+    const p = spec?.position ?? [0, 0, 0];
+    root.position.set(p[0], p[1], -p[2]);
+    if (fit.seatOnGround) {
+      const after = this.hierarchyBounds(root);
+      if (after) root.position.set(p[0], root.position.y + p[1] - after.min[1], -p[2]);
+    }
+    if (fit.yOffset) root.position.set(root.position.x, root.position.y + fit.yOffset, root.position.z);
   }
 
   // ── Extension seam ─────────────────────────────────────────────────────────
@@ -1290,6 +1526,30 @@ export class BabylonLiteAdapter implements RendererAdapter {
   getMeshIdForBody(body: BLNS.PhysicsBody): string | undefined {
     return this.bodyMeshIds.get(body);
   }
+  /**
+   * The Lite mesh (or glTF root node, for loadMesh/instantiateModel) behind a
+   * handle — Lite's twin of BabylonAdapter.getMeshObject. A plugin parents its
+   * extra meshes to it so they inherit position and setMeshScale. Null once
+   * the mesh is disposed. Its transform is LEFT-handed (z negated).
+   */
+  getMeshObject(h: MeshHandle): LiteMesh | null {
+    return this.meshes.get(h) ?? null;
+  }
+  /**
+   * Register a node a PLUGIN built (and added to the scene), so the handle it
+   * gets back works with every ordinary mesh op — position, scale, visibility,
+   * physics by id. Lite's twin of BabylonAdapter.adoptMesh.
+   */
+  adoptMesh(id: string, node: LiteMesh): MeshHandle {
+    const handle = this.makeHandle<MeshHandle>('plugin', id);
+    this.meshes.set(handle, node);
+    this.meshesByMeshId.set(id, node);
+    return handle;
+  }
+  /** The same object by meshId — Lite's twin of BabylonAdapter.getMeshRoot. */
+  getMeshRoot(meshId: string): LiteMesh | null {
+    return this.meshesByMeshId.get(meshId) ?? null;
+  }
 
   async loadModelTemplate(
     url: string,
@@ -1329,7 +1589,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
       // RH→LH, the same mirror loadMesh applies (see createArcCamera).
       if (spec?.position) root.position.set(spec.position[0], spec.position[1], -spec.position[2]);
       if (spec?.rotation) this.applyEulerQuat(root, spec.rotation[0], spec.rotation[1], spec.rotation[2]);
-      if (spec?.scale !== undefined) root.scaling.set(spec.scale, spec.scale, spec.scale);
+      this.seatGltfRoot(root, spec?.scale ?? 1);
+      if (spec?.fit) this.applyModelFit(root, spec.fit, spec);
       root.visible = false; // start parked; setModelVisible reveals it
       BL.addToScene(scene, root);
       this.meshes.set(handle, root);
@@ -1345,7 +1606,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
 
   setModelVisible(h: MeshHandle, visible: boolean): void {
     const root = this.meshes.get(h);
-    if (root) root.visible = visible;
+    if (root) setNodeVisible(root, visible);
   }
   setModelAlpha(id: string, alpha: number): void {
     const root = this.instantiatedModelRoots.get(id);
@@ -1362,6 +1623,16 @@ export class BabylonLiteAdapter implements RendererAdapter {
       if (key.startsWith(`${id}/`)) this.animationGroups.delete(key);
     }
     this.meshes.delete(h);
+  }
+
+  /**
+   * One clip on one mesh, for a plugin that drives playback the interface's
+   * play/stop pair cannot express (SkeletonAnimator's play-once). Lite's twin
+   * of BabylonAdapter.getAnimationGroup; scoped to the mesh, so two entities
+   * loaded from one GLB never share a clip.
+   */
+  getAnimationGroup(meshId: string, clipName: string): BLNS.AnimationGroup | null {
+    return this.animationGroups.get(`${meshId}/${clipName}`) ?? null;
   }
 
   playAnimation(meshId: string, clipName: string, loop = true): void {
@@ -1393,40 +1664,137 @@ export class BabylonLiteAdapter implements RendererAdapter {
   // "no bones" — the same answer the full adapters give for an unrigged prop.
 
   // ─── Labels ───
-  // Babylon Lite's text/sprite rendering needs a glyph atlas + font pipeline
-  // that's too heavy to stand up for this provisional adapter. createLabel
-  // returns a tracked handle; the setters are no-ops. Revisit once Lite's
-  // text-renderable surface is confirmed.
+  // Text is drawn on a 2-D canvas (as ThreeAdapter does), uploaded with
+  // createTexture2DFromPixels, and shown as ONE camera-facing billboard
+  // sprite in a billboard system of its own — Lite has no text sprite. A
+  // world-fixed label (`billboard: false`) is an unlit textured plane instead.
+  // Lite cannot take a billboard system out of a scene, so a disposed label's
+  // slot (system + texture) is kept and handed to the next label.
   createLabel(id: string, spec: LabelSpec): LabelHandle {
-    void spec;
-    return this.makeHandle<LabelHandle>('label', id);
+    const handle = this.makeHandle<LabelHandle>('label', id);
+    const engine = this.engine;
+    const scene = this.scene;
+    if (!engine || !scene || typeof document === 'undefined') return handle;
+    const canvas = document.createElement('canvas');
+    canvas.width = LABEL_TEX_W;
+    canvas.height = LABEL_TEX_H;
+    const fontSize = spec.fontSize ?? 64;
+    const fontWeight = spec.fontWeight ?? 'bold';
+    const pixels = drawLabelPixels(canvas, spec.text, fontSize, fontWeight, spec.background, spec.borderColor, spec.billboard === false);
+    if (!pixels) return handle;
+    const scale = spec.scale ?? 1;
+    const size: [number, number] = [scale * (LABEL_TEX_W / LABEL_TEX_H), scale];
+    const color: [number, number, number, number] = spec.color ? [spec.color[0], spec.color[1], spec.color[2], 1] : [1, 1, 1, 1];
+    let slot: LiteLabel['slot'];
+    let plane: LiteMesh | undefined;
+    if (spec.billboard === false) {
+      const texture = BL.createTexture2DFromPixels(engine, pixels, LABEL_TEX_W, LABEL_TEX_H, { minFilter: 'linear', magFilter: 'linear', srgb: true });
+      plane = BL.createPlane(engine, { width: size[0], height: size[1] });
+      plane.name = `Label_${id}`;
+      plane.material = BL.createPbrMaterial({ unlit: true, baseColorTexture: texture, baseColorFactor: color, doubleSided: true, alphaBlend: true });
+      plane.pickable = false;
+      if (spec.rotation) this.applyEulerQuat(plane, spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+      BL.addToScene(scene, plane);
+      slot = { texture, system: null };
+    } else {
+      const reused = this.freeLabelSlots.pop();
+      if (reused) {
+        BL.updateTexture2DFromPixels(engine, reused.texture, pixels);
+        slot = reused;
+      } else {
+        const texture = BL.createTexture2DFromPixels(engine, pixels, LABEL_TEX_W, LABEL_TEX_H, { minFilter: 'linear', magFilter: 'linear', srgb: true });
+        const atlas = BL.createGridSpriteAtlas(texture, { cellWidthPx: LABEL_TEX_W, cellHeightPx: LABEL_TEX_H });
+        // Drawn after the scene's meshes so a label is not occluded in-plane.
+        const system = BL.createFacingBillboardSystem(atlas, { capacity: 1, blendMode: BL.billboardBlendAlpha, order: 999 });
+        BL.addFacingBillboardSystem(scene, system);
+        slot = { texture, system };
+      }
+      BL.clearBillboardSprites(slot.system!);
+      BL.addBillboardSpriteIndex(slot.system!, { position: [0, 0, 0], sizeWorld: size, color });
+      slot.system!.visible = true;
+    }
+    this.labelRecords.set(handle, {
+      slot, plane, canvas, fontSize, fontWeight, background: spec.background, borderColor: spec.borderColor,
+      size, color, position: [0, 0, 0], visible: true, alpha: 1,
+    });
+    return handle;
+  }
+  private labelRecords = new Map<LabelHandle, LiteLabel>();
+  private freeLabelSlots: { texture: BLNS.Texture2D; system: BLNS.FacingBillboardSpriteSystem }[] = [];
+  /** Rewrite a billboard label's one sprite from its record. */
+  private syncLabel(rec: LiteLabel): void {
+    const sys = rec.slot.system;
+    if (sys) {
+      BL.updateBillboardSpriteIndex(sys, 0, {
+        position: [rec.position[0], rec.position[1], -rec.position[2]],
+        sizeWorld: [rec.size[0] * (rec.scale ?? 1), rec.size[1] * (rec.scale ?? 1)],
+        color: [rec.color[0], rec.color[1], rec.color[2], rec.color[3] * rec.alpha],
+      });
+      sys.visible = rec.visible;
+    } else if (rec.plane) {
+      rec.plane.position.set(rec.position[0], rec.position[1], -rec.position[2]);
+      const s = rec.scale ?? 1;
+      rec.plane.scaling.set(s, s, s);
+      rec.plane.visible = rec.visible;
+      const m = rec.plane.material as Partial<BLNS.PbrMaterialProps>;
+      m.baseColorFactor = [rec.color[0], rec.color[1], rec.color[2], rec.color[3] * rec.alpha];
+      BL.markMaterialUboDirty(rec.plane.material);
+    }
   }
   setLabelText(h: LabelHandle, text: string): void {
-    void h;
-    void text;
+    const rec = this.labelRecords.get(h);
+    if (!rec || !this.engine) return;
+    const px = drawLabelPixels(rec.canvas, text, rec.fontSize, rec.fontWeight, rec.background, rec.borderColor, !rec.slot.system);
+    if (px) BL.updateTexture2DFromPixels(this.engine, rec.slot.texture, px);
   }
   setLabelPosition(h: LabelHandle, x: number, y: number, z: number): void {
-    void h;
-    void x;
-    void y;
-    void z;
+    const rec = this.labelRecords.get(h);
+    if (!rec) return;
+    rec.position = [x, y, z];
+    this.syncLabel(rec);
   }
   setLabelColor(h: LabelHandle, r: number, g: number, b: number): void {
-    void h;
-    void r;
-    void g;
-    void b;
+    const rec = this.labelRecords.get(h);
+    if (!rec) return;
+    rec.color = [r, g, b, rec.color[3]];
+    this.syncLabel(rec);
   }
   setLabelAlpha(h: LabelHandle, alpha: number): void {
-    void h;
-    void alpha;
+    const rec = this.labelRecords.get(h);
+    if (!rec) return;
+    rec.alpha = alpha;
+    this.syncLabel(rec);
   }
   setLabelVisible(h: LabelHandle, visible: boolean): void {
-    void h;
-    void visible;
+    const rec = this.labelRecords.get(h);
+    if (!rec) return;
+    rec.visible = visible;
+    this.syncLabel(rec);
+  }
+  /**
+   * Uniform scale on a label, multiplying the size it was created at — the
+   * plugin-host twin of BabylonAdapter.getLabelPlane / ThreeAdapter.getLabelObject
+   * for FloatingDamageNumbers' pop. Class-only. False on an unknown handle.
+   */
+  setLabelScale(h: LabelHandle, scale: number): boolean {
+    const rec = this.labelRecords.get(h);
+    if (!rec) return false;
+    rec.scale = scale;
+    this.syncLabel(rec);
+    return true;
   }
   disposeLabel(h: LabelHandle): void {
-    void h;
+    const rec = this.labelRecords.get(h);
+    if (!rec) return;
+    this.labelRecords.delete(h);
+    if (rec.slot.system) {
+      BL.clearBillboardSprites(rec.slot.system);
+      rec.slot.system.visible = false;
+      this.freeLabelSlots.push(rec.slot as { texture: BLNS.Texture2D; system: BLNS.FacingBillboardSpriteSystem });
+    } else if (rec.plane) {
+      if (this.scene) BL.removeFromScene(this.scene, rec.plane);
+      BL.disposeMeshGpu(rec.plane);
+    }
   }
 
   // ─── Geometry / billboard ───
@@ -1714,25 +2082,170 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Phase-3: particle systems ───
-  // Babylon Lite's preview build ships no ParticleSystem/GPUParticleSystem
-  // function — its particle surface is the billboard-sprite system
-  // (createFacingBillboardSystem / addBillboardSprite) and the node-block
-  // emitter (loadNodeBlockEmitterWithGeometry). Standing a full GPU-compute
-  // emitter on that is out of scope for this provisional adapter, so — exactly
-  // like the line/label/sky stubs — bursts no-op and continuous emitters track
-  // handle + position so the create→setPosition→dispose surface is structurally
-  // correct. The GPU/CPU auto-select + ParticleBurst/Emitter spec mapping lives
-  // in the (core-backed) Babylon adapter; revisit once Lite's emitter lands.
+  // Babylon Lite 1.8.0 ships no ParticleSystem. A continuous emitter is
+  // simulated here on the CPU — Babylon's sphere emitter, in the canonical
+  // frame — and drawn through Lite's camera-facing billboard sprites, one
+  // draw per (blend, texture) for every emitter that shares it. Bursts
+  // (createParticleBurst) are still a no-op here; SpaceShooterFX draws its own.
   createParticleEmitter(id: string, spec: ParticleEmitterSpec): ParticleEmitterHandle {
     const handle = this.makeHandle<ParticleEmitterHandle>('emitter', id);
-    this.particleEmitters.set(handle, {
+    const cap = Math.max(1, Math.floor(spec.capacity));
+    const e: LiteEmitter = {
       position: spec.position ? [...spec.position] as Vec3 : [0, 0, 0],
       followCamera: spec.followCamera ?? false,
-    });
+      spec,
+      layerKey: `${spec.blend ?? 'add'}|${String((spec.texture as unknown as { __handle?: string })?.__handle ?? 'dot')}`,
+      texture: spec.texture,
+      cap,
+      pos: new Float32Array(cap * 3),
+      vel: new Float32Array(cap * 3),
+      age: new Float32Array(cap),
+      life: new Float32Array(cap),
+      size: new Float32Array(cap),
+      tint: new Float32Array(cap * 4),
+      next: 0,
+      owed: 0,
+    };
+    this.particleEmitters.set(handle, e);
+    // Pre-warm, so a field is already populated on its first frame.
+    const warm = Math.min(600, Math.max(0, spec.preWarmCycles ?? 0));
+    for (let k = 0; k < warm; k++) this.stepEmitter(e, 1 / 60);
     return handle;
   }
   disposeParticleEmitter(h: ParticleEmitterHandle): void {
     this.particleEmitters.delete(h);
+  }
+  /**
+   * The canonical seat of an emitter, for a plugin that moves it (SmokeScreen):
+   * `position` is the emitter's own array, so writing it moves the emitter.
+   * The Lite twin of BabylonAdapter.getParticleEmitterSeat.
+   */
+  getParticleEmitterSeat(h: ParticleEmitterHandle): { position: Vec3; followsCamera: boolean } | undefined {
+    const e = this.particleEmitters.get(h);
+    return e ? { position: e.position, followsCamera: e.followCamera } : undefined;
+  }
+
+  /** Advance one emitter: age and move the live particles, then spawn what the rate owes. */
+  private stepEmitter(e: LiteEmitter, dt: number): void {
+    const s = e.spec;
+    const g = s.gravity;
+    for (let i = 0; i < e.cap; i++) {
+      if (e.life[i]! <= 0) continue;
+      e.age[i] = e.age[i]! + dt;
+      if (e.age[i]! >= e.life[i]!) {
+        e.life[i] = 0;
+        continue;
+      }
+      const p = i * 3;
+      if (g) {
+        e.vel[p] = e.vel[p]! + g[0] * dt;
+        e.vel[p + 1] = e.vel[p + 1]! + g[1] * dt;
+        e.vel[p + 2] = e.vel[p + 2]! + g[2] * dt;
+      }
+      e.pos[p] = e.pos[p]! + e.vel[p]! * dt;
+      e.pos[p + 1] = e.pos[p + 1]! + e.vel[p + 1]! * dt;
+      e.pos[p + 2] = e.pos[p + 2]! + e.vel[p + 2]! * dt;
+    }
+    e.owed += Math.max(0, s.emitRate) * dt;
+    let spawn = Math.min(Math.floor(e.owed), e.cap);
+    e.owed -= Math.floor(e.owed);
+    const range = Math.min(1, Math.max(0, s.emitRadiusRange ?? 0.2));
+    const rnd = (a: number, b: number): number => a + Math.random() * (b - a);
+    while (spawn-- > 0) {
+      const i = e.next;
+      e.next = (e.next + 1) % e.cap;
+      // A uniform direction; the start point on (or, with range, inside) the sphere.
+      const u = Math.random() * 2 - 1;
+      const t = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(1 - u * u);
+      const dx = r * Math.cos(t), dy = u, dz = r * Math.sin(t);
+      const rad = s.emitRadius * (1 - range * Math.random());
+      const p = i * 3;
+      e.pos[p] = e.position[0] + dx * rad;
+      e.pos[p + 1] = e.position[1] + dy * rad;
+      e.pos[p + 2] = e.position[2] + dz * rad;
+      const power = rnd(s.minEmitPower, s.maxEmitPower);
+      e.vel[p] = dx * power;
+      e.vel[p + 1] = dy * power;
+      e.vel[p + 2] = dz * power;
+      e.age[i] = 0;
+      e.life[i] = Math.max(1e-3, rnd(s.minLifeTime, s.maxLifeTime));
+      e.size[i] = rnd(s.minSize, s.maxSize);
+      const k = Math.random();
+      for (let c = 0; c < 4; c++) e.tint[i * 4 + c] = s.color1[c]! + (s.color2[c]! - s.color1[c]!) * k;
+    }
+  }
+
+  /** The frame's particle work: re-seat camera-followers, step, and rewrite every layer's sprites. */
+  private stepParticles(dt: number): void {
+    const scene = this.scene;
+    const engine = this.engine;
+    if (!scene || !engine || this.particleEmitters.size === 0) {
+      for (const layer of this.particleLayers.values()) {
+        if (layer.visible) {
+          BL.clearBillboardSprites(layer);
+          layer.visible = false;
+        }
+      }
+      return;
+    }
+    const cam = scene.camera as { worldMatrix?: ArrayLike<number> } | null;
+    for (const layer of this.particleLayers.values()) BL.clearBillboardSprites(layer);
+    const used = new Set<string>();
+    const sprite = { position: [0, 0, 0] as [number, number, number], sizeWorld: [0, 0] as [number, number], color: [0, 0, 0, 0] as [number, number, number, number] };
+    for (const e of this.particleEmitters.values()) {
+      if (e.followCamera && cam?.worldMatrix) {
+        const m = cam.worldMatrix;
+        e.position[0] = m[12]!;
+        e.position[1] = m[13]!;
+        e.position[2] = -m[14]!; // LH → canonical
+      }
+      this.stepEmitter(e, dt);
+      const layer = this.particleLayer(engine, scene, e);
+      if (!layer) continue;
+      used.add(e.layerKey);
+      const dead = e.spec.colorDead;
+      for (let i = 0; i < e.cap; i++) {
+        if (e.life[i]! <= 0) continue;
+        const p = i * 3;
+        sprite.position[0] = e.pos[p]!;
+        sprite.position[1] = e.pos[p + 1]!;
+        sprite.position[2] = -e.pos[p + 2]!; // canonical → LH
+        sprite.sizeWorld[0] = e.size[i]!;
+        sprite.sizeWorld[1] = e.size[i]!;
+        const k = e.age[i]! / e.life[i]!;
+        for (let c = 0; c < 4; c++) sprite.color[c] = e.tint[i * 4 + c]! + (dead[c]! - e.tint[i * 4 + c]!) * k;
+        if (layer.count >= PARTICLE_LAYER_CAPACITY) break;
+        BL.addBillboardSpriteIndex(layer, sprite);
+      }
+    }
+    for (const [key, layer] of this.particleLayers) layer.visible = used.has(key) && layer.count > 0;
+  }
+
+  /** The shared billboard system an emitter draws into, built on first use. */
+  private particleLayer(engine: BLNS.EngineContext, scene: BLNS.SceneContext, e: LiteEmitter): BLNS.FacingBillboardSpriteSystem | null {
+    let layer = this.particleLayers.get(e.layerKey);
+    if (layer) return layer;
+    const tex = this.dynamicTextureObjects.get(e.texture);
+    let atlas: BLNS.SpriteAtlas;
+    if (tex) {
+      atlas = BL.createGridSpriteAtlas(tex, { cellWidthPx: tex.width, cellHeightPx: tex.height });
+    } else {
+      // A texture this adapter never loaded (loadTexture is not wired yet): a soft round dot.
+      this.particleDot ??= BL.createGridSpriteAtlas(
+        BL.createTexture2DFromPixels(engine, softDotPixels(32), 32, 32, { minFilter: 'linear', magFilter: 'linear' }),
+        { cellWidthPx: 32, cellHeightPx: 32 },
+      );
+      atlas = this.particleDot;
+    }
+    const blend = e.spec.blend ?? 'add';
+    layer = BL.createFacingBillboardSystem(atlas, {
+      capacity: PARTICLE_LAYER_CAPACITY,
+      blendMode: blend === 'add' ? BL.billboardBlendAdditive : BL.billboardBlendAlpha,
+    });
+    BL.addFacingBillboardSystem(scene, layer);
+    this.particleLayers.set(e.layerKey, layer);
+    return layer;
   }
 
   // ─── Phase-3: glow / bloom / emissive / render ordering ───
@@ -1883,6 +2396,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       // other panes regardless of Lite's frame pacing. Clamp big stalls.
       let last = performance.now();
       BL.onBeforeRender(scene, () => {
+        this.buildLateMaterialGroups(scene);
         const now = performance.now();
         const interval = now - last;
         const dt = Math.min(0.1, interval / 1000);
@@ -1890,6 +2404,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
         if (this.timedFrames > 0) this.frameMs = this.frameMs * 0.9 + interval * 0.1;
         this.timedFrames++;
         this.onFrame?.(dt);
+        this.stepParticles(dt);
         this.tickMs = this.tickMs * 0.9 + (performance.now() - now) * 0.1;
       });
     }
@@ -1916,6 +2431,49 @@ export class BabylonLiteAdapter implements RendererAdapter {
       this.sceneRegistered = false;
     });
   }
+  /**
+   * Draw meshes whose material FAMILY first appeared after registerScene.
+   *
+   * Lite (1.8.0) builds one render group per material family (Standard, PBR,
+   * each ShaderMaterial…) and only inside `registerScene`. A mesh added later
+   * whose family already has a group is drawn, through its single-mesh
+   * rebuild; a mesh whose family is NEW queues the group's builder on
+   * `_deferredBuilders`, which nothing runs again — so it is silently never
+   * drawn. That is every plugin that brings a material of its own once the
+   * scene is up (NebulaSky's unlit PBR faces, every WGSL ShaderMaterial), every
+   * GLB that lands after registration, and every adapter mesh in a scene that
+   * had no Standard mesh when it registered.
+   *
+   * There is no public call for it, so this does from the frame hook what
+   * `registerScene` does with that queue. Internal fields, so each is checked;
+   * a Lite that renames them leaves this a no-op.
+   */
+  private buildLateMaterialGroups(scene: BLNS.SceneContext): void {
+    const s = scene as unknown as LiteSceneInternals;
+    if (!s._built || !Array.isArray(s._deferredBuilders) || s._deferredBuilders.length === 0) return;
+    if (this.lateBuilding) return;
+    this.lateBuilding = true;
+    // Exactly what registerScene does with the same queue: run the builders
+    // (each adds its group's renderables and updater and marks it built),
+    // sort by order, bump the version, and re-record the frame graph so every
+    // task sees the new renderables.
+    const builders = s._deferredBuilders.splice(0);
+    void Promise.all(builders.map((b) => b())).then(
+      () => {
+        this.lateBuilding = false;
+        if (this.scene !== scene) return; // disposed meanwhile
+        s._renderables.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        s._renderableVersion++;
+        s._frameGraph?.build();
+      },
+      (err: unknown) => {
+        this.lateBuilding = false;
+        console.error('[BabylonLiteAdapter] building a late material group failed', err);
+      },
+    );
+  }
+  private lateBuilding = false;
+
   stopLoop(): void {
     if (this.engine) BL.stopEngine(this.engine);
     this.onFrame = undefined;
@@ -1939,7 +2497,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.bodyMeshIds.clear();
     this.pendingPhysicsCreates = [];
     if (this.scene) BL.disposeScene(this.scene);
-    if (this.engine) BL.disposeEngine(this.engine);
+    // The engine stays with its canvas for the next adapter (see init); one
+    // whose canvas is gone is released.
+    if (this.engine && (!this.canvas || LITE_ENGINES.get(this.canvas) !== this.engine)) BL.disposeEngine(this.engine);
     this.scene = undefined;
     this.engine = undefined;
     this.canvas = null;
@@ -1967,6 +2527,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.dynamicTextures.clear();
     this.dynamicTextureObjects.clear();
     this.particleEmitters.clear();
+    this.particleLayers.clear();
+    this.particleDot = null;
+    this.labelRecords.clear();
+    this.freeLabelSlots = [];
     this.glowMeshes.clear();
     this.glowSpec = null;
   }

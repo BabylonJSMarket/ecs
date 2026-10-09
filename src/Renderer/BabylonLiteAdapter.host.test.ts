@@ -9,7 +9,7 @@
  * touched (see BabylonLiteAdapter.gravity.test for the same pattern).
  */
 import { describe, it, expect, vi } from 'vitest';
-import type { CameraHandle } from './types';
+import type { CameraHandle, MeshHandle, ParticleEmitterSpec, TextureHandle } from './types';
 
 vi.hoisted(() => {
   // Lite's bundle reads these at module init (see BabylonLiteAdapter.contract.test).
@@ -26,6 +26,20 @@ vi.mock('@babylonjs/lite', async (importOriginal) => ({
   createPhysicsAggregate: vi.fn((_world: unknown, node: unknown) => ({ body: { node }, shape: {} })),
   setPhysicsBodyPreStep: vi.fn(),
   setPhysicsBodyMotionType: vi.fn(),
+  // Billboard sprites need a device; record them instead.
+  createTexture2DFromPixels: vi.fn(() => ({ width: 32, height: 32 })),
+  createGridSpriteAtlas: vi.fn(() => ({ atlas: true })),
+  createFacingBillboardSystem: vi.fn(() => ({ visible: true, count: 0, sprites: [] as unknown[] })),
+  addFacingBillboardSystem: vi.fn(),
+  clearBillboardSprites: vi.fn((sys: { count: number; sprites: unknown[] }) => { sys.count = 0; sys.sprites.length = 0; }),
+  addBillboardSpriteIndex: vi.fn((sys: { count: number; sprites: unknown[] }, props: { position: number[]; color: number[] }) => {
+    sys.sprites.push({ position: [...props.position], color: [...props.color] });
+    return sys.count++;
+  }),
+  updateBillboardSpriteIndex: vi.fn((sys: { sprites: Record<string, unknown>[] }, i: number, patch: Record<string, unknown>) => {
+    Object.assign(sys.sprites[i]!, patch);
+  }),
+  updateTexture2DFromPixels: vi.fn(),
 }));
 
 const { BabylonLiteAdapter } = await import('./BabylonLiteAdapter');
@@ -37,6 +51,7 @@ interface Internals {
   havokReady: boolean;
   cameras: Map<CameraHandle, { camera: unknown }>;
   meshesByMeshId: Map<string, unknown>;
+  meshes: Map<MeshHandle, unknown>;
 }
 
 const internals = (a: InstanceType<typeof BabylonLiteAdapter>) => a as unknown as Internals;
@@ -93,4 +108,215 @@ describe('BabylonLiteAdapter plugin host accessors', () => {
     expect(a.getPhysicsBody('ball')).toBeNull();
     expect(a.getMeshIdForBody(body!)).toBeUndefined();
   });
+
+  it('getMeshObject / getMeshRoot hand out the Lite mesh by handle and by id, null when unknown or disposed', () => {
+    const a = new BabylonLiteAdapter();
+    const mesh = { name: 'flame', children: [], visible: true, pickable: true };
+    const h = { __handle: 'mesh:flame' } as unknown as MeshHandle;
+    expect(a.getMeshObject(h)).toBeNull();
+    expect(a.getMeshRoot('flame')).toBeNull();
+    internals(a).meshes.set(h, mesh);
+    internals(a).meshesByMeshId.set('flame', mesh);
+    expect(a.getMeshObject(h)).toBe(mesh);
+    expect(a.getMeshRoot('flame')).toBe(mesh);
+    a.disposeMesh(h);
+    expect(a.getMeshObject(h)).toBeNull();
+    expect(a.getMeshRoot('flame')).toBeNull();
+  });
+
+  it('runs the material-group builders queued after registerScene, once, and re-records the frame graph', async () => {
+    const a = new BabylonLiteAdapter();
+    let calls = 0;
+    let rebuilt = 0;
+    const scene = {
+      _built: true,
+      _deferredBuilders: [] as (() => Promise<void>)[],
+      _renderables: [{ order: 5 }] as { order: number }[],
+      _renderableVersion: 0,
+      _frameGraph: { build: () => { rebuilt++; } },
+    };
+    // What Lite queues for a NEW material family: build it and add its renderables.
+    scene._deferredBuilders.push(async () => { calls++; scene._renderables.push({ order: 2 }); });
+    internals(a).scene = scene;
+    const build = (a as unknown as { buildLateMaterialGroups(s: unknown): void }).buildLateMaterialGroups.bind(a);
+    build(scene);
+    build(scene); // a second frame while the first build is in flight starts nothing
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toBe(1);
+    expect(scene._deferredBuilders).toHaveLength(0);
+    expect(scene._renderables.map((r) => r.order)).toEqual([2, 5]);
+    expect(scene._renderableVersion).toBe(1);
+    expect(rebuilt).toBe(1);
+    build(scene);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rebuilt).toBe(1);
+  });
+
+  it('leaves a scene that is not yet registered, or has nothing queued, alone', () => {
+    const a = new BabylonLiteAdapter();
+    const build = (a as unknown as { buildLateMaterialGroups(s: unknown): void }).buildLateMaterialGroups.bind(a);
+    const builder = () => { throw new Error('must not run'); };
+    expect(() => build({ _built: false, _deferredBuilders: [builder] })).not.toThrow();
+    expect(() => build({ _built: true, _deferredBuilders: [] })).not.toThrow();
+    expect(() => build({})).not.toThrow();
+  });
+
+  it('setMeshVisible on a drawing mesh hides it alone, like Babylon, so a GLB under a hidden proxy still draws', () => {
+    const a = new BabylonLiteAdapter();
+    const glb = { name: 'car', children: [], visible: true, _gpu: {} };
+    const proxy = { name: 'proxy', children: [glb], visible: true, _gpu: {} };
+    const h = a.adoptMesh('proxy', proxy as never);
+    a.setMeshVisible(h, false);
+    expect(proxy.visible).toBe(false);
+    expect(glb.visible).toBe(true);
+  });
+
+  it('setMeshVisible on an empty root (glTF root, plugin-built car) hides and shows the whole subtree', () => {
+    const a = new BabylonLiteAdapter();
+    const child = { name: 'wheel', children: [], visible: true };
+    const root = { name: 'car', children: [child], visible: true };
+    const h = a.adoptMesh('car', root as never);
+    a.setMeshVisible(h, false);
+    expect(root.visible).toBe(false);
+    expect(child.visible).toBe(false);
+    a.setMeshVisible(h, true);
+    expect(child.visible).not.toBe(false);
+  });
+
+  it('adoptMesh registers a plugin-built node by handle and by id', () => {
+    const a = new BabylonLiteAdapter();
+    const node = { name: 'hull', children: [], visible: true, position: { set: vi.fn() }, scaling: { set: vi.fn() } };
+    const h = a.adoptMesh('hull', node as never);
+    expect(a.getMeshObject(h)).toBe(node);
+    expect(a.getMeshRoot('hull')).toBe(node);
+    a.setMeshScale(h, 2, 2, 2);
+    expect(node.scaling.set).toHaveBeenCalledWith(2, 2, 2);
+  });
+
+  const emitterSpec = (over: Partial<ParticleEmitterSpec> = {}): ParticleEmitterSpec => ({
+    texture: { __handle: 'smoke' } as unknown as TextureHandle,
+    capacity: 50, emitRate: 100, emitRadius: 0, minSize: 1, maxSize: 1, minLifeTime: 1, maxLifeTime: 1,
+    minEmitPower: 0, maxEmitPower: 0, color1: [1, 0, 0, 1], color2: [1, 0, 0, 1], colorDead: [0, 0, 0, 0],
+    ...over,
+  });
+
+  it('a continuous emitter spawns at its rate, at its canonical seat, drawn mirrored into Lite', () => {
+    const a = new BabylonLiteAdapter();
+    const scene = { camera: null };
+    internals(a).scene = scene;
+    internals(a).engine = {};
+    const h = a.createParticleEmitter('smoke', emitterSpec({ position: [1, 2, 3] }));
+    const step = (dt: number) => (a as unknown as { stepParticles(dt: number): void }).stepParticles(dt);
+    step(0.1);
+    const layer = [...(a as unknown as { particleLayers: Map<string, { sprites: { position: number[]; color: number[] }[] }> }).particleLayers.values()][0]!;
+    expect(layer.sprites).toHaveLength(10);
+    expect(layer.sprites[0]!.position).toEqual([1, 2, -3]);
+    // A plugin re-seats it through the seat; new particles start there.
+    const seat = a.getParticleEmitterSeat(h)!;
+    expect(seat.followsCamera).toBe(false);
+    seat.position[0] = 5;
+    seat.position[2] = -1;
+    step(0.1);
+    expect(layer.sprites.some((p) => p.position[0] === 5 && p.position[2] === 1)).toBe(true);
+    // Colour runs to colorDead over life.
+    expect(layer.sprites.every((p) => p.color[0] <= 1)).toBe(true);
+    a.disposeParticleEmitter(h);
+    expect(a.getParticleEmitterSeat(h)).toBeUndefined();
+    step(0.1);
+    expect(layer.sprites).toHaveLength(0);
+  });
+
+  it('a camera-following emitter re-seats at the camera every frame', () => {
+    const a = new BabylonLiteAdapter();
+    const m = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 7, 8, 9, 1];
+    internals(a).scene = { camera: { worldMatrix: m } };
+    internals(a).engine = {};
+    const h = a.createParticleEmitter('dust', emitterSpec({ followCamera: true }));
+    (a as unknown as { stepParticles(dt: number): void }).stepParticles(0.05);
+    expect(a.getParticleEmitterSeat(h)!.position).toEqual([7, 8, -9]);
+  });
+
+  it('a label is real on Lite: text drawn to pixels, one billboard sprite, mirrored, tinted, scaled, and its slot reused', () => {
+    const ctx = {
+      clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(), strokeText: vi.fn(), fillText: vi.fn(),
+      getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+    } as Record<string, unknown>;
+    vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => ctx }) });
+    try {
+      const a = new BabylonLiteAdapter();
+      internals(a).scene = {};
+      internals(a).engine = {};
+      const h = a.createLabel('dmg', { text: '42', color: [1, 0, 0], scale: 2 });
+      expect(ctx.fillText).toHaveBeenCalledWith('42', 256, 128);
+      a.setLabelPosition(h, 1, 2, 3);
+      a.setLabelAlpha(h, 0.5);
+      expect(a.setLabelScale(h, 1.5)).toBe(true);
+      const rec = (a as unknown as { labelRecords: Map<unknown, { slot: { system: { sprites: Record<string, unknown>[]; visible: boolean } } }> }).labelRecords.get(h)!;
+      const sprite = rec.slot.system.sprites[0]!;
+      expect(sprite.position).toEqual([1, 2, -3]);
+      expect(sprite.sizeWorld).toEqual([2 * 2 * 1.5, 2 * 1.5]);
+      expect(sprite.color).toEqual([1, 0, 0, 0.5]);
+      a.setLabelVisible(h, false);
+      expect(rec.slot.system.visible).toBe(false);
+      const system = rec.slot.system;
+      a.disposeLabel(h);
+      expect(a.setLabelScale(h, 1)).toBe(false);
+      const h2 = a.createLabel('dmg2', { text: '7' });
+      const rec2 = (a as unknown as { labelRecords: Map<unknown, { slot: { system: unknown } }> }).labelRecords.get(h2)!;
+      expect(rec2.slot.system).toBe(system);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('getAnimationGroup hands out one clip scoped to its mesh', () => {
+    const a = new BabylonLiteAdapter();
+    const clip = { name: 'hit' };
+    (a as unknown as { animationGroups: Map<string, unknown> }).animationGroups.set('ship/hit', clip);
+    expect(a.getAnimationGroup('ship', 'hit')).toBe(clip);
+    expect(a.getAnimationGroup('other', 'hit')).toBeNull();
+  });
+
+  it("a glTF root takes the adapter's Z mirror, not the loader's X mirror, and keeps it under setMeshScale", () => {
+    const a = new BabylonLiteAdapter();
+    const scaling = { v: [-1, 1, 1], set(x: number, y: number, z: number) { this.v = [x, y, z]; } };
+    const root = { name: '__root__', children: [], scaling };
+    (a as unknown as { seatGltfRoot(r: unknown, s: number): void }).seatGltfRoot(root, 2);
+    expect(scaling.v).toEqual([2, 2, -2]);
+    const h = a.adoptMesh('ship', root as never);
+    a.setMeshScale(h, 3, 3, 3);
+    expect(scaling.v).toEqual([3, 3, -3]);
+    // An ordinary mesh is scaled as asked.
+    const plain = { name: 'box', children: [], scaling: { v: [1, 1, 1], set(x: number, y: number, z: number) { this.v = [x, y, z]; } } };
+    a.setMeshScale(a.adoptMesh('box', plain as never), 3, 3, 3);
+    expect(plain.scaling.v).toEqual([3, 3, 3]);
+  });
+
+  it('a straight-down camera keeps a defined roll: its target leans toward the asked-for up', () => {
+    const a = new BabylonLiteAdapter();
+    const target = { v: [0, 0, 0], set(x: number, y: number, z: number) { this.v = [x, y, z]; } };
+    const camera = { position: { set: vi.fn() }, target };
+    const h = { __handle: 'cam' } as unknown as CameraHandle;
+    (a as unknown as { perspectiveCameras: Map<unknown, unknown> }).perspectiveCameras.set(h, { camera, orientation: { x: 0, y: 0, z: 0, w: 1 } });
+    // Rotation taking +Z to −Y (look down) and +Y to +Z: about +X by +90°.
+    const s = Math.SQRT1_2;
+    a.setCameraPose(h, [0, 10, 0], { x: s, y: 0, z: 0, w: s } as never);
+    const [x, y, z] = target.v;
+    expect(y).toBeCloseTo(9, 3);
+    expect(x).toBeCloseTo(0, 6);
+    // Canonical up +Z is Lite −Z: the lean is a hair toward −z, never zero.
+    expect(z).toBeLessThan(0);
+    expect(z).toBeGreaterThan(-0.01);
+  });
+
+  it('applies ModelInstantiateSpec.fit: longest horizontal extent to fitLength, mirror kept, position mirrored', () => {
+    const a = new BabylonLiteAdapter();
+    const v3 = () => ({ v: [0, 0, 0], x: 0, y: 0, z: 0, set(x: number, y: number, z: number) { this.v = [x, y, z]; this.x = x; this.y = y; this.z = z; } });
+    const child = { name: 'hull', children: [], _gpu: {}, boundMin: [-1, 0, -0.5], boundMax: [1, 0.5, 0.5], worldMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
+    const root = { name: '__root__', children: [child], position: v3(), scaling: v3(), rotationQuaternion: { set: vi.fn() } };
+    (a as unknown as { applyModelFit(r: unknown, f: unknown, s: unknown): void }).applyModelFit(root, { fitLength: 4 }, { position: [1, 2, 3] });
+    expect(root.scaling.v).toEqual([2, 2, -2]);
+    expect(root.position.v).toEqual([1, 2, -3]);
+  });
 });
+

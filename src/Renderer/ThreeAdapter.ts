@@ -2366,6 +2366,22 @@ export class ThreeAdapter implements RendererAdapter {
   private findAnimationAction(meshId: string, clipName: string) {
     return this.animationActions.get(`${meshId}/${clipName}`);
   }
+  /**
+   * The AnimationAction for one clip on one mesh, for a plugin that drives
+   * playback the interface's play/stop pair cannot express (SkeletonAnimator's
+   * play-once). Class-only, the Three twin of BabylonAdapter.getAnimationGroup.
+   */
+  getAnimationAction(meshId: string, clipName: string): THREE.AnimationAction | undefined {
+    return this.findAnimationAction(meshId, clipName);
+  }
+  /**
+   * The Object3D (a Sprite, or a Mesh for a world-fixed sign) a label is drawn
+   * on, for a plugin that scales or moves it (FloatingDamageNumbers' pop).
+   * Class-only, the Three twin of BabylonAdapter.getLabelPlane.
+   */
+  getLabelObject(h: LabelHandle): THREE.Object3D | undefined {
+    return this.labels.get(h)?.sprite;
+  }
 
   playAnimation(meshId: string, clipName: string, loop = true): void {
     const action = this.findAnimationAction(meshId, clipName);
@@ -2447,6 +2463,16 @@ export class ThreeAdapter implements RendererAdapter {
     this.particleRuntimes.add(rt);
     this.particleEmitters.set(handle, rt);
     return handle;
+  }
+
+  /**
+   * Where a continuous emitter spawns, for a plugin that moves it (SmokeScreen):
+   * `position` is the runtime's own canonical triple, so writing it re-seats the
+   * emitter. Class-only, the Three twin of BabylonAdapter.getParticleEmitterSeat.
+   */
+  getParticleEmitterSeat(h: ParticleEmitterHandle): { position: Vec3; followsCamera: boolean } | undefined {
+    const rt = this.particleEmitters.get(h);
+    return rt ? { position: rt.position, followsCamera: rt.followCamera } : undefined;
   }
 
   disposeParticleEmitter(h: ParticleEmitterHandle): void {
@@ -2537,7 +2563,14 @@ export class ThreeAdapter implements RendererAdapter {
     const dx = s * Math.cos(th), dy = s * Math.sin(th), dz = u;
     const rFrac = 1 - Math.random() * (1 - rt.emitRadiusRange);
     const r = rt.emitRadius * rFrac;
-    slot.px = dx * r; slot.py = dy * r; slot.pz = dz * r; // LOCAL to the Points origin
+    // LOCAL to the Points origin. A plugin that re-seats a fixed emitter
+    // (getParticleEmitterSeat) moves `rt.position`, not the Points: new
+    // particles start at the seat and the ones already out stay where they are.
+    const p = rt.points.position;
+    const ox = rt.followCamera ? 0 : rt.position[0] - p.x;
+    const oy = rt.followCamera ? 0 : rt.position[1] - p.y;
+    const oz = rt.followCamera ? 0 : rt.position[2] - p.z;
+    slot.px = ox + dx * r; slot.py = oy + dy * r; slot.pz = oz + dz * r;
     const power = rt.minEmitPower + Math.random() * (rt.maxEmitPower - rt.minEmitPower);
     slot.vx = dx * power; slot.vy = dy * power; slot.vz = dz * power;
     slot.life = rt.minLifeTime + Math.random() * (rt.maxLifeTime - rt.minLifeTime);
