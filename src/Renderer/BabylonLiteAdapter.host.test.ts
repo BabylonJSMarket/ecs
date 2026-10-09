@@ -411,3 +411,151 @@ describe('BabylonLiteAdapter plugin host accessors', () => {
   });
 });
 
+
+describe('BabylonLiteAdapter glow layer host', () => {
+  const ready = () => {
+    const a = new BabylonLiteAdapter();
+    internals(a).scene = { meshes: [], surface: { canvas: { width: 4, height: 4 }, scRT: {} } };
+    internals(a).engine = { fake: 'engine' };
+    const layer = () => (a as unknown as { glowLayer: { isIncluded(n: unknown): boolean } | null }).glowLayer;
+    return { a, layer };
+  };
+
+  it('addGlowNode answers false until a glow layer is up, then enrols the node', () => {
+    const { a, layer } = ready();
+    const node = { plugin: 'quad' };
+    expect(a.addGlowNode(node)).toBe(false);
+    a.setGlowLayer({ intensity: 0.5 });
+    expect(a.addGlowNode(node, true)).toBe(true);
+    expect(layer()!.isIncluded(node)).toBe(true);
+    a.removeGlowNode(node);
+    expect(layer()!.isIncluded(node)).toBe(false);
+  });
+
+  it('addGlowMesh enrols the node behind a handle, also when it came before the layer', () => {
+    const { a, layer } = ready();
+    const node = { mesh: 1 };
+    const h = { __handle: 'm' } as unknown as MeshHandle;
+    internals(a).meshes.set(h, node);
+    a.setGlowLayer({ intensity: 0.5 });
+    a.addGlowMesh(h);
+    expect(layer()!.isIncluded(node)).toBe(true);
+    a.removeGlowMesh(h);
+    expect(layer()!.isIncluded(node)).toBe(false);
+    a.addGlowMesh(h);
+    // A settings change keeps the enrolment; off clears it.
+    a.setGlowLayer({ intensity: 0.8, textureRatio: 0.25 });
+    expect(layer()!.isIncluded(node)).toBe(true);
+    a.setGlowLayer(null);
+    expect(layer()!.isIncluded(node)).toBe(false);
+  });
+
+  it('with no scene yet, the glow calls only record their settings', () => {
+    const a = new BabylonLiteAdapter();
+    expect(() => a.setGlowLayer({ intensity: 1 })).not.toThrow();
+    expect(a.addGlowNode({})).toBe(false);
+    expect(() => a.removeGlowNode({})).not.toThrow();
+  });
+});
+
+describe('BabylonLiteAdapter plugin shadow casters', () => {
+  it('addShadowCasterNode adds to every light list (a new array), keeps the Shadow casters, and reaches a later light', async () => {
+    const BL = await import('@babylonjs/lite');
+    const set = BL.setShadowTaskCasterMeshes as unknown as ReturnType<typeof vi.fn>;
+    const a = new BabylonLiteAdapter();
+    const ia = a as unknown as { shadowGenerators: Map<unknown, unknown>; shadowCasterMeshes: Map<unknown, unknown[]>; meshes: Map<unknown, unknown> };
+    const gen = { gen: 1 };
+    const light = 'light' as unknown as LightHandle;
+    const ball = { name: 'ball' };
+    const tree = { name: 'tree' };
+    ia.shadowGenerators.set(light, gen);
+    ia.meshes.set('h-ball', ball);
+    a.attachShadowCaster(light, 'h-ball' as unknown as MeshHandle);
+    const before = ia.shadowCasterMeshes.get(light);
+    a.addShadowCasterNode(tree);
+    a.addShadowCasterNode(tree); // once
+    const after = ia.shadowCasterMeshes.get(light)!;
+    expect(after).toEqual([ball, tree]);
+    expect(after).not.toBe(before);
+    expect(set.mock.calls.at(-1)).toEqual([gen, [ball, tree]]);
+    // A light made later casts it too (its list starts with the plugin nodes).
+    const setCasters = (a as unknown as { setCasters(l: unknown, list: unknown[]): void }).setCasters.bind(a);
+    const late = 'late' as unknown as LightHandle;
+    ia.shadowGenerators.set(late, { gen: 2 });
+    setCasters(late, [...(a as unknown as { pluginShadowCasters: Set<unknown> }).pluginShadowCasters]);
+    expect(ia.shadowCasterMeshes.get(late)).toEqual([tree]);
+    a.removeShadowCasterNode(tree);
+    a.removeShadowCasterNode(tree); // once
+    expect(ia.shadowCasterMeshes.get(light)).toEqual([ball]);
+    expect(ia.shadowCasterMeshes.get(late)).toEqual([]);
+  });
+});
+
+describe('BabylonLiteAdapter plugin shadow casters, PBR preload', () => {
+  it('waits for the generator preload before handing Lite the list, and drops a list overtaken meanwhile', async () => {
+    const BL = await import('@babylonjs/lite');
+    const set = BL.setShadowTaskCasterMeshes as unknown as ReturnType<typeof vi.fn>;
+    const a = new BabylonLiteAdapter();
+    const ia = a as unknown as { shadowGenerators: Map<unknown, unknown> };
+    let release!: () => void;
+    const gen = { _preloadShadowTask: vi.fn(() => new Promise<void>((r) => { release = r; })) };
+    const light = 'light' as unknown as LightHandle;
+    ia.shadowGenerators.set(light, gen);
+    const tree = { name: 'tree' };
+    set.mockClear();
+    a.addShadowCasterNode(tree);
+    expect(gen._preloadShadowTask).toHaveBeenCalledTimes(1);
+    expect(set).not.toHaveBeenCalled();
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(set).toHaveBeenCalledWith(gen, [tree]);
+    // A second change before the first preload lands: only the newest list goes.
+    set.mockClear();
+    const releases: (() => void)[] = [];
+    gen._preloadShadowTask = vi.fn(() => new Promise<void>((r) => releases.push(r)));
+    a.addShadowCasterNode({ name: 'lamp' });
+    a.removeShadowCasterNode(tree);
+    for (const r of releases) r();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set.mock.calls[0]![1]).toEqual([{ name: 'lamp' }]);
+    // A failed preload is logged.
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    gen._preloadShadowTask = vi.fn(() => Promise.reject(new Error('no module')));
+    a.addShadowCasterNode({ name: 'post' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(err).toHaveBeenCalledTimes(1);
+    err.mockRestore();
+  });
+});
+
+describe('BabylonLiteAdapter caster hand-over waits for the material family', () => {
+  it('holds a list until every caster family has its single-mesh builder, then hands it over once', async () => {
+    const BL = await import('@babylonjs/lite');
+    const set = BL.setShadowTaskCasterMeshes as unknown as ReturnType<typeof vi.fn>;
+    const a = new BabylonLiteAdapter();
+    const ia = a as unknown as { shadowGenerators: Map<unknown, unknown>; flushCasters(): void; pendingCasters: Map<unknown, unknown> };
+    const gen = { _preloadShadowTask: vi.fn(() => Promise.resolve()) };
+    const light = 'light' as unknown as LightHandle;
+    ia.shadowGenerators.set(light, gen);
+    const group: { _rebuildSingle?: unknown } = {};
+    const chunk = { name: 'chunk', material: { _buildGroup: group } };
+    set.mockClear();
+    a.addShadowCasterNode(chunk);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(set).not.toHaveBeenCalled();
+    expect(ia.pendingCasters.size).toBe(1);
+    group._rebuildSingle = () => ({});
+    ia.flushCasters();
+    expect(set).toHaveBeenCalledTimes(1);
+    ia.flushCasters();
+    expect(set).toHaveBeenCalledTimes(1);
+    // A waiting list that is overtaken is dropped, not handed over.
+    group._rebuildSingle = undefined;
+    a.addShadowCasterNode({ name: 'other', material: { _buildGroup: group } });
+    await new Promise((r) => setTimeout(r, 0));
+    a.removeShadowCasterNode(chunk);
+    ia.flushCasters();
+    expect(ia.pendingCasters.size).toBe(0);
+  });
+});

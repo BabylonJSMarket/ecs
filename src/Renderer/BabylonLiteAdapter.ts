@@ -27,6 +27,7 @@
 import type * as BLNS from '@babylonjs/lite';
 import * as BL from '@babylonjs/lite';
 import { mirrorZ } from './meshGeometry';
+import { LiteGlowLayer, type LiteGlowModule, type LiteGlowScene } from './liteGlowLayer';
 
 import type {
   ArcCameraSpec,
@@ -355,6 +356,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
   >();
   /** Accumulated caster meshes per light — setShadowTaskCasterMeshes replaces the list. */
   private shadowCasterMeshes = new Map<LightHandle, LiteMesh[]>();
+  /** Nodes plugins made casters (addShadowCasterNode): every light casts them, a later one too. */
+  private pluginShadowCasters = new Set<LiteMesh>();
   /** Set once the scene is registered with the engine (required before anything renders). */
   private sceneRegistered = false;
 
@@ -412,6 +415,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
   /** Selective-glow config + whitelist (empty until addGlowMesh). Null = disabled. */
   private glowSpec: GlowSpec | null = null;
   private glowMeshes = new Set<MeshHandle>();
+  /** The include-only glow pass (liteGlowLayer.ts); built on the first setGlowLayer with a scene. */
+  private glowLayer: LiteGlowLayer | null = null;
   /** HDR bloom config recorded for the pipeline. Null = disabled. */
   /**
    * The camera-following sun: its directional light, the emissive disc parked at
@@ -1023,6 +1028,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       // (NOT via addToScene); this assignment is what makes the light cast shadows.
       light.shadowGenerator = gen;
       this.shadowGenerators.set(handle, gen);
+      if (this.pluginShadowCasters.size) this.setCasters(handle, [...this.pluginShadowCasters]);
     }
     return handle;
   }
@@ -1406,7 +1412,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const list = this.shadowCasterMeshes.get(light) ?? [];
     if (m) list.push(m);
     this.shadowCasterMeshes.set(light, list);
-    if (gen && list.length) BL.setShadowTaskCasterMeshes(gen, list);
+    if (gen && list.length) this.handOverCasters(light, gen, list);
     const handle = this.makeHandle<ShadowCasterHandle>('shadow', `${String(light)}+${String(mesh)}`);
     this.shadowCasters.set(handle, { light, meshes: m ? [m] : [] });
     return handle;
@@ -1428,8 +1434,95 @@ export class BabylonLiteAdapter implements RendererAdapter {
         if (i >= 0) list.splice(i, 1);
       }
     }
-    if (gen) BL.setShadowTaskCasterMeshes(gen, list ?? []);
+    if (gen) {
+      if (list) this.handOverCasters(pair.light, gen, list);
+      else BL.setShadowTaskCasterMeshes(gen, []);
+    }
     this.shadowCasters.delete(h);
+  }
+  /**
+   * Host accessor for adapter plugins: make a node the plugin built cast
+   * shadows under every shadow-casting light — Lite's twin of Babylon's
+   * `generator.addShadowCaster(mesh)`. Lite's only call,
+   * `setShadowTaskCasterMeshes`, REPLACES a generator's list, and this adapter
+   * owns that list, so a plugin calling it wiped every Shadow component's
+   * caster. Here the node joins the adapter's own list instead (as a NEW
+   * array, so Lite builds its depth drawing), and a light made later picks it
+   * up too. Callers: ProceduralCity and RoadsideScenery.
+   */
+  addShadowCasterNode(node: object): void {
+    const m = node as LiteMesh;
+    if (this.pluginShadowCasters.has(m)) return;
+    this.pluginShadowCasters.add(m);
+    for (const light of this.shadowGenerators.keys()) {
+      const list = this.shadowCasterMeshes.get(light) ?? [];
+      if (!list.includes(m)) this.setCasters(light, [...list, m]);
+    }
+  }
+  /** Take a plugin's node back out of every light's casters. */
+  removeShadowCasterNode(node: object): void {
+    const m = node as LiteMesh;
+    if (!this.pluginShadowCasters.delete(m)) return;
+    for (const [light, list] of this.shadowCasterMeshes) {
+      if (list.includes(m)) this.setCasters(light, list.filter((x) => x !== m));
+    }
+  }
+  private setCasters(light: LightHandle, list: LiteMesh[]): void {
+    this.shadowCasterMeshes.set(light, list);
+    const gen = this.shadowGenerators.get(light);
+    if (gen) this.handOverCasters(light, gen, list);
+  }
+  /**
+   * Give Lite a light's caster list.
+   *
+   * A PBR caster's depth drawing needs Lite's PBR no-colour module, which
+   * the generator imports in `_preloadShadowTask`. setShadowTaskCasterMeshes
+   * starts that import but does not wait, and the next frame's shadow pass
+   * records first: "createPbrNoColorMaterialView is not a function", every
+   * frame. So load it first, and hand the list over once it has landed (if
+   * it is still the list this light should cast). Every hand-over goes
+   * through here: a Shadow component attached while a plugin's PBR casters
+   * were still loading handed Lite the list early, and the frame threw.
+   */
+  private handOverCasters(light: LightHandle, gen: BLNS.ShadowGenerator, list: LiteMesh[]): void {
+    const preload = (gen as unknown as { _preloadShadowTask?: (m: readonly LiteMesh[]) => Promise<void> })._preloadShadowTask;
+    if (typeof preload !== 'function') {
+      BL.setShadowTaskCasterMeshes(gen, list);
+      return;
+    }
+    void preload.call(gen, list).then(
+      () => {
+        if (this.shadowCasterMeshes.get(light) !== list || this.shadowGenerators.get(light) !== gen) return;
+        this.pendingCasters.set(light, { gen, list });
+        this.flushCasters();
+      },
+      (err: unknown) => console.error('[BabylonLiteAdapter] a shadow caster could not load its depth shader', err),
+    );
+  }
+  /** Lists waiting for their casters' material families to be built. */
+  private pendingCasters = new Map<LightHandle, { gen: BLNS.ShadowGenerator; list: LiteMesh[] }>();
+  /**
+   * Hand Lite each waiting list whose casters can all be drawn. The shadow
+   * pass draws a caster through its material family's single-mesh builder,
+   * which Lite makes with the family's first mesh — a plugin's first PBR
+   * mesh is built a frame or two after it lands (buildLateMaterialGroups), and
+   * a list handed over before then threw on record. Called after the preload
+   * and every frame.
+   */
+  private flushCasters(): void {
+    for (const [light, { gen, list }] of this.pendingCasters) {
+      if (this.shadowCasterMeshes.get(light) !== list || this.shadowGenerators.get(light) !== gen) {
+        this.pendingCasters.delete(light);
+        continue;
+      }
+      const drawable = list.every((m) => {
+        const group = (m as { material?: { _buildGroup?: { _rebuildSingle?: unknown } } | null }).material?._buildGroup;
+        return !group || typeof group._rebuildSingle === 'function';
+      });
+      if (!drawable) continue;
+      this.pendingCasters.delete(light);
+      BL.setShadowTaskCasterMeshes(gen, list);
+    }
   }
   setMeshReceiveShadows(h: MeshHandle, receive: boolean): void {
     const mesh = this.meshes.get(h);
@@ -1628,6 +1721,14 @@ export class BabylonLiteAdapter implements RendererAdapter {
   /** The Lite EngineContext (GPU device, texture uploads), or null before init(). */
   getEngine(): BLNS.EngineContext | null {
     return this.engine ?? null;
+  }
+  /**
+   * The BRDF lookup image Lite's `loadEnvironment` needs for a `.env` — the
+   * one Babylon embeds (liteEnvironmentBrdf.ts, loaded on first ask). For a
+   * plugin that loads `.env` skies itself, as setEnvironmentTexture does.
+   */
+  async getEnvironmentBrdfUrl(): Promise<string> {
+    return (await import('./liteEnvironmentBrdf')).LITE_ENVIRONMENT_BRDF_URL;
   }
   /** The ArcRotateCamera behind a handle, for the ArcCamera plugin's pitch. */
   getOrbitCamera(h: CameraHandle): BLNS.ArcRotateCamera | null {
@@ -2368,24 +2469,57 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   // ─── Phase-3: glow / bloom / emissive / render ordering ───
-  // Lite's post-process surface is createBloomPostProcessTask wired into the
-  // scene frame graph; this provisional adapter doesn't stand up that graph, so
-  // glow/bloom record their config + whitelist (mirroring the selective-glow
-  // semantics: empty whitelist, cleared on disable) without yet compositing.
-  // A handle stands for its whole subtree in that whitelist — a model root
-  // included — the same root-level treatment setModelVisible gives it; the
-  // engines that composite (Babylon/Three) walk the descendants themselves.
-  // setMeshEmissiveById / setMeshRenderingOptions act for real on the material /
-  // mesh fields Lite does expose.
+  // Lite 1.8 has no glow layer, so liteGlowLayer.ts builds Babylon's
+  // include-only one from frame-graph tasks: enrolled meshes draw their
+  // emissive, other opaque meshes black, the buffer is blurred and added. A
+  // handle stands for its whole subtree (a model root included). The
+  // whitelist starts empty and is cleared on disable, as on Babylon.
+  // setMeshEmissiveById / setMeshRenderingOptions act on the material / mesh
+  // fields Lite exposes.
   setGlowLayer(spec: GlowSpec | null): void {
     this.glowSpec = spec;
     if (!spec) this.glowMeshes.clear();
+    const layer = this.ensureGlowLayer();
+    if (!layer) return;
+    layer.setSettings(spec ? { intensity: spec.intensity, textureRatio: spec.textureRatio, blurKernelSize: spec.blurKernelSize } : null);
+    // Enrolment made before the layer existed, or kept across a settings change.
+    if (spec) for (const h of this.glowMeshes) this.includeGlowHandle(h);
   }
   addGlowMesh(h: MeshHandle): void {
-    if (this.glowSpec) this.glowMeshes.add(h);
+    if (!this.glowSpec) return;
+    this.glowMeshes.add(h);
+    this.includeGlowHandle(h);
   }
   removeGlowMesh(h: MeshHandle): void {
     this.glowMeshes.delete(h);
+    const node = this.meshes.get(h);
+    if (node) this.glowLayer?.exclude(node);
+  }
+  /**
+   * Host accessor for adapter plugins — the Lite twin of Babylon's
+   * `glow.addIncludedOnlyMesh(mesh)`, plus `referenceMeshToUseItsOwnMaterial`
+   * when `ownMaterial` is true. Enrols a node the plugin built (and its
+   * subtree). False when no glow layer is up: a plugin retries each frame, as
+   * on Babylon, since the GlowLayer component may arrive after its mesh.
+   */
+  addGlowNode(node: object, ownMaterial = false): boolean {
+    if (!this.glowSpec || !this.glowLayer) return false;
+    this.glowLayer.include(node, ownMaterial);
+    return true;
+  }
+  /** Take a plugin's node out of the glow layer. */
+  removeGlowNode(node: object): void {
+    this.glowLayer?.exclude(node);
+  }
+  private includeGlowHandle(h: MeshHandle): void {
+    const node = this.meshes.get(h);
+    if (node) this.glowLayer?.include(node);
+  }
+  private ensureGlowLayer(): LiteGlowLayer | null {
+    if (this.glowLayer) return this.glowLayer;
+    if (!this.scene || !this.engine) return null;
+    this.glowLayer = new LiteGlowLayer(BL as unknown as LiteGlowModule, this.engine, this.scene as unknown as LiteGlowScene);
+    return this.glowLayer;
   }
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
     const mesh = this.meshesByMeshId.get(meshId);
@@ -2518,6 +2652,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
         this.inFrame = true;
         try {
           this.buildLateMaterialGroups(scene);
+          if (this.pendingCasters.size) this.flushCasters();
           const now = performance.now();
           const interval = now - last;
           const dt = Math.min(0.1, interval / 1000);
@@ -2527,6 +2662,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
           this.onFrame?.(dt);
           this.stepParticles(dt);
           this.dropSwappedRenderables(scene);
+          this.glowLayer?.sync();
           this.tickMs = this.tickMs * 0.9 + (performance.now() - now) * 0.1;
         } finally {
           this.inFrame = false;
@@ -2548,7 +2684,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     register.then(() => {
       for (const [light, gen] of this.shadowGenerators) {
         const casters = this.shadowCasterMeshes.get(light);
-        if (casters && casters.length) BL.setShadowTaskCasterMeshes(gen, casters);
+        if (casters && casters.length) this.handOverCasters(light, gen, casters);
       }
       void BL.startEngine(engine);
     }).catch((err: unknown) => {
@@ -2657,7 +2793,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       const copy = list.slice();
       this.shadowCasterMeshes.set(light, copy);
       const gen = this.shadowGenerators.get(light);
-      if (gen) BL.setShadowTaskCasterMeshes(gen, copy);
+      if (gen) this.handOverCasters(light, gen, copy);
     }
   }
 
@@ -2779,6 +2915,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.shadowGenerators.clear();
     this.shadowCasters.clear();
     this.shadowCasterMeshes.clear();
+    this.pluginShadowCasters.clear();
+    this.pendingCasters.clear();
     this.sceneRegistered = false;
     this.onBeforeRenderHooked = false;
     this.animationGroups.clear();
@@ -2798,5 +2936,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.freeLabelSlots = [];
     this.glowMeshes.clear();
     this.glowSpec = null;
+    this.glowLayer?.dispose();
+    this.glowLayer = null;
   }
 }
