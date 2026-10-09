@@ -197,11 +197,14 @@ interface ThreeComposerLike {
   dispose?(): void;
 }
 interface ThreePostModules {
-  EffectComposer: new (r: unknown) => ThreeComposerLike;
+  EffectComposer: new (r: unknown, rt?: unknown) => ThreeComposerLike;
   RenderPass: new (s: unknown, c: unknown) => ThreePassLike & { camera: unknown };
   UnrealBloomPass: UnrealBloomCtor;
   OutputPass: new () => ThreePassLike;
 }
+
+/** MSAA samples on the composer's scene target (the canvas's own antialias does not reach it). */
+export const COMPOSER_MSAA_SAMPLES = 4;
 
 /** three/addons postprocessing, through non-literal specifiers (see init()). */
 async function loadThreePostModules(): Promise<ThreePostModules> {
@@ -2760,7 +2763,16 @@ export class ThreeAdapter implements RendererAdapter {
         const mods = (this.postModules ??= await loadThreePostModules());
         // Everything that wanted it may have gone while the addons loaded.
         if (!this.composerWanted() || !this.scene || !this.renderer) return false;
-        const composer = new mods.EffectComposer(this.renderer);
+        // The composer draws the scene into its own target, so the canvas's
+        // antialias no longer reaches it: without samples on that target every
+        // edge comes out jagged once glow or a plugin pass is on (Babylon's
+        // SSAO2 had the same gap; AmbientOcclusion sets textureSamples there).
+        const size = (this.renderer as unknown as { getSize(v: THREE.Vector2): THREE.Vector2 }).getSize(new T.Vector2());
+        const target = new T.WebGLRenderTarget(1, 1, { type: T.HalfFloatType, samples: COMPOSER_MSAA_SAMPLES });
+        target.texture.name = 'EffectComposer.rt1';
+        const composer = new mods.EffectComposer(this.renderer, target);
+        // A passed target is taken as CSS size; size it to the canvas × pixel ratio.
+        composer.setSize(size.x || 1, size.y || 1);
         this.scenePass = new mods.RenderPass(this.scene, this.renderCamera());
         this.outputPass = new mods.OutputPass();
         this.composer = composer;
