@@ -204,3 +204,104 @@ describe('ThreeAdapter glow — an enrolled subtree picks up late children', () 
     expect(masked(rootObj)).toEqual([]);
   });
 });
+
+/**
+ * The plugin-host post-pass hook (class-only, not the RendererAdapter
+ * interface). A plugin inserts a three/addons Pass; the composer is built on
+ * demand even with the glow layer off, and the OutputPass always stays last.
+ * Runs the real three/addons composer against a stub renderer that answers the
+ * size queries EffectComposer makes; nothing is drawn.
+ */
+describe('ThreeAdapter post-pass plugin hook', () => {
+  class FakePass {
+    enabled = true;
+    needsSwap = true;
+    camera: unknown = null;
+    sizes: [number, number][] = [];
+    setSize(w: number, h: number): void { this.sizes.push([w, h]); }
+    render(): void {}
+  }
+
+  function live(): ThreeAdapter {
+    const adapter = new ThreeAdapter();
+    const ta = adapter as unknown as { THREE: typeof THREE; scene: THREE.Scene; renderer: unknown; defaultCamera: THREE.PerspectiveCamera };
+    ta.THREE = THREE;
+    ta.scene = new THREE.Scene();
+    ta.defaultCamera = new THREE.PerspectiveCamera();
+    ta.renderer = {
+      getSize: (v: THREE.Vector2) => v.set(640, 360),
+      getPixelRatio: () => 1,
+      render() {},
+      setRenderTarget() {},
+      dispose() {},
+    };
+    return adapter;
+  }
+  const names = (a: ThreeAdapter) => a.getComposerPasses().map((p) => (p as object).constructor.name);
+
+  it('builds the composer for a plugin pass with glow off: scene, pass, output', async () => {
+    const adapter = live();
+    const pass = new FakePass();
+    expect(adapter.getComposerPasses()).toEqual([]);
+    expect(await adapter.addPostPass(pass)).toBe(true);
+    expect(names(adapter)).toEqual(['RenderPass', 'FakePass', 'OutputPass']);
+    expect(pass.sizes.at(-1)).toEqual([640, 360]); // sized by the composer
+  });
+
+  it("with bloom on, 'bloom' sits before UnrealBloomPass and 'output' after it; OutputPass stays last", async () => {
+    const adapter = live();
+    adapter.setGlowLayer({ intensity: 0.5 } as never);
+    const ao = new FakePass();
+    const grade = new FakePass();
+    await adapter.addPostPass(grade, { before: 'output' });
+    await adapter.addPostPass(ao, { before: 'bloom' });
+    const chain = adapter.getComposerPasses();
+    expect(names(adapter)).toEqual(['RenderPass', 'FakePass', 'UnrealBloomPass', 'FakePass', 'OutputPass']);
+    expect(chain[1]).toBe(ao);
+    expect(chain[3]).toBe(grade);
+    expect(adapter.getPostPasses()).toEqual([ao, grade]);
+  });
+
+  it('removing the last pass with glow off drops the composer; with glow on the bloom chain stays', async () => {
+    const adapter = live();
+    const pass = new FakePass();
+    await adapter.addPostPass(pass);
+    adapter.removePostPass(pass);
+    await Promise.resolve();
+    expect(adapter.getComposerPasses()).toEqual([]);
+
+    adapter.setGlowLayer({ intensity: 0.5 } as never);
+    await adapter.addPostPass(pass);
+    adapter.removePostPass(pass);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(names(adapter)).toEqual(['RenderPass', 'UnrealBloomPass', 'OutputPass']);
+  });
+
+  it('turning glow off keeps the plugin pass and takes bloom out', async () => {
+    const adapter = live();
+    adapter.setGlowLayer({ intensity: 0.5 } as never);
+    const pass = new FakePass();
+    await adapter.addPostPass(pass, { before: 'bloom' });
+    adapter.setGlowLayer(null);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(names(adapter)).toEqual(['RenderPass', 'FakePass', 'OutputPass']);
+  });
+
+  it('re-points a camera-carrying pass at the camera the frame draws through', async () => {
+    const adapter = live();
+    const pass = new FakePass();
+    await adapter.addPostPass(pass);
+    const cam = new THREE.PerspectiveCamera();
+    (adapter as unknown as { syncPostCameras(c: THREE.PerspectiveCamera): void }).syncPostCameras(cam);
+    expect(pass.camera).toBe(cam);
+    const scenePass = adapter.getComposerPasses()[0] as { camera: unknown };
+    expect(scenePass.camera).toBe(cam);
+  });
+
+  it('headless (no real WebGLRenderer) resolves false but keeps the pass for when one exists', async () => {
+    const adapter = new ThreeAdapter();
+    const pass = new FakePass();
+    expect(await adapter.addPostPass(pass)).toBe(false);
+    expect(adapter.getPostPasses()).toEqual([pass]);
+  });
+});

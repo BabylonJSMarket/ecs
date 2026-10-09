@@ -162,6 +162,51 @@ function sampleRockSurface(spec: ProceduralMeshSpec, dirX: number, dirY: number,
  * audio surface must degrade to silence instead of letting Three's
  * `AudioListener` throw on a missing `AudioContext`.
  */
+/** Where a plugin's post pass sits: before the bloom pass, or after it (before the OutputPass). */
+export type ThreePostPassSlot = 'bloom' | 'output';
+
+/** The slice of a three/addons `Pass` the composer bookkeeping touches. */
+interface ThreePassLike {
+  enabled: boolean;
+  setSize?(w: number, h: number): void;
+  dispose?(): void;
+}
+interface ThreeComposerLike {
+  passes: ThreePassLike[];
+  addPass(p: ThreePassLike): void;
+  removePass(p: ThreePassLike): void;
+  render(): void;
+  setSize(w: number, h: number): void;
+  dispose?(): void;
+}
+interface ThreePostModules {
+  EffectComposer: new (r: unknown) => ThreeComposerLike;
+  RenderPass: new (s: unknown, c: unknown) => ThreePassLike & { camera: unknown };
+  UnrealBloomPass: new (res: unknown, strength: number, radius: number, threshold: number) =>
+    ThreePassLike & { strength: number; threshold: number; radius: number };
+  OutputPass: new () => ThreePassLike;
+}
+
+/** three/addons postprocessing, through non-literal specifiers (see init()). */
+async function loadThreePostModules(): Promise<ThreePostModules> {
+  const ecSpec = 'three/addons/postprocessing/EffectComposer.js';
+  const rpSpec = 'three/addons/postprocessing/RenderPass.js';
+  const ubSpec = 'three/addons/postprocessing/UnrealBloomPass.js';
+  const opSpec = 'three/addons/postprocessing/OutputPass.js';
+  const [ec, rp, ub, op] = await Promise.all([
+    import(/* @vite-ignore */ ecSpec),
+    import(/* @vite-ignore */ rpSpec),
+    import(/* @vite-ignore */ ubSpec),
+    import(/* @vite-ignore */ opSpec),
+  ]);
+  return {
+    EffectComposer: (ec as { EffectComposer: ThreePostModules['EffectComposer'] }).EffectComposer,
+    RenderPass: (rp as { RenderPass: ThreePostModules['RenderPass'] }).RenderPass,
+    UnrealBloomPass: (ub as { UnrealBloomPass: ThreePostModules['UnrealBloomPass'] }).UnrealBloomPass,
+    OutputPass: (op as { OutputPass: ThreePostModules['OutputPass'] }).OutputPass,
+  };
+}
+
 function hasWebAudio(): boolean {
   const g = globalThis as { AudioContext?: unknown; webkitAudioContext?: unknown };
   return typeof g.AudioContext === 'function' || typeof g.webkitAudioContext === 'function';
@@ -331,15 +376,24 @@ export class ThreeAdapter implements RendererAdapter {
     if (event.child) this.enrolGlowSubtree(event.child);
   };
   /**
-   * The post-process composer (RenderPass → UnrealBloomPass → OutputPass), built
-   * lazily once a real WebGLRenderer + the three/addons postprocessing bundle are
-   * available. Stays undefined under the headless contract (the stub renderer is
-   * rejected by `ensureComposer`'s capability guard), so glow/bloom are pure
-   * config bookkeeping there.
+   * The post-process composer, built lazily once a real WebGLRenderer + the
+   * three/addons postprocessing bundle are available, and only while something
+   * wants it: the glow layer (bloom) or a plugin's pass ({@link addPostPass}).
+   * Its chain is always
+   *   RenderPass → plugin passes 'bloom' → UnrealBloomPass? → plugin passes 'output' → OutputPass
+   * so the OutputPass (tone mapping + sRGB) stays last whatever a plugin adds.
+   * Stays undefined under the headless contract (the stub renderer is rejected
+   * by `ensureComposer`'s capability guard), so glow/bloom are pure config
+   * bookkeeping there.
    */
-  private composer?: { render(): void; setSize(w: number, h: number): void; dispose?(): void };
-  private bloomPass?: { strength: number; threshold: number; radius: number };
-  private composerPending = false;
+  private composer?: ThreeComposerLike;
+  private bloomPass?: ThreePassLike & { strength: number; threshold: number; radius: number };
+  private scenePass?: ThreePassLike & { camera: unknown };
+  private outputPass?: ThreePassLike;
+  private postModules?: ThreePostModules;
+  private composerBuilding: Promise<boolean> | null = null;
+  /** Plugin passes, in insertion order, each with the built-in pass it sits before. */
+  private postPasses: { pass: ThreePassLike; before: ThreePostPassSlot }[] = [];
   /**
    * Camera-following sun: a DirectionalLight plus an emissive disc parked at a
    * fixed offset from the active camera (so it reads as an infinitely distant
@@ -2557,7 +2611,7 @@ export class ThreeAdapter implements RendererAdapter {
       }
       this.glowMeshes.clear();
     }
-    this.refreshComposer();
+    void this.refreshComposer();
   }
 
   addGlowMesh(h: MeshHandle): void {
@@ -2592,70 +2646,156 @@ export class ThreeAdapter implements RendererAdapter {
   }
 
   /**
-   * Reconcile the post-process composer with the current glow/bloom config.
-   * Selective glow is APPROXIMATED by the same UnrealBloom pass (the whitelist is
-   * tracked via {@link BLOOM_LAYER} for a future selective-bloom mask); both
-   * `glowSpec` drives the one bloom pass. Building the composer is
-   * lazy + capability-guarded, so headless callers (the contract) just bookkeep.
+   * Reconcile the post-process composer with what wants it: the glow layer
+   * (bloom) and any plugin passes. Selective glow is APPROXIMATED by the one
+   * UnrealBloom pass (the whitelist is tracked via {@link BLOOM_LAYER} for a
+   * future selective-bloom mask). Building the composer is lazy +
+   * capability-guarded, so headless callers (the contract) just bookkeep.
+   * Resolves true when the composer is live with the current chain.
    */
-  private refreshComposer(): void {
-    if (this.glowSpec) {
-      void this.ensureComposer();
-    } else {
+  private refreshComposer(): Promise<boolean> {
+    if (!this.composerWanted()) {
       this.disposeComposer();
+      return Promise.resolve(false);
     }
-    if (this.bloomPass) {
-      this.bloomPass.strength = this.glowSpec?.intensity ?? 0.8;
-    }
+    return this.ensureComposer().then((ok) => {
+      if (ok) this.syncComposerPasses();
+      return ok && !!this.composer;
+    });
   }
 
-  private async ensureComposer(): Promise<void> {
-    if (this.composer || this.composerPending) return;
+  private composerWanted(): boolean {
+    return !!this.glowSpec || this.postPasses.length > 0;
+  }
+
+  private ensureComposer(): Promise<boolean> {
+    if (this.composer) return Promise.resolve(true);
+    if (this.composerBuilding) return this.composerBuilding;
     const T = this.THREE;
     // Only a real WebGLRenderer (not the headless contract stub) exposes these —
     // bail otherwise so glow/bloom stay pure config bookkeeping in tests.
     const r = this.renderer as unknown as { getSize?: unknown; getPixelRatio?: unknown } | undefined;
     if (!T || !this.scene || !r || typeof r.getSize !== 'function' || typeof r.getPixelRatio !== 'function') {
-      return;
+      return Promise.resolve(false);
     }
-    this.composerPending = true;
-    try {
-      const ecSpec = 'three/addons/postprocessing/EffectComposer.js';
-      const rpSpec = 'three/addons/postprocessing/RenderPass.js';
-      const ubSpec = 'three/addons/postprocessing/UnrealBloomPass.js';
-      const opSpec = 'three/addons/postprocessing/OutputPass.js';
-      const [ec, rp, ub, op] = await Promise.all([
-        import(/* @vite-ignore */ ecSpec) as Promise<{ EffectComposer: new (r: unknown) => { addPass(p: unknown): void; render(): void; setSize(w: number, h: number): void; dispose(): void } }>,
-        import(/* @vite-ignore */ rpSpec) as Promise<{ RenderPass: new (s: unknown, c: unknown) => unknown }>,
-        import(/* @vite-ignore */ ubSpec) as Promise<{ UnrealBloomPass: new (res: unknown, strength: number, radius: number, threshold: number) => { strength: number; threshold: number; radius: number } }>,
-        import(/* @vite-ignore */ opSpec) as Promise<{ OutputPass: new () => unknown }>,
-      ]);
+    this.composerBuilding = (async (): Promise<boolean> => {
+      try {
+        const mods = (this.postModules ??= await loadThreePostModules());
+        // Everything that wanted it may have gone while the addons loaded.
+        if (!this.composerWanted() || !this.scene || !this.renderer) return false;
+        const composer = new mods.EffectComposer(this.renderer);
+        this.scenePass = new mods.RenderPass(this.scene, this.renderCamera());
+        this.outputPass = new mods.OutputPass();
+        this.composer = composer;
+        return true;
+      } catch (err) {
+        // Addons unavailable (or a non-GL renderer) — fall back to direct rendering.
+        console.warn('[ThreeAdapter] post-process composer unavailable; rendering without post-process', err);
+        return false;
+      } finally {
+        this.composerBuilding = null;
+      }
+    })();
+    return this.composerBuilding;
+  }
+
+  /** Lay the chain out again: scene, plugin passes, bloom, plugin passes, output. */
+  private syncComposerPasses(): void {
+    const composer = this.composer;
+    const mods = this.postModules;
+    if (!composer || !mods || !this.scenePass || !this.outputPass) return;
+    const T = this.THREE!;
+    if (this.glowSpec && !this.bloomPass) {
       const size = (this.renderer as unknown as { getSize(v: THREE.Vector2): THREE.Vector2 }).getSize(new T.Vector2());
-      const composer = new ec.EffectComposer(this.renderer);
-      composer.addPass(new rp.RenderPass(this.scene, this.renderCamera()));
-      const strength = this.glowSpec?.intensity ?? 0.8;
-      const bloom = new ub.UnrealBloomPass(
-        new T.Vector2(size.x || 1, size.y || 1),
-        strength,
-        0.4,
-        0.85,
-      );
-      composer.addPass(bloom);
-      composer.addPass(new op.OutputPass());
-      this.composer = composer;
-      this.bloomPass = bloom;
-    } catch (err) {
-      // Addons unavailable (or a non-GL renderer) — fall back to direct rendering.
-      console.warn('[ThreeAdapter] bloom composer unavailable; rendering without post-process', err);
-    } finally {
-      this.composerPending = false;
+      this.bloomPass = new mods.UnrealBloomPass(new T.Vector2(size.x || 1, size.y || 1), this.glowSpec.intensity ?? 0.8, 0.4, 0.85);
+    } else if (!this.glowSpec && this.bloomPass) {
+      this.bloomPass.dispose?.();
+      this.bloomPass = undefined;
     }
+    if (this.bloomPass) this.bloomPass.strength = this.glowSpec?.intensity ?? 0.8;
+    const order: ThreePassLike[] = [this.scenePass];
+    for (const p of this.postPasses) if (p.before === 'bloom') order.push(p.pass);
+    if (this.bloomPass) order.push(this.bloomPass);
+    for (const p of this.postPasses) if (p.before === 'output') order.push(p.pass);
+    order.push(this.outputPass);
+    for (const p of [...composer.passes]) composer.removePass(p);
+    for (const p of order) composer.addPass(p);
   }
 
   private disposeComposer(): void {
+    this.bloomPass?.dispose?.();
+    this.outputPass?.dispose?.();
     this.composer?.dispose?.();
     this.composer = undefined;
     this.bloomPass = undefined;
+    this.scenePass = undefined;
+    this.outputPass = undefined;
+  }
+
+  /** Point the scene pass, and any plugin pass that carries a camera, at the camera this frame draws through. */
+  private syncPostCameras(camera: THREE.PerspectiveCamera): void {
+    if (this.scenePass) this.scenePass.camera = camera;
+    for (const { pass } of this.postPasses) {
+      const p = pass as { camera?: unknown };
+      if ('camera' in p && p.camera !== camera) p.camera = camera;
+    }
+  }
+
+  // ─── Plugin host: post-processing passes ───
+  // Class-only, like getSceneObject/getMeshObject: a plugin (AmbientOcclusion's
+  // GTAO, say) inserts a three/addons Pass into the adapter's own composer
+  // instead of building a second one. Not on the RendererAdapter interface.
+
+  /**
+   * Insert a three `Pass` into the post chain. `before: 'bloom'` puts it
+   * straight after the scene render (where occlusion belongs: before bloom
+   * spreads light into the corners); `'output'` (the default) after bloom.
+   * Either way the OutputPass stays last. The composer is built on demand, so
+   * this works with the glow layer off. A pass with a `camera` field is
+   * re-pointed at the active camera every frame, as the scene pass is.
+   * The plugin owns the pass: removing it does not dispose it.
+   * Resolves true once the pass is live, false where there is no composer
+   * (no WebGL, the addons failed to load, or the pass was removed meanwhile).
+   */
+  addPostPass(pass: object, opts: { before?: ThreePostPassSlot } = {}): Promise<boolean> {
+    const p = pass as ThreePassLike;
+    const before = opts.before ?? 'output';
+    const existing = this.postPasses.find((e) => e.pass === p);
+    if (existing) existing.before = before;
+    else this.postPasses.push({ pass: p, before });
+    return this.refreshComposer().then((ok) => ok && this.postPasses.some((e) => e.pass === p));
+  }
+
+  /** Take a pass back out of the chain; drops the composer if nothing else wants it. */
+  removePostPass(pass: object): void {
+    const i = this.postPasses.findIndex((e) => e.pass === pass);
+    if (i < 0) return;
+    this.postPasses.splice(i, 1);
+    if (this.composer) this.composer.removePass(pass as ThreePassLike);
+    void this.refreshComposer();
+  }
+
+  /** The plugin passes in chain order, for tests and debugging. */
+  getPostPasses(): object[] {
+    return [
+      ...this.postPasses.filter((p) => p.before === 'bloom').map((p) => p.pass),
+      ...this.postPasses.filter((p) => p.before === 'output').map((p) => p.pass),
+    ];
+  }
+
+  /** The live composer's pass list (scene, plugin, bloom, output), or [] with no composer. */
+  getComposerPasses(): object[] {
+    return this.composer ? [...this.composer.passes] : [];
+  }
+
+  /** The THREE camera this frame draws through, for a pass that needs one at construction. */
+  getRenderCameraObject(): THREE.PerspectiveCamera | undefined {
+    return this.renderCamera();
+  }
+
+  /** The WebGLRenderer, for a pass that sizes itself from the drawing buffer. Undefined before init(). */
+  getRendererObject(): THREE.WebGLRenderer | undefined {
+    return this.renderer;
   }
 
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
@@ -2911,7 +3051,10 @@ export class ThreeAdapter implements RendererAdapter {
         // the camera, advance the CPU particle integrator, then draw — through
         // the bloom composer when one is live, else straight to the canvas.
         if (this.particleRuntimes.size > 0) this.updateParticles(dt, camera);
-        if (this.composer) this.composer.render();
+        if (this.composer) {
+          this.syncPostCameras(camera);
+          this.composer.render();
+        }
         else this.renderer!.render(this.scene!, camera);
       }
       // Mixers, billboards, particles and the draw together: everything after
@@ -2955,7 +3098,10 @@ export class ThreeAdapter implements RendererAdapter {
     if (this.scene) {
       const camera = this.renderCamera();
       if (camera) {
-        if (this.composer) this.composer.render();
+        if (this.composer) {
+          this.syncPostCameras(camera);
+          this.composer.render();
+        }
         else this.renderer.render(this.scene, camera);
       }
     }
@@ -2982,6 +3128,7 @@ export class ThreeAdapter implements RendererAdapter {
     this.particleRuntimes.clear();
     this.particleEmitters.clear();
     this.disposeComposer();
+    this.postPasses = [];
     this.glowMeshes.clear();
     this.glowSpec = null;
     this.dynamicTexturesByKey.clear();

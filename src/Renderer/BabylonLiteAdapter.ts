@@ -85,6 +85,27 @@ import type {
 
 /** Babylon Lite mesh-like node (Mesh extends SceneNode; both carry transforms). */
 type LiteMesh = BLNS.Mesh;
+
+/** Negate a coordinate across the RH↔LH Z mirror without minting −0 (0 stays 0). */
+const flipZ = (v: number): number => (v === 0 ? 0 : -v);
+
+/**
+ * Euler [x, y, z] (Babylon's yaw(Y)·pitch(X)·roll(Z) order — the inverse of
+ * applyEulerQuat before its mirror, and of BabylonAdapter's
+ * Quaternion.toEulerAngles) from a unit quaternion.
+ */
+function quatToEulerYXZ(qx: number, qy: number, qz: number, qw: number): [number, number, number] {
+  const zAxisY = qy * qz - qx * qw;
+  const limit = 0.4999999;
+  if (zAxisY < -limit) return [Math.PI / 2, 2 * Math.atan2(qy, qw), 0];
+  if (zAxisY > limit) return [-Math.PI / 2, 2 * Math.atan2(qy, qw), 0];
+  const sqw = qw * qw, sqz = qz * qz, sqx = qx * qx, sqy = qy * qy;
+  return [
+    Math.asin(-2 * zAxisY),
+    Math.atan2(2 * (qz * qx + qy * qw), sqz - sqx - sqy + sqw),
+    Math.atan2(2 * (qx * qy + qz * qw), -sqz - sqx + sqy + sqw),
+  ];
+}
 /** A loaded-model template: the container plus the names of its clips. */
 interface LiteTemplate {
   container: BLNS.AssetContainer;
@@ -477,6 +498,11 @@ export class BabylonLiteAdapter implements RendererAdapter {
       cy * cx * cz + sy * sx * sz, // w
     );
   }
+  /** The base-pivot offset of a mesh found by object (physics is keyed by meshId, pivots by handle). */
+  private pivotOffsetOf(mesh: LiteMesh): number {
+    for (const [h, off] of this.pivotOffsets) if (this.meshes.get(h) === mesh) return off;
+    return 0;
+  }
   setMeshScale(h: MeshHandle, sx: number, sy: number, sz: number): void {
     this.meshes.get(h)?.scaling.set(sx, sy, sz);
   }
@@ -520,9 +546,11 @@ export class BabylonLiteAdapter implements RendererAdapter {
     if (!mesh) return;
     // Record the override (used to size box colliders when physics lands) and
     // stamp Lite's boundMin/boundMax so getMeshBoundingBoxExtents reflects it.
+    // The box lives mirrored like the geometry: canonical z ∈ [min, max] is
+    // Lite z ∈ [−max, −min].
     this.boxExtents.set(h, { min: [...min], max: [...max] });
-    mesh.boundMin = [min[0], min[1], min[2]];
-    mesh.boundMax = [max[0], max[1], max[2]];
+    mesh.boundMin = [min[0], min[1], -max[2]];
+    mesh.boundMax = [max[0], max[1], -min[2]];
   }
   getMeshBoundingBoxExtents(h: MeshHandle): { min: Vec3; max: Vec3 } | null {
     const override = this.boxExtents.get(h);
@@ -532,7 +560,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const lo = mesh.boundMin;
     const hi = mesh.boundMax;
     if (!lo || !hi) return null;
-    return { min: [lo[0], lo[1], lo[2]], max: [hi[0], hi[1], hi[2]] };
+    return { min: [lo[0], lo[1], -hi[2]], max: [hi[0], hi[1], -lo[2]] }; // LH→RH
   }
   disposeMesh(h: MeshHandle): void {
     const mesh = this.meshes.get(h);
@@ -885,7 +913,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     if (entry) {
       entry.camera.target.x = x;
       entry.camera.target.y = y;
-      entry.camera.target.z = z;
+      entry.camera.target.z = -z; // RH→LH (see createArcCamera)
     }
   }
   getCameraTarget(h: CameraHandle, out: Vec3): Vec3 {
@@ -893,7 +921,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     if (entry) {
       out[0] = entry.camera.target.x;
       out[1] = entry.camera.target.y;
-      out[2] = entry.camera.target.z;
+      out[2] = -entry.camera.target.z; // LH→RH
     } else {
       out[0] = out[1] = out[2] = 0;
     }
@@ -902,7 +930,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
   getCameraAngles(h: CameraHandle): { alpha: number; beta: number; radius: number } {
     const entry = this.cameras.get(h);
     if (!entry) return { alpha: 0, beta: 0, radius: 0 };
-    return { alpha: entry.camera.alpha, beta: entry.camera.beta, radius: entry.camera.radius };
+    // createArcCamera hands Lite −alpha (azimuth flips under the Z mirror), so
+    // the canonical alpha is the negation of Lite's.
+    return { alpha: -entry.camera.alpha, beta: entry.camera.beta, radius: entry.camera.radius };
   }
   getCameraForward(h: CameraHandle, out: Vec3): Vec3 {
     // A free 6-DOF perspective camera carries a full orientation quaternion; its
@@ -921,12 +951,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
       out[2] = -1;
       return out;
     }
-    // Forward = unit(target − cameraPosition).
+    // Forward = unit(target − cameraPosition), measured in Lite's frame and
+    // handed back mirrored (LH→RH).
     const pos = BL.getCameraPosition(entry.camera);
     const t = entry.camera.target;
     const dx = t.x - pos.x;
     const dy = t.y - pos.y;
-    const dz = t.z - pos.z;
+    const dz = pos.z - t.z;
     const len = Math.hypot(dx, dy, dz) || 1;
     out[0] = dx / len;
     out[1] = dy / len;
@@ -951,21 +982,22 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
 
   getCameraRight(h: CameraHandle, out: Vec3): Vec3 {
-    // Babylon is left-handed: right = up × forward, with up = (0,1,0).
+    // getCameraForward is canonical (right-handed), so right = forward × up,
+    // exactly as BabylonAdapter/ThreeAdapter compute it: cross((fx,fy,fz),
+    // (0,1,0)) = (−fz, 0, fx), normalized over its horizontal length so a
+    // pitched camera still yields a unit vector.
     this.getCameraForward(h, out);
     const fx = out[0];
-    const fy = out[1];
     const fz = out[2];
-    // cross((0,1,0), (fx,fy,fz)) = (1·fz − 0·fy, 0·fx − 0·fz, 0·fy − 1·fx) = (fz, 0, -fx)
-    out[0] = fz;
+    const len = Math.hypot(fx, fz) || 1;
+    out[0] = -fz / len;
     out[1] = 0;
-    out[2] = -fx;
-    void fy;
+    out[2] = fx / len;
     return out;
   }
   nudgeCameraAlpha(h: CameraHandle, delta: number): void {
     const entry = this.cameras.get(h);
-    if (entry) entry.camera.alpha += delta;
+    if (entry) entry.camera.alpha -= delta; // canonical +delta = Lite −delta
   }
   nudgeCameraRadius(h: CameraHandle, delta: number): void {
     const entry = this.cameras.get(h);
@@ -1294,8 +1326,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const handle = this.makeHandle<MeshHandle>('model', id);
     if (root) {
       root.name = id;
-      if (spec?.position) root.position.set(spec.position[0], spec.position[1], spec.position[2]);
-      if (spec?.rotation) root.rotation.set(spec.rotation[0], spec.rotation[1], spec.rotation[2]);
+      // RH→LH, the same mirror loadMesh applies (see createArcCamera).
+      if (spec?.position) root.position.set(spec.position[0], spec.position[1], -spec.position[2]);
+      if (spec?.rotation) this.applyEulerQuat(root, spec.rotation[0], spec.rotation[1], spec.rotation[2]);
       if (spec?.scale !== undefined) root.scaling.set(spec.scale, spec.scale, spec.scale);
       root.visible = false; // start parked; setModelVisible reveals it
       BL.addToScene(scene, root);
@@ -1486,13 +1519,14 @@ export class BabylonLiteAdapter implements RendererAdapter {
 
   physicsSetBodyVelocity(meshId: string, vx: number, vy: number, vz: number): void {
     const agg = this.aggregates.get(meshId);
-    if (agg && this.havokWorld) BL.setPhysicsBodyLinearVelocity(this.havokWorld, agg.body, { x: vx, y: vy, z: vz });
+    // RH→LH: a velocity is an ordinary vector, so only Z flips.
+    if (agg && this.havokWorld) BL.setPhysicsBodyLinearVelocity(this.havokWorld, agg.body, { x: vx, y: vy, z: flipZ(vz) });
   }
 
   physicsSetGravity(x: number, y: number, z: number): void {
     // Kept as well as applied, so a call made while the WASM is still loading
     // becomes the gravity the world is created with (see BabylonAdapter).
-    this.gravity = { x, y, z };
+    this.gravity = { x, y, z: flipZ(z) }; // RH→LH, like every other vector
     if (this.havokWorld) BL.setPhysicsGravity(this.havokWorld, { ...this.gravity });
   }
 
@@ -1519,13 +1553,17 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const agg = this.aggregates.get(meshId);
     const mesh = this.meshesByMeshId.get(meshId);
     if (!agg || !mesh || !this.havokWorld) return null;
-    // The body drives the mesh, so the mesh transform IS the body pose. Lite
-    // only exposes a linear-velocity getter; angular reads back as zero.
+    // The body drives the mesh, so the mesh transform IS the body pose. All of
+    // it is read in Lite's left-handed frame and handed back canonical (LH→RH):
+    // position and linear velocity negate Z; the orientation un-conjugates the
+    // diag(1,1,−1) mirror (negate quaternion X and Y) before going to Euler.
+    // Lite only exposes a linear-velocity getter; angular reads back as zero.
     const lv = BL.getPhysicsBodyLinearVelocity(this.havokWorld, agg.body);
+    const q = mesh.rotationQuaternion;
     return {
-      position: [mesh.position.x, mesh.position.y, mesh.position.z],
-      rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
-      linearVelocity: [lv.x, lv.y, lv.z],
+      position: [mesh.position.x, mesh.position.y - this.pivotOffsetOf(mesh), flipZ(mesh.position.z)],
+      rotation: quatToEulerYXZ(-q.x, -q.y, q.z, q.w),
+      linearVelocity: [lv.x, lv.y, flipZ(lv.z)],
       angularVelocity: [0, 0, 0],
     };
   }
@@ -1535,21 +1573,23 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const mesh = this.meshesByMeshId.get(meshId);
     if (!agg || !mesh || !this.havokWorld) return;
     // Drive the mesh to the pose, read back its quaternion, and push both into
-    // the body so the restore is exact and visible immediately.
-    mesh.position.set(state.position[0], state.position[1], state.position[2]);
-    mesh.rotation.x = state.rotation[0];
-    mesh.rotation.y = state.rotation[1];
-    mesh.rotation.z = state.rotation[2];
+    // the body so the restore is exact and visible immediately. The snapshot is
+    // canonical (right-handed); into Lite it goes through the same mirror as
+    // setMeshPosition / setMeshRotation. Angular velocity is a PSEUDOVECTOR: a
+    // reflection flips it AND reverses its sense, so under z → −z it maps to
+    // (−x, −y, z), the same rule as a quaternion's vector part.
+    const px = state.position[0];
+    const py = state.position[1] + this.pivotOffsetOf(mesh);
+    const pz = flipZ(state.position[2]);
+    mesh.position.set(px, py, pz);
+    this.applyEulerQuat(mesh, state.rotation[0], state.rotation[1], state.rotation[2]);
     const q = mesh.rotationQuaternion;
-    BL.setPhysicsBodyTransform(
-      this.havokWorld,
-      agg.body,
-      { x: state.position[0], y: state.position[1], z: state.position[2] },
-      { x: q.x, y: q.y, z: q.z, w: q.w },
-    );
+    BL.setPhysicsBodyTransform(this.havokWorld, agg.body, { x: px, y: py, z: pz }, { x: q.x, y: q.y, z: q.z, w: q.w });
     BL.setPhysicsBodyLinearVelocity(this.havokWorld, agg.body, {
-      x: state.linearVelocity[0], y: state.linearVelocity[1], z: state.linearVelocity[2],
+      x: state.linearVelocity[0], y: state.linearVelocity[1], z: flipZ(state.linearVelocity[2]),
     });
+    const [ax, ay, az] = state.angularVelocity;
+    BL.setPhysicsBodyAngularVelocity(this.havokWorld, agg.body, { x: flipZ(ax), y: flipZ(ay), z: az });
   }
 
   physicsSetTimeStep(hz: number): void {
