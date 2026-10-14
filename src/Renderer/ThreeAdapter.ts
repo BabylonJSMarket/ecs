@@ -74,6 +74,7 @@ import type {
 } from './types';
 import type { Color, FrameTimings, RenderPassInfo, RenderStats } from './types';
 import { createSelectiveBloomPass, GLOW_LAYER_INDEX, type SelectiveBloomPass, type UnrealBloomCtor } from './threeSelectiveBloom';
+import { decodeRgbd, isEnvFile, parseEnvFile } from './threeEnvironment';
 
 export interface ThreeAdapterOptions {
   /**
@@ -205,6 +206,15 @@ interface ThreePostModules {
 
 /** MSAA samples on the composer's scene target (the canvas's own antialias does not reach it). */
 export const COMPOSER_MSAA_SAMPLES = 4;
+
+/**
+ * Three lights a surface from an environment map about pi times harder than
+ * Babylon does from the same file at the same `level` (measured on the
+ * SkeeBall scene: Three at 0.1 matched Babylon at 0.55). Babylon is the
+ * reference the scenes are authored against, so Three's
+ * `environmentIntensity` is scaled down to match it.
+ */
+export const THREE_ENV_SCALE = 1 / Math.PI;
 
 /** three/addons postprocessing, through non-literal specifiers (see init()). */
 async function loadThreePostModules(): Promise<ThreePostModules> {
@@ -2191,11 +2201,107 @@ export class ThreeAdapter implements RendererAdapter {
   updateSkyboxSun(_h: SkyboxHandle, _sunDirection: Vec3, _sunColor?: Color): void {}
   disposeSkybox(_h: SkyboxHandle): void {}
 
-  // IBL on Three needs PMREMGenerator + a different file format than Babylon's
-  // .env — no-op for now; a future implementation would load HDR/EXR + run
-  // PMREM, then assign to scene.environment.
-  setEnvironmentTexture(_url: string, _opts?: EnvironmentTextureOpts): void {}
-  clearEnvironmentTexture(): void {}
+  /**
+   * Image-based light, as Babylon's `scene.environmentTexture`: it lights and
+   * reflects, and draws nothing. A Babylon `.env` is read by
+   * threeEnvironment.ts (RGBD faces → a half-float cubemap); anything else
+   * goes to Three's HDRLoader as an equirect. Either way PMREMGenerator
+   * prefilters it and `level` becomes `scene.environmentIntensity`.
+   * Fire-and-forget like Lite's: errors are logged, not thrown.
+   */
+  setEnvironmentTexture(url: string, opts?: EnvironmentTextureOpts): void {
+    const T = this.THREE;
+    const scene = this.scene;
+    const renderer = this.renderer as unknown as { capabilities?: unknown } | undefined;
+    this.envLevel = (opts?.level ?? 1) * THREE_ENV_SCALE;
+    if (scene) scene.environmentIntensity = this.envLevel;
+    // The headless contract stub has no GL renderer to prefilter with.
+    if (!T || !scene || !renderer?.capabilities) return;
+    const ticket = ++this.envTicket;
+    void this.loadEnvironment(T, url)
+      .then((env) => {
+        if (ticket !== this.envTicket || !this.scene) {
+          env.dispose();
+          return;
+        }
+        this.clearEnvironmentTexture(false);
+        this.envTarget = env;
+        this.scene.environment = env.texture;
+        this.scene.environmentIntensity = this.envLevel;
+      })
+      .catch((err: unknown) => console.error('[ThreeAdapter] setEnvironmentTexture failed', url, err));
+  }
+
+  clearEnvironmentTexture(cancel = true): void {
+    if (cancel) this.envTicket++;
+    if (this.scene) this.scene.environment = null;
+    this.envTarget?.dispose();
+    this.envTarget = undefined;
+  }
+
+  private envTicket = 0;
+  private envLevel = 1;
+  private envTarget?: THREE.WebGLRenderTarget;
+
+  private async loadEnvironment(T: typeof THREE, url: string): Promise<THREE.WebGLRenderTarget> {
+    const renderer = this.renderer as THREE.WebGLRenderer;
+    const pmrem = new T.PMREMGenerator(renderer);
+    try {
+      if (isEnvFile(url)) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const env = parseEnvFile(await res.arrayBuffer());
+        const cube = new T.CubeTexture();
+        cube.type = T.HalfFloatType;
+        cube.colorSpace = T.LinearSRGBColorSpace;
+        cube.minFilter = T.LinearFilter;
+        cube.magFilter = T.LinearFilter;
+        cube.generateMipmaps = false;
+        const faces = await Promise.all(env.faces.map((f) => this.decodeEnvFace(T, f, env.imageType)));
+        faces.forEach((face, i) => {
+          face.type = cube.type;
+          face.colorSpace = cube.colorSpace;
+          face.minFilter = cube.minFilter;
+          face.magFilter = cube.magFilter;
+          face.generateMipmaps = false;
+          (cube.images as unknown[])[i] = face;
+        });
+        cube.needsUpdate = true;
+        const target = pmrem.fromCubemap(cube);
+        cube.dispose();
+        faces.forEach((f) => f.dispose());
+        return target;
+      }
+      const spec = 'three/addons/loaders/HDRLoader.js';
+      const { HDRLoader } = (await import(/* @vite-ignore */ spec)) as {
+        HDRLoader: new () => { loadAsync(u: string): Promise<THREE.DataTexture> };
+      };
+      const equirect = await new HDRLoader().loadAsync(url);
+      equirect.mapping = T.EquirectangularReflectionMapping;
+      const target = pmrem.fromEquirectangular(equirect);
+      equirect.dispose();
+      return target;
+    } finally {
+      pmrem.dispose();
+    }
+  }
+
+  /** One RGBD face image → a linear half-float DataTexture. */
+  private async decodeEnvFace(T: typeof THREE, bytes: Uint8Array, type: string): Promise<THREE.DataTexture> {
+    const bitmap = await createImageBitmap(new Blob([bytes as BlobPart], { type }), {
+      colorSpaceConversion: 'none',
+      premultiplyAlpha: 'none',
+    });
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext('2d', { colorSpace: 'srgb' } as CanvasRenderingContext2DSettings)!;
+    ctx.drawImage(bitmap, 0, 0);
+    const rgba = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    bitmap.close();
+    const linear = decodeRgbd(rgba, new Float32Array(rgba.length));
+    const half = new Uint16Array(linear.length);
+    for (let i = 0; i < linear.length; i++) half[i] = T.DataUtils.toHalfFloat(linear[i]);
+    return new T.DataTexture(half, canvas.width, canvas.height, T.RGBAFormat, T.HalfFloatType);
+  }
 
   setMeshSkin(handle: MeshHandle, spec: MeshSkinSpec): void {
     const obj = this.meshes.get(handle);
