@@ -445,6 +445,15 @@ export class BabylonLiteAdapter implements RendererAdapter {
     // same canvas; it reuses the engine and gets a fresh scene.
     let engine = LITE_ENGINES.get(canvas);
     if (!engine) {
+      // Browsers only expose WebGPU on a secure page (https:// or localhost).
+      // Without this the failure is "reading 'requestAdapter' of undefined".
+      if (!(globalThis.navigator as { gpu?: unknown } | undefined)?.gpu) {
+        throw new Error(
+          globalThis.isSecureContext === false
+            ? 'Babylon Lite needs WebGPU, and browsers only allow it on https:// or localhost. Open this page over https.'
+            : 'Babylon Lite needs WebGPU, and this browser has none.',
+        );
+      }
       engine = await BL.createEngine(canvas);
       LITE_ENGINES.set(canvas, engine);
     }
