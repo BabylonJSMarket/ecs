@@ -21,3 +21,20 @@ describe('boxUvsLikeThree', () => {
     expect(uv[0]).toBeCloseTo(uv[2]!, 9);
   });
 });
+
+describe('boxGeometryLikeThree', () => {
+  it("is Three's BoxGeometry, vertex for vertex: positions, normals, uvs and indices", async () => {
+    const { boxGeometryLikeThree } = await import('./meshGeometry');
+    const [w, h, d] = [0.78, 0.03, 2.7];
+    const g = new BoxGeometry(w, h, d);
+    const mine = boxGeometryLikeThree(w, h, d);
+    const close = (a: ArrayLike<number>, b: ArrayLike<number>) => {
+      expect(a.length).toBe(b.length);
+      for (let i = 0; i < a.length; i++) expect(a[i]).toBeCloseTo(b[i]!, 6);
+    };
+    close(mine.positions, g.getAttribute('position').array);
+    close(mine.normals, g.getAttribute('normal').array);
+    close(mine.uvs, g.getAttribute('uv').array);
+    expect(Array.from(mine.indices)).toEqual(Array.from(g.getIndex()!.array));
+  });
+});

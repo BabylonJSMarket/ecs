@@ -26,7 +26,7 @@
 
 import type * as BLNS from '@babylonjs/lite';
 import * as BL from '@babylonjs/lite';
-import { mirrorZ } from './meshGeometry';
+import { boxGeometryLikeThree, mirrorZ } from './meshGeometry';
 import { LiteGlowLayer, type LiteGlowModule, type LiteGlowScene } from './liteGlowLayer';
 
 import type {
@@ -315,6 +315,40 @@ function buildIcosphere(depth: number): { dirs: Array<[number, number, number]>;
   return { dirs, indices };
 }
 
+/**
+ * Lite 1.8.0 bug workaround. Setting `mesh.material` queues a swap
+ * (processMaterialSwaps) that adds the new renderable but never removes the
+ * old one: the mesh draws twice, and once the old one's buffers are freed
+ * every frame fails WebGPU validation ("Buffer used in submit while
+ * destroyed") and the canvas stays black. Lite's own rebuildSceneMesh does
+ * remove it; this is that missing step, run right before the swap is queued.
+ * It bit the skee balls: meshes made before the scene's first build, whose
+ * texture maps arrived after it.
+ */
+function dropStaleRenderables(scene: unknown, mesh: unknown): void {
+  const sc = scene as {
+    _renderables?: { mesh: unknown }[];
+    _renderableVersion?: number;
+    _groups?: Map<unknown, unknown[]>;
+  } | null;
+  const list = sc?._renderables;
+  if (!list) return;
+  // Its build group too: the group's uniform updater keeps writing the old
+  // per-mesh buffer for every mesh still listed, after the swap frees it.
+  const build = (mesh as { material?: { _buildGroup?: unknown } }).material?._buildGroup;
+  const group = build ? sc!._groups?.get(build) : undefined;
+  const gi = group ? group.indexOf(mesh) : -1;
+  if (gi >= 0) group!.splice(gi, 1);
+  let dropped = false;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i]!.mesh === mesh) {
+      list.splice(i, 1);
+      dropped = true;
+    }
+  }
+  if (dropped && typeof sc!._renderableVersion === "number") sc!._renderableVersion++;
+}
+
 export class BabylonLiteAdapter implements RendererAdapter {
   readonly kind = 'babylon-lite' as const;
 
@@ -559,10 +593,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
 
     mesh.name = id;
 
-    // Non-uniform box: Lite only takes a uniform size, so scale to width/height/depth.
+    // A box gets Three's box, to size: Lite only takes a uniform size, and
+    // its faces swap u and v the way Babylon's do, so a texture ran across a
+    // box here and along it on Three (meshGeometry.boxGeometryLikeThree).
     if (prim.kind === 'box') {
-      const base = prim.width ?? prim.height ?? prim.depth ?? 1;
-      mesh.scaling.set((prim.width ?? base) / base, (prim.height ?? base) / base, (prim.depth ?? base) / base);
+      const m = mirrorZ(boxGeometryLikeThree(prim.width ?? 1, prim.height ?? 1, prim.depth ?? 1));
+      BL.resizeMeshGeometry(engine, mesh, m.positions, m.normals, m.indices, m.uvs);
+      mesh.scaling.set(1, 1, 1);
     }
 
     // Base-pivot: Lite primitives are centered on the origin like Babylon, so
@@ -699,6 +736,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
         ...(ao ? { occlusionTexture: ao, occlusionStrength: 1 } : rough ? { occlusionStrength: 0 } : {}),
       });
       if (tiled) (textured as { _hasUvTx?: boolean })._hasUvTx = true;
+      dropStaleRenderables(this.scene, mesh);
       mesh.material = textured;
     });
   }

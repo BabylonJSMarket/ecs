@@ -112,3 +112,45 @@ export function boxUvsLikeThree(
   }
   return uv;
 }
+
+/**
+ * A whole box, vertex for vertex the one Three's BoxGeometry builds (one
+ * segment per side): right-handed positions, face normals, Three's UV layout
+ * and winding. For engines whose own box swaps u and v (Babylon Lite builds a
+ * unit box and scales it); they hand this to their geometry path instead.
+ */
+export function boxGeometryLikeThree(width: number, height: number, depth: number): Required<MeshGeometry> {
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  type Axis = 0 | 1 | 2;
+  const plane = (u: Axis, v: Axis, w: Axis, udir: number, vdir: number, pw: number, ph: number, pd: number) => {
+    const base = positions.length / 3;
+    for (let iy = 0; iy < 2; iy++) {
+      for (let ix = 0; ix < 2; ix++) {
+        const p = [0, 0, 0];
+        const n = [0, 0, 0];
+        p[u] = (ix * pw - pw / 2) * udir;
+        p[v] = (iy * ph - ph / 2) * vdir;
+        p[w] = pd / 2;
+        n[w] = pd > 0 ? 1 : -1;
+        positions.push(p[0]!, p[1]!, p[2]!);
+        normals.push(n[0]!, n[1]!, n[2]!);
+        uvs.push(ix, 1 - iy);
+      }
+    }
+    const a = base;
+    const b = base + 2;
+    const c = base + 3;
+    const d = base + 1;
+    indices.push(a, b, d, b, c, d);
+  };
+  plane(2, 1, 0, -1, -1, depth, height, width);
+  plane(2, 1, 0, 1, -1, depth, height, -width);
+  plane(0, 2, 1, 1, 1, width, depth, height);
+  plane(0, 2, 1, 1, -1, width, depth, -height);
+  plane(0, 1, 2, 1, -1, width, height, depth);
+  plane(0, 1, 2, -1, -1, width, height, -depth);
+  return { positions, normals, uvs, indices };
+}
