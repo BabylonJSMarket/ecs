@@ -166,6 +166,11 @@ export interface DirectionalLightSpec {
      * casters and ignores it.
      */
     extent?: number;
+    /**
+     * How much light a shadow keeps, 0..1: 0 is a full shadow (what Three
+     * draws), 1 is none. Omit for Babylon's old 0.4. Lite ignores it.
+     */
+    darkness?: number;
   };
 }
 

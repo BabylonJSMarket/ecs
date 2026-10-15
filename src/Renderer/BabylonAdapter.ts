@@ -1554,7 +1554,7 @@ export class BabylonAdapter implements RendererAdapter {
       const gen = new ShadowGenerator(spec.shadow.mapSize, light);
       gen.usePercentageCloserFiltering = true;
       gen.filteringQuality = ShadowGenerator.QUALITY_HIGH;
-      gen.darkness = 0.4;
+      gen.darkness = spec.shadow.darkness ?? 0.4;
       gen.bias = 0.001;
       this.shadowGenerators.set(handle, gen);
     }
