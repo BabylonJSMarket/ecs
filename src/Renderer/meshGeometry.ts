@@ -67,3 +67,48 @@ export function mirrorZ(geom: MeshGeometry): {
   const indices = Uint32Array.from(geom.indices);
   return { positions, normals, indices, uvs: geom.uvs ? Float32Array.from(geom.uvs) : undefined };
 }
+
+/**
+ * Box UVs laid out the way Three's BoxGeometry lays them, from each vertex's
+ * position and face normal. Babylon's CreateBox maps every face with u and v
+ * swapped (its top face runs u along z, Three's along x), so one texture drew
+ * across a box in one engine and along it in the other: a skee-ball lane's
+ * planks ran lengthwise on Three and crosswise on Babylon. Three's layout is
+ * the reference; the face normal picks the formula.
+ *
+ *   ±x: u = ∓z/d + ½, v = y/h + ½      ±y: u = x/w + ½, v = ½ ∓ z/d
+ *   ±z: u = ±x/w + ½, v = y/h + ½
+ */
+export function boxUvsLikeThree(
+  positions: ArrayLike<number>,
+  normals: ArrayLike<number>,
+  width: number,
+  height: number,
+  depth: number,
+): Float32Array {
+  const count = positions.length / 3;
+  const uv = new Float32Array(count * 2);
+  for (let i = 0; i < count; i++) {
+    const x = positions[3 * i]!;
+    const y = positions[3 * i + 1]!;
+    const z = positions[3 * i + 2]!;
+    const nx = normals[3 * i]!;
+    const ny = normals[3 * i + 1]!;
+    const nz = normals[3 * i + 2]!;
+    let u: number;
+    let v: number;
+    if (Math.abs(nx) >= Math.abs(ny) && Math.abs(nx) >= Math.abs(nz)) {
+      u = (nx > 0 ? -z : z) / depth + 0.5;
+      v = y / height + 0.5;
+    } else if (Math.abs(ny) >= Math.abs(nz)) {
+      u = x / width + 0.5;
+      v = 0.5 - (ny > 0 ? z : -z) / depth;
+    } else {
+      u = (nz > 0 ? x : -x) / width + 0.5;
+      v = y / height + 0.5;
+    }
+    uv[2 * i] = u;
+    uv[2 * i + 1] = v;
+  }
+  return uv;
+}

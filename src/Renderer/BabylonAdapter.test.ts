@@ -708,3 +708,33 @@ describe('BabylonAdapter createMesh — pbr: true without textures', () => {
   })
 })
 
+
+describe('BabylonAdapter box UVs match Three', () => {
+  it("a box carries Three's BoxGeometry UVs, so one texture runs the same way in both", async () => {
+    const { BoxGeometry } = await import('three');
+    const adapter = new BabylonAdapter();
+    adapter.engine = new NullEngine();
+    adapter.scene = new Scene(adapter.engine);
+    adapter.scene.useRightHandedSystem = true;
+    const [w, h, d] = [0.78, 0.03, 2.7];
+    const mesh = adapter.getMeshObject(adapter.createMesh('lane', { kind: 'box', width: w, height: h, depth: d }))!;
+    const pos = mesh.getVerticesData('position')!;
+    const uv = mesh.getVerticesData('uv')!;
+    const nor = mesh.getVerticesData('normal')!;
+    const g = new BoxGeometry(w, h, d);
+    const tp = g.getAttribute('position').array;
+    const tn = g.getAttribute('normal').array;
+    const tuv = g.getAttribute('uv').array;
+    // Match each Babylon corner to Three's corner at the same place on the same face.
+    for (let i = 0; i < pos.length / 3; i++) {
+      let j = -1;
+      for (let k = 0; k < tp.length / 3; k++) {
+        const same = [0, 1, 2].every((a) => Math.abs(tp[3 * k + a]! - pos[3 * i + a]!) < 1e-6 && Math.abs(tn[3 * k + a]! - nor[3 * i + a]!) < 1e-6);
+        if (same) j = k;
+      }
+      expect(j, `vertex ${i}`).toBeGreaterThanOrEqual(0);
+      expect(uv[2 * i]).toBeCloseTo(tuv[2 * j]!, 6);
+      expect(uv[2 * i + 1]).toBeCloseTo(tuv[2 * j + 1]!, 6);
+    }
+  });
+});

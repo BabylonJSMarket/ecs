@@ -57,7 +57,7 @@ import {
   SceneInstrumentation,
   EngineInstrumentation,
 } from '@babylonjs/core';
-import { computeNormals } from './meshGeometry';
+import { boxUvsLikeThree, computeNormals } from './meshGeometry';
 import type { AssetContainer, AudioEngineV2, Bone, Camera as BabylonCamera, InstancedMesh, InstantiatedEntries, Node, PostProcess, RenderTargetTexture, StaticSound, TransformNode } from '@babylonjs/core';
 import type { BaseTexture, Observer, PhysicsBody } from '@babylonjs/core';
 import '@babylonjs/loaders';
@@ -418,6 +418,19 @@ export class BabylonAdapter implements RendererAdapter {
           height: prim.height ?? 1,
           depth: prim.depth ?? 1,
         }, scene);
+        // Same texture layout as Three (meshGeometry.boxUvsLikeThree): Babylon
+        // swaps u and v on every face, so a texture ran across a box here and
+        // along it on Three.
+        mesh.setVerticesData(
+          VertexBuffer.UVKind,
+          boxUvsLikeThree(
+            mesh.getVerticesData(VertexBuffer.PositionKind) ?? [],
+            mesh.getVerticesData(VertexBuffer.NormalKind) ?? [],
+            prim.width ?? 1,
+            prim.height ?? 1,
+            prim.depth ?? 1,
+          ),
+        );
         if (prim.pivotAtBottom) this.applyPivotAtBottom(mesh, (prim.height ?? 1) / 2);
         break;
       case 'sphere':
