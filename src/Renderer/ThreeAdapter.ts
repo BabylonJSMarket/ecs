@@ -1733,6 +1733,16 @@ export class ThreeAdapter implements RendererAdapter {
     );
     this.scene!.add(light);
     this.scene!.add(light.target);
+    if (spec.shadow?.enabled) {
+      this.enableShadowMap();
+      light.castShadow = true;
+      light.shadow.mapSize.width = spec.shadow.mapSize;
+      light.shadow.mapSize.height = spec.shadow.mapSize;
+      light.shadow.camera.near = Math.max(0.1, spec.shadow.minZ);
+      light.shadow.camera.far = spec.shadow.maxZ;
+      light.shadow.bias = -0.0005;
+      light.shadow.normalBias = 0.01;
+    }
 
     const handle = this.makeHandle<LightHandle>('spotLight', id);
     this.lights.set(handle, light);

@@ -1003,6 +1003,22 @@ export function runRendererAdapterContract(
         const mesh = adapter.createMesh('ball', { kind: 'sphere' });
         expect(() => adapter.detachShadowCaster(adapter.attachShadowCaster(light, mesh))).not.toThrow();
       });
+
+      it('a spot light can cast shadows too', () => {
+        // A desk lamp: shadows fan out from the bulb instead of running parallel.
+        const light = adapter.createSpotLight('desk-lamp', {
+          position: [0, 2, 0],
+          direction: [0, -1, 0.3],
+          angle: 1.6,
+          intensity: 5,
+          range: 20,
+          shadow: { enabled: true, mapSize: 512, minZ: 0.2, maxZ: 20, darkness: 0 },
+        });
+        const mesh = adapter.createMesh('stamp', { kind: 'box' });
+        const caster = adapter.attachShadowCaster(light, mesh);
+        expect(caster).toBeDefined();
+        expect(() => adapter.detachShadowCaster(caster)).not.toThrow();
+      });
     });
 
     // ---------------------------------------------------------------------

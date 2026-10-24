@@ -1131,6 +1131,18 @@ export class BabylonLiteAdapter implements RendererAdapter {
 
     const handle = this.makeHandle<LightHandle>('spotLight', id);
     this.lights.set(handle, light);
+    if (spec.shadow?.enabled) {
+      // Like the directional: the shadow task finds the generator on the light.
+      const gen = BL.createPcfSpotlightShadowGenerator(this.requireEngine(), light, {
+        mapSize: spec.shadow.mapSize,
+        near: spec.shadow.minZ,
+        far: spec.shadow.maxZ,
+        ...(spec.shadow.darkness !== undefined ? { darkness: spec.shadow.darkness } : {}),
+      });
+      light.shadowGenerator = gen;
+      this.shadowGenerators.set(handle, gen);
+      if (this.pluginShadowCasters.size) this.setCasters(handle, [...this.pluginShadowCasters]);
+    }
     return handle;
   }
   setLightPosition(h: LightHandle, x: number, y: number, z: number): void {

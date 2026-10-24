@@ -243,6 +243,21 @@ export interface SpotLightSpec {
    * accent; an unbounded spot would leak down a whole corridor.
    */
   range?: number;
+  /**
+   * Cast shadows from the spot itself: a perspective shadow map from its
+   * position along its cone, so shadows spread out from the bulb the way a
+   * desk lamp's do (a directional light's run parallel). Casters register
+   * with `attachShadowCaster(thisLight, mesh)` exactly as for a directional.
+   * Omit → no shadow pass. `minZ`/`maxZ` bound the depth range from the
+   * light; `darkness` is how much light a shadow keeps (0 = full shadow).
+   */
+  shadow?: {
+    enabled: boolean;
+    mapSize: number;
+    minZ: number;
+    maxZ: number;
+    darkness?: number;
+  };
 }
 
 export interface ArcCameraSpec {

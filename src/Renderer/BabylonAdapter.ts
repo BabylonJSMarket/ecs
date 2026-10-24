@@ -1624,6 +1624,19 @@ export class BabylonAdapter implements RendererAdapter {
 
     const handle = this.makeHandle<LightHandle>('spotLight', id);
     this.lights.set(handle, light);
+    if (spec.shadow?.enabled) {
+      // A SpotLight is a ShadowLight: the generator renders a perspective map
+      // from the bulb, so shadows fan out from it.
+      light.shadowMinZ = spec.shadow.minZ;
+      light.shadowMaxZ = spec.shadow.maxZ;
+      const gen = new ShadowGenerator(spec.shadow.mapSize, light);
+      gen.usePercentageCloserFiltering = true;
+      gen.filteringQuality = ShadowGenerator.QUALITY_HIGH;
+      gen.darkness = spec.shadow.darkness ?? 0.4;
+      gen.bias = 0.0005;
+      gen.normalBias = 0.01;
+      this.shadowGenerators.set(handle, gen);
+    }
     return handle;
   }
   setLightPosition(h: LightHandle, x: number, y: number, z: number): void {
