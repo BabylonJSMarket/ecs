@@ -216,6 +216,29 @@ export const COMPOSER_MSAA_SAMPLES = 4;
  */
 export const THREE_ENV_SCALE = 1 / Math.PI;
 
+/**
+ * Babylon's PBR spot (the reference) fades off its axis as a spherical
+ * Gaussian, exp2(κ·(cos − 1)) with κ = −log2(0.01) / (1 − cos half-angle):
+ * full at the centre, 1% at the cone's edge, no hard rim, and the exponent
+ * ignored. Three's spot is a smoothstep over the penumbra, which holds near
+ * full light out to the rim; at the same light it read 2x brighter mid-pool
+ * (bare wood, 3 units out under a 6-unit-high spot: 151 vs 72). Swap Three's
+ * attenuation for Babylon's curve; then the pools agree point for point.
+ * Shader chunks are global and read when a material compiles, so this runs
+ * once, before any material exists. Returns whether the chunk was found.
+ */
+export function matchBabylonSpotFalloff(T: { ShaderChunk?: Record<string, string> }): boolean {
+  const chunks = T.ShaderChunk;
+  const src = chunks?.lights_pars_begin;
+  if (!chunks || typeof src !== 'string') return false;
+  const from = 'return smoothstep( coneCosine, penumbraCosine, angleCosine );';
+  const to = 'return exp2( 6.64385618977 / max( 1.0 - coneCosine, 1e-4 ) * ( angleCosine - 1.0 ) );';
+  if (src.includes(to)) return true;
+  if (!src.includes(from)) return false;
+  chunks.lights_pars_begin = src.replace(from, to);
+  return true;
+}
+
 /** three/addons postprocessing, through non-literal specifiers (see init()). */
 async function loadThreePostModules(): Promise<ThreePostModules> {
   const ecSpec = 'three/addons/postprocessing/EffectComposer.js';
@@ -440,6 +463,7 @@ export class ThreeAdapter implements RendererAdapter {
     const addonsSpec = 'three/addons/controls/OrbitControls.js';
     const T = await import(/* @vite-ignore */ threeSpec);
     this.THREE = T as unknown as typeof THREE;
+    matchBabylonSpotFalloff(this.THREE);
     const OrbitMod = (await import(/* @vite-ignore */ addonsSpec)) as unknown as {
       OrbitControls: new (...args: unknown[]) => unknown;
     };
@@ -1710,17 +1734,17 @@ export class ThreeAdapter implements RendererAdapter {
   createSpotLight(id: string, spec: SpotLightSpec): LightHandle {
     const T = this.requireThree();
     const diffuse = spec.diffuse ?? [1, 1, 1];
-    const exponent = spec.exponent ?? 2;
     // Three's `angle` is the HALF-angle (the spec carries the full aperture,
-    // Babylon-style) and it has no falloff exponent — `penumbra` (0 = hard
-    // edge, 1 = fully soft) is the nearest knob, so a higher exponent maps to a
-    // smaller penumbra. `distance` is Babylon's `range`.
+    // Babylon-style). `distance` is Babylon's `range`. The falloff across the
+    // pool is Babylon's PBR curve, patched into the shader at init (see
+    // matchBabylonSpotFalloff); like Babylon's PBR spot it ignores the
+    // exponent, so penumbra is unused.
     const light = new T.SpotLight(
       new T.Color().setRGB(diffuse[0], diffuse[1], diffuse[2], T.SRGBColorSpace),
       spec.intensity ?? 1,
       spec.range ?? 10,
       (spec.angle ?? Math.PI / 3) / 2,
-      Math.min(1, Math.max(0, 1 / (1 + exponent))),
+      1,
     );
     light.name = `SpotLight_${id}`;
     light.position.set(spec.position[0], spec.position[1], spec.position[2]);
