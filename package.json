@@ -1,6 +1,6 @@
 {
   "name": "@babylonjsmarket/ecs",
-  "version": "0.9.20",
+  "version": "0.9.21",
   "type": "module",
   "license": "MIT",
   "description": "Entity-Component-System framework with Babylon and Three renderer adapters",
@@ -43,7 +43,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-esm-extensions.mjs",
     "build:watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
