@@ -99,8 +99,19 @@ type LiteMesh = BLNS.Mesh;
  * would leave every part on screen.
  */
 function setNodeVisible(node: LiteMesh, visible: boolean): void {
-  if ((node as { _gpu?: unknown })._gpu !== undefined) node.visible = visible;
-  else BL.setMeshVisible(node, visible);
+  // Lite 1.37 made SceneNode.visible read-only: setMeshVisible sets it down
+  // the subtree and bumps Lite's private render version. A drawing mesh
+  // hides alone, so it goes through with its children out of view for the
+  // one call.
+  if ((node as { _gpu?: unknown })._gpu !== undefined) {
+    const kids = node.children;
+    (node as { children: unknown }).children = [];
+    try {
+      BL.setMeshVisible(node, visible);
+    } finally {
+      (node as { children: unknown }).children = kids;
+    }
+  } else BL.setMeshVisible(node, visible);
 }
 
 /** Label texture size, the same as ThreeAdapter's. */
@@ -662,9 +673,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
           : [1, 1, 1, mat.alpha ?? 1],
         metallicFactor: mat.metallic ?? 0,
         roughnessFactor: mat.roughness ?? 1,
-        emissiveColor: mat.emissive ? [mat.emissive[0], mat.emissive[1], mat.emissive[2]] : undefined,
         alpha: mat.alpha ?? 1,
       });
+      // Emissive is an opt-in extension since Lite 1.34 (tree shaking).
+      if (mat.emissive) BL.setPbrEmissive(pbr, [mat.emissive[0], mat.emissive[1], mat.emissive[2]]);
       mesh.material = pbr;
       if (hasTextures) this.loadTextureMaps(mesh, pbr, mat);
       return;
@@ -726,7 +738,6 @@ export class BabylonLiteAdapter implements RendererAdapter {
         baseColorFactor: base.baseColorFactor,
         metallicFactor: base.metallicFactor,
         roughnessFactor: base.roughnessFactor,
-        emissiveColor: base.emissiveColor,
         alpha: base.alpha,
         ...(albedo ? { baseColorTexture: albedo } : {}),
         ...(normal ? { normalTexture: normal } : {}),
@@ -735,6 +746,8 @@ export class BabylonLiteAdapter implements RendererAdapter {
         // one, the roughness map's red would darken the surface as AO.
         ...(ao ? { occlusionTexture: ao, occlusionStrength: 1 } : rough ? { occlusionStrength: 0 } : {}),
       });
+      const emissive = BL.getPbrEmissiveColor(base);
+      if (emissive) BL.setPbrEmissive(textured, [emissive[0], emissive[1], emissive[2]]);
       if (tiled) (textured as { _hasUvTx?: boolean })._hasUvTx = true;
       dropStaleRenderables(this.scene, mesh);
       mesh.material = textured;
@@ -915,7 +928,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     // fraction has origin top-left, so flip Y into NDC (+Y up).
     const aspect = (canvas.clientWidth || canvas.width || 1) / (canvas.clientHeight || canvas.height || 1);
     const vp = BL.getViewProjectionMatrix(cam, aspect);
-    const inv = BL.mat4Invert(vp);
+    const inv = BL.invertMat4(vp);
     if (!inv) {
       out[0] = out[1] = out[2] = 0;
       return out;
@@ -1731,7 +1744,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
         for (const ch of n.children ?? []) walk(ch as LiteMesh);
       };
       walk(root);
-      if (meshes.some((m) => m.name.includes(filter))) for (const m of meshes) if (!m.name.includes(filter)) m.visible = false;
+      if (meshes.some((m) => m.name.includes(filter))) for (const m of meshes) if (!m.name.includes(filter)) BL.setMeshVisible(m, false);
     }
     // Measure at rest: no turn, no offset, unit scale (the mirror kept).
     root.position.set(0, 0, 0);
@@ -1870,7 +1883,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       if (spec?.rotation) this.applyEulerQuat(root, spec.rotation[0], spec.rotation[1], spec.rotation[2]);
       this.seatGltfRoot(root, spec?.scale ?? 1);
       if (spec?.fit) this.applyModelFit(root, spec.fit, spec);
-      root.visible = false; // start parked; setModelVisible reveals it
+      BL.setMeshVisible(root, false); // start parked; setModelVisible reveals it
       BL.addToScene(scene, root);
       this.meshes.set(handle, root);
       this.instantiatedModelRoots.set(id, root);
@@ -1895,7 +1908,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
   }
   disposeModel(id: string, h: MeshHandle): void {
     const root = this.instantiatedModelRoots.get(id);
-    if (root) root.visible = false;
+    if (root) BL.setMeshVisible(root, false);
     this.instantiatedModelRoots.delete(id);
     this.meshesByMeshId.delete(id);
     for (const key of [...this.animationGroups.keys()]) {
@@ -1970,7 +1983,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
       const texture = BL.createTexture2DFromPixels(engine, pixels, LABEL_TEX_W, LABEL_TEX_H, { minFilter: 'linear', magFilter: 'linear', srgb: true });
       plane = BL.createPlane(engine, { width: size[0], height: size[1] });
       plane.name = `Label_${id}`;
-      plane.material = BL.createPbrMaterial({ unlit: true, baseColorTexture: texture, baseColorFactor: color, doubleSided: true, alphaBlend: true });
+      const labelMat = BL.createPbrMaterial({ baseColorTexture: texture, baseColorFactor: color, doubleSided: true, alphaBlend: true });
+      BL.setPbrUnlit(labelMat);
+      plane.material = labelMat;
       plane.pickable = false;
       if (spec.rotation) this.applyEulerQuat(plane, spec.rotation[0], spec.rotation[1], spec.rotation[2]);
       BL.addToScene(scene, plane);
@@ -2014,7 +2029,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       rec.plane.position.set(rec.position[0], rec.position[1], -rec.position[2]);
       const s = rec.scale ?? 1;
       rec.plane.scaling.set(s, s, s);
-      rec.plane.visible = rec.visible;
+      BL.setMeshVisible(rec.plane, rec.visible);
       const m = rec.plane.material as Partial<BLNS.PbrMaterialProps>;
       m.baseColorFactor = [rec.color[0], rec.color[1], rec.color[2], rec.color[3] * rec.alpha];
       BL.markMaterialUboDirty(rec.plane.material);
@@ -2321,13 +2336,14 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const emissive = spec.emissive ?? 0;
     const unlit = spec.shape === 'waypoint';
     if (unlit || emissive > 0) {
-      mesh.material = BL.createPbrMaterial({
-        unlit,
+      const glow = BL.createPbrMaterial({
         baseColorFactor: [color[0], color[1], color[2], 1],
-        emissiveColor: emissive > 0 ? [color[0] * emissive, color[1] * emissive, color[2] * emissive] : undefined,
         metallicFactor: 0,
         roughnessFactor: 1,
       });
+      if (unlit) BL.setPbrUnlit(glow);
+      if (emissive > 0) BL.setPbrEmissive(glow, [color[0] * emissive, color[1] * emissive, color[2] * emissive]);
+      mesh.material = glow;
     } else {
       const std = BL.createStandardMaterial();
       std.diffuseColor = [color[0], color[1], color[2]];
@@ -2583,13 +2599,18 @@ export class BabylonLiteAdapter implements RendererAdapter {
   setMeshEmissiveById(meshId: string, r: number, g: number, b: number, intensity: number): void {
     const mesh = this.meshesByMeshId.get(meshId);
     if (!mesh) return;
-    const m = mesh.material as { emissiveColor?: [number, number, number]; unlit?: boolean } | undefined;
+    const m = mesh.material as (BLNS.PbrMaterialProps & { diffuseColor?: unknown; emissiveColor?: [number, number, number] }) | undefined;
     if (!m) return;
+    // StandardMaterial still owns a plain emissiveColor; PBR keeps emissive and
+    // unlit in opt-in extensions (Lite 1.34+), read and written through BL.
+    const isStandard = m.diffuseColor !== undefined;
     // Unlit materials (waypoint gates, sun disc) output albedo directly, so a
     // multiplied emissive blows them to white under bloom/tonemap — clamp it.
     // Lit materials want emissive to overpower lighting → keep the 2.5× boost.
-    const e = m.unlit === true ? Math.min(1, intensity) : intensity * 2.5;
-    m.emissiveColor = [r * e, g * e, b * e];
+    const unlit = !isStandard && BL.getPbrUnlit(m) !== undefined;
+    const e = unlit ? Math.min(1, intensity) : intensity * 2.5;
+    if (isStandard) m.emissiveColor = [r * e, g * e, b * e];
+    else BL.setPbrEmissive(m, [r * e, g * e, b * e]);
   }
 
   // ─── Phase-3: camera-following sun + directional-light query ───

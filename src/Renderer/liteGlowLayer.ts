@@ -73,6 +73,7 @@ export interface LiteGlowRenderTask extends LiteGlowTask {
 }
 export interface LiteGlowMaterial {
   _buildGroup?: { _materialFamily?: string; _rebuildSingle?: unknown } | null;
+  /** A StandardMaterial's. PBR keeps its emissive in an extension (Lite 1.34+): read it with getPbrEmissiveColor. */
   emissiveColor?: [number, number, number] | null;
   emissiveTexture?: unknown;
   disableLighting?: boolean;
@@ -96,6 +97,7 @@ export interface LiteGlowModule {
     name: string; rt: Opaque; clr?: boolean; clrColor?: { r: number; g: number; b: number; a: number };
   }, engine: Opaque, scene: Opaque): LiteGlowRenderTask;
   createStandardMaterial(): LiteGlowMaterial;
+  getPbrEmissiveColor(material: LiteGlowMaterial): readonly [number, number, number] | undefined;
   markMaterialUboDirty(material: LiteGlowMaterial): void;
   createEffectWrapper(engine: Opaque, options: {
     name?: string;
@@ -498,7 +500,8 @@ export class LiteGlowLayer {
   /** Follow the source's emissive colour on its stand-in (a new map is a new stand-in). */
   private copyEmissive(e: Entry): void {
     const stand = e.stand!;
-    const src = e.source.emissiveColor ?? [0, 0, 0];
+    const pbr = e.source._buildGroup?._materialFamily === 'pbr';
+    const src = (pbr ? this.L.getPbrEmissiveColor(e.source) : e.source.emissiveColor) ?? [0, 0, 0];
     const cur = stand.emissiveColor!;
     if (cur[0] === src[0] && cur[1] === src[1] && cur[2] === src[2]) return;
     stand.emissiveColor = [src[0], src[1], src[2]];

@@ -17,6 +17,8 @@ import {
 
 const STD = { _materialFamily: 'standard', _rebuildSingle: () => ({}) };
 const PBR = { _materialFamily: 'pbr', _rebuildSingle: () => ({}) };
+/** A PBR source: Lite 1.34+ keeps its emissive off the public fields. */
+type PbrGlowMaterial = LiteGlowMaterial & { _emissiveColor?: [number, number, number] };
 const SHADER = { _materialFamily: 'shader', _rebuildSingle: () => ({}) };
 
 /** A recording stand-in for the slice of Lite the layer drives. */
@@ -65,6 +67,8 @@ function harness() {
       return t;
     },
     createStandardMaterial: () => ({ _buildGroup: STD, emissiveColor: [0, 0, 0] }),
+    // As Lite does it: a PBR material's emissive lives on a private field.
+    getPbrEmissiveColor: (m) => (m as PbrGlowMaterial)._emissiveColor,
     markMaterialUboDirty: (m) => void dirty.push(m),
     createEffectWrapper: (_e, o) => ({ fx: o.name, blend: o.blend }),
     disposeEffectWrapper: (w) => void disposed.push(w),
@@ -121,7 +125,7 @@ describe('LiteGlowLayer', () => {
   it('an enrolled lit mesh draws an emissive stand-in that follows its source', () => {
     const h = harness();
     h.layer.setSettings({ intensity: 0.5, blurKernelSize: 16 });
-    const src: LiteGlowMaterial = { _buildGroup: PBR, emissiveColor: [2, 0.5, 0] };
+    const src: PbrGlowMaterial = { _buildGroup: PBR, _emissiveColor: [2, 0.5, 0] };
     const mesh: LiteGlowMesh = { material: src };
     const theirs = [vi.fn()];
     h.scene._meshDisposables!.set(mesh, theirs);
@@ -144,7 +148,7 @@ describe('LiteGlowLayer', () => {
     expect(last[0]!.data[6]).toBe(glowBlurRadius(16));
     expect(last[4]!.data[7]).toBe(glowGain(0.5));
     // The source's emissive changes → the stand-in follows, once.
-    src.emissiveColor = [1, 1, 1];
+    src._emissiveColor = [1, 1, 1];
     h.layer.sync();
     h.layer.sync();
     expect(stand.emissiveColor).toEqual([1, 1, 1]);
