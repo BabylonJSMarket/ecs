@@ -411,6 +411,22 @@ export abstract class System {
    * @param entity - Entity to check
    * @returns True if the entity matches all query criteria
    */
+  /**
+   * Called by the World just before `type` is removed from `entity`, while it
+   * is still attached. If losing it means this system no longer matches, the
+   * entity is removed NOW, so onEntityRemoved can still read the component.
+   * (Removing a component can only make a query match by dropping an excluded
+   * one; that add is left to the normal refresh after the removal.)
+   */
+  releaseBeforeRemoval(entity: Entity, type: ComponentType): void {
+    if (!this.entities.has(entity)) return;
+    const q = this.query;
+    const losesRequired = !!q.required?.includes(type);
+    const losesAnyOf =
+      !!q.anyOf?.includes(type) && !q.anyOf.some((t) => t !== type && entity.has(t));
+    if (losesRequired || losesAnyOf) this.removeEntity(entity);
+  }
+
   matchesQuery(entity: Entity): boolean {
     // Inactive entities never match
     if (!entity.active) {

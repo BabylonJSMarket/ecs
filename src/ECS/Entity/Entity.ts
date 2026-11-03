@@ -18,6 +18,11 @@ export const EntityEvents = {
   ACTIVATED: 'entity.activated',
   DEACTIVATED: 'entity.deactivated',
   COMPONENT_ADDED: 'entity.component.added',
+  /** Fired BEFORE a component is detached, while `entity.get(Type)` still
+   *  returns it. The World uses it to drop the entity from systems that stop
+   *  matching, so their onEntityRemoved still sees the component — the same
+   *  order entity destruction already has (systems first, components after). */
+  COMPONENT_REMOVING: 'entity.component.removing',
   COMPONENT_REMOVED: 'entity.component.removed',
   TAG_ADDED: 'entity.tag.added',
   TAG_REMOVED: 'entity.tag.removed',
@@ -256,6 +261,15 @@ export class Entity {
     if (!component) {
       return this;
     }
+
+    // Systems that will stop matching let go first, with the component still
+    // attached (see EntityEvents.COMPONENT_REMOVING).
+    this.eventBus.emit(EntityEvents.COMPONENT_REMOVING, {
+      entityId: this.id,
+      entity: this,
+      component,
+      type: ComponentClass,
+    });
 
     // Trigger cleanup lifecycle hook
     component.onDetach();

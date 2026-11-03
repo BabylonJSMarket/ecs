@@ -324,6 +324,16 @@ export class World {
     this.subscriptions.push(
       // Composition changed → re-check which systems this entity matches.
       this.eventBus.on(EntityEvents.COMPONENT_ADDED, refreshMembership),
+      // About to lose a component → systems that will stop matching let go
+      // while it is still attached, so onEntityRemoved can read it.
+      this.eventBus.on(
+        EntityEvents.COMPONENT_REMOVING,
+        (data: { entity?: Entity; type?: ComponentType }) => {
+          const e = data?.entity;
+          if (!e || !data.type || this.destroying.has(e.id)) return;
+          this.systems.forEach((system) => system.releaseBeforeRemoval(e, data.type!));
+        },
+      ),
       this.eventBus.on(EntityEvents.COMPONENT_REMOVED, refreshMembership),
       this.eventBus.on(EntityEvents.TAG_ADDED, refreshMembership),
       this.eventBus.on(EntityEvents.TAG_REMOVED, refreshMembership),
