@@ -169,6 +169,22 @@ export class World {
   private _paused: boolean = false;
 
   /**
+   * How fast game time runs: every system's `dt` is the frame's real time
+   * times this. 1 is real time, 4 is four times as fast (a long walk across
+   * town, a day going by), 0.5 is slow motion. Never below 0.
+   */
+  get timeScale(): number {
+    return this._timeScale;
+  }
+  set timeScale(v: number) {
+    const next = Number.isFinite(v) && v > 0 ? v : 0;
+    if (next === this._timeScale) return;
+    this._timeScale = next;
+    this.eventBus.emit('world.timeScale', { world: this, timeScale: next });
+  }
+  private _timeScale = 1;
+
+  /**
    * Maximum number of entities allowed in this world.
    */
   private maxEntities: number;
@@ -788,7 +804,7 @@ export class World {
    * - Updates each enabled system (respecting pause state)
    * - Emits "world.update.end" event
    *
-   * @param deltaTime - Time since last frame in seconds
+   * @param realDeltaTime - Real time since last frame in seconds; systems get it times `timeScale`
    */
   /**
    * Rolling per-system update cost in ms, or null when profiling is off.
@@ -804,7 +820,9 @@ export class World {
     this.systemTimings = on ? new Map() : null;
   }
 
-  update(deltaTime: number): void {
+  update(realDeltaTime: number): void {
+    // Game time: the frame's real time, sped up or slowed down by timeScale.
+    const deltaTime = realDeltaTime * this._timeScale;
     // Auto-initialize on first update
     if (!this._initialized) {
       this.initialize();
