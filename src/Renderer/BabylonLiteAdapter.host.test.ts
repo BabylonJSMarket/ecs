@@ -41,6 +41,10 @@ vi.mock('@babylonjs/lite', async (importOriginal) => ({
   }),
   updateTexture2DFromPixels: vi.fn(),
   setShadowTaskCasterMeshes: vi.fn(),
+  // The thin-instance primer: record it instead of making GPU buffers.
+  createBox: vi.fn(() => ({ name: '', material: null as unknown, pickable: true })),
+  setThinInstances: vi.fn(),
+  addToScene: vi.fn(),
 }));
 
 const { BabylonLiteAdapter } = await import('./BabylonLiteAdapter');
@@ -557,5 +561,91 @@ describe('BabylonLiteAdapter caster hand-over waits for the material family', ()
     a.removeShadowCasterNode(chunk);
     ia.flushCasters();
     expect(ia.pendingCasters.size).toBe(0);
+  });
+});
+
+describe('BabylonLiteAdapter thin instances that arrive after the PBR build (Lite 1.37)', () => {
+  const pbr = Object.assign(async () => ({ renderables: [] }), { _materialFamily: 'pbr', _rebuildSingle: () => ({}) });
+  const std = Object.assign(async () => ({ renderables: [] }), { _materialFamily: 'standard' });
+  const widen = (a: unknown, s: unknown) => (a as { widenPbrGroupForLateMeshes(s: unknown): void }).widenPbrGroupForLateMeshes(s);
+
+  it('lacksThinInstanceCode: only a thin-instanced mesh, and only when the PBR build loaded no thin-instance code', async () => {
+    const { lacksThinInstanceCode } = await import('./BabylonLiteAdapter');
+    const ti = { thinInstances: {} };
+    expect(lacksThinInstanceCode({ _pbrGeomContext: { _syncThinInstanceForDraw: null } }, ti)).toBe(true);
+    expect(lacksThinInstanceCode({ _pbrGeomContext: { _syncThinInstanceForDraw: () => null } }, ti)).toBe(false);
+    expect(lacksThinInstanceCode({}, ti)).toBe(false); // no PBR build yet: the first build sees it
+    expect(lacksThinInstanceCode({ _pbrGeomContext: {} }, { thinInstances: null })).toBe(false);
+    expect(lacksThinInstanceCode({ _pbrGeomContext: {} }, null)).toBe(false);
+  });
+
+  it("wraps the PBR group's widening test so a late thin-instanced mesh takes Lite's full-rebuild path", () => {
+    const a = new BabylonLiteAdapter();
+    const texCaps = Object.assign((m: unknown) => (m === 'needs-texture-caps' ? 2 : 0), { _c: 7 });
+    const pbrGroup = Object.assign([] as unknown[], { _w: texCaps as unknown });
+    const stdGroup = Object.assign([] as unknown[], { _w: undefined as unknown });
+    const scene = { _groups: new Map<unknown, unknown>([[std, stdGroup], [pbr, pbrGroup]]), _pbrGeomContext: { _syncThinInstanceForDraw: null as unknown } };
+    widen(a, scene);
+    const w = pbrGroup._w as ((m: unknown) => unknown) & { _c?: number };
+    expect(w).not.toBe(texCaps);
+    expect(w._c).toBe(7); // Lite reads the caps the build loaded back off it
+    expect(w('needs-texture-caps')).toBe(2);
+    expect(w({ thinInstances: {} })).toBe(true);
+    expect(w({})).toBe(false);
+    expect(stdGroup._w).toBeUndefined();
+    // Once wrapped, a later frame leaves it alone; a group rebuild replaces it and it is wrapped again.
+    widen(a, scene);
+    expect(pbrGroup._w).toBe(w);
+    pbrGroup._w = null;
+    scene._pbrGeomContext._syncThinInstanceForDraw = () => null;
+    widen(a, scene);
+    const again = pbrGroup._w as unknown as ((m: unknown) => unknown) & { _c?: number };
+    expect(again._c).toBeUndefined();
+    expect(again({ thinInstances: {} })).toBe(false);
+  });
+
+  it('a scene with no groups, or no PBR group, is left alone', () => {
+    const a = new BabylonLiteAdapter();
+    expect(() => widen(a, {})).not.toThrow();
+    const stdGroup = Object.assign([] as unknown[], { _w: undefined });
+    widen(a, { _groups: new Map([[std, stdGroup]]) });
+    expect(stdGroup._w).toBeUndefined();
+  });
+
+  it('holds a thin-instanced caster until the PBR build has thin-instance code (its shadow drawing would throw)', async () => {
+    const BL = await import('@babylonjs/lite');
+    const set = BL.setShadowTaskCasterMeshes as unknown as ReturnType<typeof vi.fn>;
+    const a = new BabylonLiteAdapter();
+    const ia = a as unknown as { shadowGenerators: Map<unknown, unknown>; flushCasters(): void; pendingCasters: Map<unknown, unknown>; scene: unknown };
+    const ctx = { _syncThinInstanceForDraw: null as unknown };
+    ia.scene = { _pbrGeomContext: ctx };
+    const gen = { _preloadShadowTask: vi.fn(() => Promise.resolve()) };
+    const light = 'light' as unknown as LightHandle;
+    ia.shadowGenerators.set(light, gen);
+    set.mockClear();
+    a.addShadowCasterNode({ name: 'block', thinInstances: {}, material: { _buildGroup: pbr } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(set).not.toHaveBeenCalled();
+    ctx._syncThinInstanceForDraw = () => null;
+    ia.flushCasters();
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BabylonLiteAdapter thin-instance primer', () => {
+  it('adds one unpickable Standard box with a single zero-scale instance, so every Standard build loads thin-instance code', async () => {
+    const BL = await import('@babylonjs/lite');
+    const { addThinInstancePrimer } = await import('./BabylonLiteAdapter');
+    const scene = { scene: true };
+    addThinInstancePrimer({} as never, scene as never);
+    const box = (BL.createBox as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)!.value as { name: string; material: { _buildGroup?: unknown }; pickable: boolean };
+    expect(box.name).toBe('bjsm-lite-thin-instance-primer');
+    expect(box.pickable).toBe(false);
+    expect(box.material._buildGroup).toBe((BL.createStandardMaterial() as { _buildGroup?: unknown })._buildGroup);
+    const [mesh, matrices, count] = (BL.setThinInstances as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(mesh).toBe(box);
+    expect(count).toBe(1);
+    expect(Array.from(matrices as Float32Array)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    expect((BL.addToScene as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)).toEqual([scene, box]);
   });
 });

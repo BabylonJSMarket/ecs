@@ -11,7 +11,6 @@ import {
   type LiteGlowMesh,
   type LiteGlowRenderTask,
   type LiteGlowModule,
-  type LiteGlowRenderTask,
   type LiteGlowScene,
   type LiteGlowTask,
 } from './liteGlowLayer';

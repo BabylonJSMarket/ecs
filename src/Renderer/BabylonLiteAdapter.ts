@@ -227,6 +227,50 @@ interface LiteSceneInternals {
   _frameGraph?: { build(): void };
 }
 
+/** Lite's widening test on a material group (`group._w`, 1.37): truthy = this mesh needs a fresh group build. */
+type LiteWidening = ((mesh: unknown) => unknown) & { _c?: number; [WIDENED]?: true };
+/** A material group as {@link BabylonLiteAdapter.widenPbrGroupForLateMeshes} sees it. */
+interface LiteWidenableGroup {
+  _w?: LiteWidening | null;
+}
+/** Marks a widening test this adapter already wrapped. */
+const WIDENED = Symbol('bjsm.widened');
+
+/**
+ * True when `mesh` is thin-instanced but the scene's current PBR build loaded
+ * no thin-instance code (Lite 1.37 keeps that build's context on
+ * `scene._pbrGeomContext`).
+ */
+export function lacksThinInstanceCode(scene: unknown, mesh: unknown): boolean {
+  if (!(mesh as { thinInstances?: unknown } | null)?.thinInstances) return false;
+  const ctx = (scene as { _pbrGeomContext?: { _syncThinInstanceForDraw?: unknown } })._pbrGeomContext;
+  return !!ctx && typeof ctx._syncThinInstanceForDraw !== 'function';
+}
+
+/**
+ * Put one invisible thin-instanced StandardMaterial mesh in a new scene.
+ *
+ * Lite (1.37) builds the Standard group once, at registerScene, and loads its
+ * thin-instance code only if a mesh it has then is thin-instanced. A
+ * thin-instanced mesh drawn through that build later — a plugin's chunk that
+ * arrives after registration, or a glow / AO pass drawing a PBR chunk through
+ * an emissive Standard stand-in — gets no thin-instance code and, unlike PBR,
+ * no error: it draws ONE copy at its own transform. The glow pass then lost
+ * every wall of the city, so lights inside the blocks glowed through them.
+ * This mesh makes every Standard build load the code. It has one instance,
+ * scaled to nothing, so it draws no pixel.
+ */
+export function addThinInstancePrimer(engine: BLNS.EngineContext, scene: BLNS.SceneContext): void {
+  const primer = BL.createBox(engine, 1);
+  primer.name = 'bjsm-lite-thin-instance-primer';
+  primer.pickable = false;
+  primer.material = BL.createStandardMaterial();
+  const zero = new Float32Array(16);
+  zero[15] = 1;
+  BL.setThinInstances(primer, zero, 1);
+  BL.addToScene(scene, primer);
+}
+
 /** A Lite material family's group builder (`material._buildGroup`, 1.8.0). */
 type LiteGroupBuilder = ((scene: unknown, meshes: unknown[]) => Promise<{ renderables: { order?: number; mesh?: unknown }[]; updater?: unknown }>) & {
   _rebuildSingle?: unknown;
@@ -504,6 +548,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     }
     this.engine = engine;
     this.scene = BL.createSceneContext(this.engine.surfaces[0]);
+    addThinInstancePrimer(engine, this.scene);
     void _opts;
   }
 
@@ -1578,8 +1623,10 @@ export class BabylonLiteAdapter implements RendererAdapter {
    * pass draws a caster through its material family's single-mesh builder,
    * which Lite makes with the family's first mesh — a plugin's first PBR
    * mesh is built a frame or two after it lands (buildLateMaterialGroups), and
-   * a list handed over before then threw on record. Called after the preload
-   * and every frame.
+   * a list handed over before then threw on record. Likewise a thin-instanced
+   * caster while the PBR build has no thin-instance code (see
+   * widenPbrGroupForLateMeshes): it waits for the group rebuild. Called after
+   * the preload and every frame.
    */
   private flushCasters(): void {
     for (const [light, { gen, list }] of this.pendingCasters) {
@@ -1589,6 +1636,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       }
       const drawable = list.every((m) => {
         const group = (m as { material?: { _buildGroup?: { _rebuildSingle?: unknown } } | null }).material?._buildGroup;
+        if (lacksThinInstanceCode(this.scene, m)) return false;
         return !group || typeof group._rebuildSingle === 'function';
       });
       if (!drawable) continue;
@@ -2731,6 +2779,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
       BL.onBeforeRender(scene, () => {
         this.inFrame = true;
         try {
+          this.widenPbrGroupForLateMeshes(scene);
           this.buildLateMaterialGroups(scene);
           if (this.pendingCasters.size) this.flushCasters();
           const now = performance.now();
@@ -2814,6 +2863,43 @@ export class BabylonLiteAdapter implements RendererAdapter {
     );
   }
   private lateBuilding = false;
+
+  /**
+   * Let a thin-instanced mesh that arrives after the PBR group was built be drawn.
+   *
+   * Lite (1.37) builds the PBR group once and decides THEN whether to load the
+   * thin-instance code, by looking at the meshes it has. A mesh added later goes
+   * through that build's single-mesh rebuild, which has no thin-instance code:
+   * its first frame throws `syncThinInstanceForDraw is not a function` and the
+   * whole frame is lost — a black canvas. ProceduralCity's buildings and
+   * TownCrowd's citizens are all thin-instanced and all arrive late.
+   *
+   * Lite already has the way out: before it rebuilds a queued mesh it asks the
+   * group's widening test (`group._w`), and a mesh that needs more than the
+   * build loaded is sent down the first-build path, which rebuilds the whole
+   * PBR group with the right code. Its test only knows about texture caps, so
+   * this wraps it to also say yes for a thin-instanced mesh when the group's
+   * build has no thin-instance code. Re-wrapped each frame, since every group
+   * build replaces it. Internal fields, each checked; a Lite without them
+   * leaves this a no-op.
+   */
+  private widenPbrGroupForLateMeshes(scene: BLNS.SceneContext): void {
+    const s = scene as unknown as LiteSceneInternals;
+    const groups = s._groups;
+    if (!(groups instanceof Map)) return;
+    for (const [builder, group] of groups) {
+      if ((builder as { _materialFamily?: string })._materialFamily !== 'pbr') continue;
+      const g = group as unknown as LiteWidenableGroup;
+      const current = g._w;
+      if (current && (current as LiteWidening)[WIDENED]) return;
+      const wrapped: LiteWidening = Object.assign(
+        (mesh: unknown): unknown => current?.(mesh) || lacksThinInstanceCode(s, mesh),
+        { _c: current?._c, [WIDENED]: true as const },
+      );
+      g._w = wrapped;
+      return;
+    }
+  }
 
   /**
    * Take a queued mesh's OLD renderable out of the scene before Lite rebuilds it.
