@@ -449,6 +449,14 @@ export class BabylonLiteAdapter implements RendererAdapter {
   private pluginShadowCasters = new Set<LiteMesh>();
   /** Set once the scene is registered with the engine (required before anything renders). */
   private sceneRegistered = false;
+  /**
+   * Set while registerScene's first build runs, cleared when it settles. A
+   * texture swap waits for it: Lite builds each material group after an
+   * await (it loads the group's shader code), and a swap in that gap took
+   * the mesh out of the group being built, so Lite built an empty group and
+   * threw (CitizenLab on Lite, whose floor maps load that fast).
+   */
+  private firstBuild: Promise<unknown> | null = null;
 
   // ─── Havok physics (lazily WASM-loaded on first body, like BabylonAdapter) ───
   private havokWorld: BLNS.PhysicsWorld | null = null;
@@ -794,8 +802,13 @@ export class BabylonLiteAdapter implements RendererAdapter {
       const emissive = BL.getPbrEmissiveColor(base);
       if (emissive) BL.setPbrEmissive(textured, [emissive[0], emissive[1], emissive[2]]);
       if (tiled) (textured as { _hasUvTx?: boolean })._hasUvTx = true;
-      dropStaleRenderables(this.scene, mesh);
-      mesh.material = textured;
+      const swap = () => {
+        if (this.engine !== engine || mesh.material !== base) return;
+        dropStaleRenderables(this.scene, mesh);
+        mesh.material = textured;
+      };
+      if (this.firstBuild) void this.firstBuild.then(swap);
+      else swap();
     });
   }
 
@@ -2810,6 +2823,9 @@ export class BabylonLiteAdapter implements RendererAdapter {
     const register = this.shadowGenerators.size > 0
       ? BL.registerSceneWithShadowSupport(scene)
       : BL.registerScene(scene);
+    const settled = register.then(() => undefined, () => undefined);
+    this.firstBuild = settled;
+    void settled.then(() => { if (this.firstBuild === settled) this.firstBuild = null; });
     register.then(() => {
       for (const [light, gen] of this.shadowGenerators) {
         const casters = this.shadowCasterMeshes.get(light);
@@ -3084,6 +3100,7 @@ export class BabylonLiteAdapter implements RendererAdapter {
     this.pluginShadowCasters.clear();
     this.pendingCasters.clear();
     this.sceneRegistered = false;
+    this.firstBuild = null;
     this.onBeforeRenderHooked = false;
     this.animationGroups.clear();
     this.modelTemplates.clear();

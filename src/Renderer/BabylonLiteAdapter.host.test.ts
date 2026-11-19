@@ -45,6 +45,8 @@ vi.mock('@babylonjs/lite', async (importOriginal) => ({
   createBox: vi.fn(() => ({ name: '', material: null as unknown, pickable: true })),
   setThinInstances: vi.fn(),
   addToScene: vi.fn(),
+  // Texture maps: resolve at once, no device.
+  loadTexture2D: vi.fn(async (_engine: unknown, url: string) => ({ url })),
 }));
 
 const { BabylonLiteAdapter } = await import('./BabylonLiteAdapter');
@@ -233,6 +235,26 @@ describe('BabylonLiteAdapter plugin host accessors', () => {
     expect(after).not.toBe(before);
     expect(after).toEqual([rail]);
     expect(set.mock.calls.at(-1)![1]).toBe(after);
+  });
+
+  it('a texture swap waits for the first scene build, so Lite never builds a group emptied under it', async () => {
+    const BL = await import('@babylonjs/lite');
+    const a = new BabylonLiteAdapter();
+    const base = BL.createPbrMaterial({ baseColorFactor: [1, 1, 1, 1] });
+    const mesh = { material: base as unknown };
+    const group = [mesh];
+    internals(a).engine = { fake: 'engine' };
+    internals(a).scene = { _groups: new Map([[(base as { _buildGroup?: unknown })._buildGroup, group]]), _renderables: [] };
+    let finish!: () => void;
+    (a as unknown as { firstBuild: Promise<unknown> | null }).firstBuild = new Promise<void>((r) => { finish = r; });
+    (a as unknown as { loadTextureMaps(m: unknown, b: unknown, s: unknown): void }).loadTextureMaps(mesh, base, { albedoTexture: 'floor.png' });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    // Mid-build: the mesh stays in its group, on its first material.
+    expect(mesh.material).toBe(base);
+    expect(group).toEqual([mesh]);
+    finish();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(mesh.material).not.toBe(base);
   });
 
   it('stopLoop from inside a frame leaves Lite a callable frame callback (a round reset stops mid-frame)', () => {
