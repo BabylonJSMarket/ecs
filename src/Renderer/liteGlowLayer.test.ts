@@ -9,6 +9,7 @@ import {
   MAX_GLOW_TAPS,
   type LiteGlowMaterial,
   type LiteGlowMesh,
+  type LiteGlowRenderTask,
   type LiteGlowModule,
   type LiteGlowRenderTask,
   type LiteGlowScene,
@@ -67,6 +68,7 @@ function harness() {
       return t;
     },
     createStandardMaterial: () => ({ _buildGroup: STD, emissiveColor: [0, 0, 0] }),
+    addMeshToTask: (task: LiteGlowRenderTask, mesh: LiteGlowMesh, opts?: { material?: LiteGlowMaterial }) => task.addMesh!(mesh, opts),
     // As Lite does it: a PBR material's emissive lives on a private field.
     getPbrEmissiveColor: (m) => (m as PbrGlowMaterial)._emissiveColor,
     markMaterialUboDirty: (m) => void dirty.push(m),
@@ -120,6 +122,17 @@ describe('LiteGlowLayer', () => {
     expect(h.renderTasks[0]!.added).toHaveLength(0);
     expect(h.run()).toBe(0);
     expect(h.records).toHaveLength(0);
+  });
+
+  it('enrols through task.addMesh on a Lite without addMeshToTask', () => {
+    const h = harness();
+    delete (h.L as Partial<LiteGlowModule>).addMeshToTask;
+    h.layer.setSettings({ intensity: 0.5, blurKernelSize: 16 });
+    const mesh: LiteGlowMesh = { material: { _buildGroup: PBR, _emissiveColor: [1, 1, 1] } as PbrGlowMaterial };
+    h.scene.meshes.push(mesh);
+    h.layer.include(mesh);
+    h.layer.sync();
+    expect(h.renderTasks[0]!.added).toHaveLength(1);
   });
 
   it('an enrolled lit mesh draws an emissive stand-in that follows its source', () => {

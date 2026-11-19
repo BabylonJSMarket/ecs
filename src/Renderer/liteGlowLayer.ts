@@ -62,7 +62,8 @@ export interface LiteGlowTask {
   dispose(): void;
 }
 export interface LiteGlowRenderTask extends LiteGlowTask {
-  addMesh(mesh: LiteGlowMesh, opts?: { material?: LiteGlowMaterial }): void;
+  /** Lite before 1.37; since then the free function addMeshToTask. */
+  addMesh?(mesh: LiteGlowMesh, opts?: { material?: LiteGlowMaterial }): void;
   // Internal (Lite 1.8 render-task.js), spliced to take a mesh out.
   _renderables?: { mesh?: unknown }[];
   _opaqueBindings?: { renderable: { mesh?: unknown } }[];
@@ -97,6 +98,8 @@ export interface LiteGlowModule {
     name: string; rt: Opaque; clr?: boolean; clrColor?: { r: number; g: number; b: number; a: number };
   }, engine: Opaque, scene: Opaque): LiteGlowRenderTask;
   createStandardMaterial(): LiteGlowMaterial;
+  /** Lite 1.37+: a render task's mesh list is filled through this, not task.addMesh. */
+  addMeshToTask?(task: LiteGlowRenderTask, mesh: LiteGlowMesh, opts?: { material?: LiteGlowMaterial }): void;
   getPbrEmissiveColor(material: LiteGlowMaterial): readonly [number, number, number] | undefined;
   markMaterialUboDirty(material: LiteGlowMaterial): void;
   createEffectWrapper(engine: Opaque, options: {
@@ -461,7 +464,8 @@ export class LiteGlowLayer {
     const store = this.scene._meshDisposables;
     const had = store?.has(mesh) ?? false;
     const theirs = store?.get(mesh);
-    set.task.addMesh(mesh, { material });
+    if (this.L.addMeshToTask) this.L.addMeshToTask(set.task, mesh, { material });
+    else set.task.addMesh?.(mesh, { material });
     if (store) {
       const mine = store.get(mesh);
       if (mine !== theirs) entry.disposers = mine;
